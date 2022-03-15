@@ -1494,7 +1494,7 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
             if let ExprKind::Field(_, _) = lhs.kind {
                 unsupported_err!(expr.span, format!("field updates"), lhs);
             }
-            let is_init = if let ExprKind::Path(QPath::Resolved(
+            let not_mut_init = if let ExprKind::Path(QPath::Resolved(
                 None,
                 rustc_hir::Path { res: Res::Local(id), .. },
             )) = lhs.kind
@@ -1509,7 +1509,7 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
                 false
             };
             Ok(mk_expr(ExprX::Assign {
-                is_init,
+                not_mut_init,
                 lhs: expr_to_vir(bctx, lhs, ExprModifier::ADDR_OF)?,
                 rhs: expr_to_vir(bctx, rhs, modifier)?,
             }))
