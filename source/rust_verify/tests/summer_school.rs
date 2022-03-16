@@ -1131,3 +1131,9 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    #[test] e22_pass code! {
+
+    } => Ok(())
+}
