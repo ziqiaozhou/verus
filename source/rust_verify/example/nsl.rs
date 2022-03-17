@@ -26,15 +26,11 @@ fn aead_encrypt_impl(k:&Vec<u8>, n:&Vec<u8>, m:&Vec<u8>, aad:&Vec<u8>) -> Vec<u8
               m.len() <= max_size_t,
              ]);
     ensures(|c:Vec<u8>| [ equal(c.view(), aead_encrypt(k.view(), n.view(), m.view(), aad.view())) ]);
-// TODO
-//    #[no_mangle]
-//    pub extern "C" fn callable_from_c(x: i32) -> bool {
-//        x % 3 == 0
-//    }
-//    #[link(name = "my_c_library")]
-//    extern "C" {
-//        fn my_c_function(x: i32) -> bool;
-//    }
+    // TODO
+    //    #[link(name = "my_c_library")]
+    //    extern "C" {
+    //        fn my_c_function(x: i32) -> bool;
+    //    }
     panic!("Connect me to EverCrypt please")
 }
 
@@ -55,7 +51,7 @@ struct Indexer {
 #[verifier(external_body)]
 // TODO: What's the difference between lists of requires/ensures and conjunctions thereof?
 //       I eventually deduced that lists provide more fine-grained error reporting
-fn sample(#[spec] index:&mut Indexer, buffer:&mut Vec<u8>, count:u32) 
+fn sample(#[proof] index:&mut Indexer, buffer:&mut Vec<u8>, count:u32) 
 {
     requires(old(buffer).len() >= count);
     ensures([
@@ -174,8 +170,6 @@ fn session_impl_I(s:SessionImpl) -> Session
 }
 
 #[exec]
-//#[verifier(external_body)]
-// TODO: Why can't dst be marked &mut?
 fn memcpy(src:&Vec<u8>, dst_in:Vec<u8>, start:usize, end:usize, dst_start:usize) -> Vec<u8>
 {
     requires(0 <= start && start <= end && end <= src.view().len() &&
@@ -265,11 +259,11 @@ fn nsl_client1_impl(c:&ConfigImpl, s:&mut SessionImpl, #[proof] index:&mut Index
   // TODO: In Dafny, we allocate enc_nonce, plaintext, and aad.  For now, added them as arguments.
   // let mut enc_nonce = Vec { vec : std::vec::Vec::new(/*12*/) };
   let nA_holder = s.nA;
-  sample(&mut index, &mut enc_nonce, 12);
+  sample(index, &mut enc_nonce, 12);
   // TODO: Wanted to write:
   //    sample(&mut index_mut, &mut s.nA, 12);
   // but complex arguments to &mut are not currently supported, so I wrote this instead:
-  sample(&mut index, &mut nA_holder, 12);
+  sample(index, &mut nA_holder, 12);
   *s = SessionImpl { s : s.s, nA : nA_holder, nB : s.nB };        // Update nA field
 
   //let mut plaintext = Vec { vec : std::vec::Vec::new(/*36*/) };
