@@ -5,6 +5,7 @@ use builtin_macros::*;
 use crate::pervasive::*;
 
 #[is_variant]
+#[derive(PartialEq, Eq, Structural)]
 pub enum Option<A> {
     None,
     Some(A)
@@ -18,5 +19,11 @@ impl<A> Option<A> {
             Option::None => optb,
             Option::Some(s) => self,
         }
+    }
+
+    #[spec]
+    pub fn value(self) -> A {
+        recommends(self.is_Some());
+        self.get_Some_0()
     }
 }
