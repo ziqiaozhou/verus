@@ -7,8 +7,8 @@ use crate::pervasive::set::*;
 
 impl<A> Set<A> {
     #[spec] #[verifier(publish)]
-    pub fn map<F: Fn(A) -> A>(self, f: F) -> Set<A> {
-        Set::new(|a: A| exists(|x: A| self.contains(x) && equal(a, f(x))))
+    pub fn map<B, F: Fn(A) -> B>(self, f: F) -> Set<B> {
+        Set::new(|b: B| exists(|x: A| self.contains(x) && equal(b, f(x))))
     }
 
     #[spec] #[verifier(publish)]
