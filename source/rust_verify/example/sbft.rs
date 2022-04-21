@@ -196,7 +196,7 @@ mod messages {
 
         #[spec]
         pub fn wf(self) -> bool {
-            forall(|v| #[auto_trigger] self.votes.contains(v) >>= v.payload.xis_Prepare())
+            forall(|v| #[auto_trigger] self.votes.contains(v) >>= v.payload.is_Prepare())
         }
 
         #[spec]
@@ -230,17 +230,16 @@ mod messages {
             // All the ViewChange messages have to be for the same View. 
             && forall(|v| #[auto_trigger] self.msgs.contains(v) >>=
                          true
-                      && v.payload.xis_ViewChangeMsg()
+                      && v.payload.is_ViewChangeMsg()
                       && v.payload.wf()
-                      && v.payload.new_view() == view
+                      && v.payload.get_new_view() == view
                       )
             && unique_senders(self.msgs)
             && self.msgs.len() == quorum_size
         }
     }
 
-    // TODO(utaal): Frustrating blocker (see xis_ placeholder methods below)
-    //#[is_variant]
+    #[is_variant]
     pub enum Message {
         PrePrepare { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
         Prepare { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
@@ -251,30 +250,33 @@ mod messages {
     }
 
     impl Message {
-        #[spec] pub fn xis_PrePrepare(self) -> bool { true }
-        #[spec] pub fn xis_Prepare(self) -> bool { true }
-        #[spec] pub fn xis_ClientRequest(self) -> bool { true }
-        #[spec] pub fn xis_ViewChangeMsg(self) -> bool { true }
-        #[spec] pub fn xis_NewViewMsg(self) -> bool { true }
         // TODO(utaal): Ewww
-        #[spec] pub fn new_view(self) -> ViewNum {
-            //self.get_ViewChangeMsg_0()
-            ViewNum{value: 0}
+        #[spec] pub fn get_new_view(self) -> ViewNum {
+            recommends(self.is_ViewChangeMsg() || self.is_NewViewMsg());
+            match self {
+                Message::ViewChangeMsg { new_view, .. } => new_view,
+                Message::NewViewMsg { new_view, .. } => new_view,
+                _ => arbitrary()
+            }
         }
-        #[spec] pub fn certificates(self) -> Map<SequenceID, PreparedCertificate> {
-            Map::empty()
-            //self.get_ViewChangeMsg_1()
+        // TODO(utaal,jonh) meh
+        #[spec] pub fn get_view(self) -> ViewNum {
+            recommends(self.is_PrePrepare() || self.is_Prepare() || self.is_Commit());
+            match self {
+                Message::PrePrepare { view, .. } => view,
+                Message::Prepare { view, .. } => view,
+                Message::Commit { view, .. } => view,
+                _ => arbitrary(),
+            }
         }
-        #[spec] pub fn get_client_op(self) -> ClientOperation {
-            ClientOperation { sender: HostId{value: 0}, timestamp: 0 }
-        }
-        #[spec] pub fn xget_view(self) -> ViewNum {
-            ViewNum{value: 0}
-        }
-
         #[spec]
         pub fn wf(self) -> bool {
-            self.xis_ViewChangeMsg() >>= full_imap(self.certificates())
+            // TODO(jonh): Ewww
+            // self.is_ViewChangeMsg() >>= full_imap(self.certificates())
+            match self {
+                Message::ViewChangeMsg { certificates, .. } => full_imap(certificates),
+                _ => true,
+            }
         }
     }
 }
@@ -439,10 +441,10 @@ mod client {
         && v.wf(c)
         && msg_ops.is_send()
         && pending_requests(c, v) == 0
-        && msg.payload.xis_ClientRequest()
+        && msg.payload.is_ClientRequest()
         && msg.sender == c.my_id
-        && msg.payload.get_client_op().sender == c.my_id
-        && msg.payload.get_client_op().timestamp == v.last_request_timestamp + 1
+        && msg.payload.get_ClientRequest_client_op().sender == c.my_id
+        && msg.payload.get_ClientRequest_client_op().timestamp == v.last_request_timestamp + 1
         && vp == Variables {
             last_request_timestamp: v.last_request_timestamp + 1,
             ..vp }
@@ -559,7 +561,7 @@ mod replica {
             && full_imap(self.map)
             && forall(|x| #[auto_trigger]
                       self.map.contains(x) && self.map.index(x).is_Some()
-                      >>= self.map.index(x).value().payload.xis_PrePrepare())
+                      >>= self.map.index(x).value().payload.is_PrePrepare())
         }
     }
 
@@ -591,7 +593,7 @@ mod replica {
             && c.wf()
             && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
                      true
-                  && msg.payload.xis_ViewChangeMsg()
+                  && msg.payload.is_ViewChangeMsg()
                   && c.cluster_config.is_replica(msg.sender))
         }
     }
@@ -603,7 +605,7 @@ mod replica {
             && c.wf()
             && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
                      true
-                  && msg.payload.xis_NewViewMsg()
+                  && msg.payload.is_NewViewMsg()
                   && c.cluster_config.is_replica(msg.sender))
         }
     }
@@ -640,7 +642,7 @@ mod replica {
             Set::new(|vc_msg|
                    true
                 && v.view_change_msgs_recvd.msgs.contains(vc_msg)
-                && vc_msg.payload.new_view().value >= new_view.value);
+                && vc_msg.payload.get_new_view().value >= new_view.value);
         let senders = senders_of(relevant_vc_msgs);
         senders.len() >= c.cluster_config.byzantine_safe_quorum() //F+1
     }
@@ -650,7 +652,7 @@ mod replica {
         let vc_msgs_for_my_view = Set::new(| msg|
                                            true
                                        && v.view_change_msgs_recvd.msgs.contains(msg)
-                                       && msg.payload.new_view() == v.view
+                                       && msg.payload.get_new_view() == v.view
                                        );
         let senders = senders_of(vc_msgs_for_my_view);
            true
@@ -676,7 +678,7 @@ mod replica {
 //        // TODO(chris): Eeww. Having to type the out param is a bummer. Maybe macroland solves
 //        // this?
 //            forall(|other| prepare_certificates.contains(other) >>=
-//                out.prototype().xget_view().value >= other.prototype().xget_view().value)
+//                out.prototype().get_view().value >= other.prototype().get_view().value)
 //        ]);
         decreases(prepare_certificates.len());
 
@@ -691,7 +693,7 @@ mod replica {
 // thread 'rustc' panicked at 'unexpected SMT output: (error "line 8647 column 85: Sort mismatch at argument #2 for function (declare-fun messages.Message./NewViewMsg', rust_verify/src/verifier.rs:253:21
 //            let highest_of_rest = highest_view_prepare_certificate(rest);
             let highest_of_rest = any;  // XXX placeholder
-            if any.prototype().xget_view().value > highest_of_rest.prototype().xget_view().value {
+            if any.prototype().get_view().value > highest_of_rest.prototype().get_view().value {
                 any
             } else {
                 highest_of_rest
