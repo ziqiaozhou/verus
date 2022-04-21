@@ -169,7 +169,7 @@ mod messages {
     }
 
     #[spec]
-    fn senders_of(msgs: Set<NetMessage<Message>>) -> Set<HostId> {
+    pub fn senders_of(msgs: Set<NetMessage<Message>>) -> Set<HostId> {
         msgs.map(|msg: NetMessage<Message>| msg.sender)
     }
 
@@ -267,6 +267,9 @@ mod messages {
         }
         #[spec] pub fn get_client_op(self) -> ClientOperation {
             ClientOperation { sender: HostId{value: 0}, timestamp: 0 }
+        }
+        #[spec] pub fn xget_view(self) -> ViewNum {
+            ViewNum{value: 0}
         }
 
         #[spec]
@@ -605,7 +608,96 @@ mod replica {
         }
     }
 
-    
+    pub struct Variables {
+        view: ViewNum,
+        working_window: WorkingWindow,
+        view_change_msgs_recvd: ViewChangeMsgs,
+        new_view_msgs_recvd: NewViewMsgs,
+    }
+    impl Variables {
+        #[spec] fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && self.working_window.wf(c)
+            && self.view_change_msgs_recvd.wf(c)
+            && self.new_view_msgs_recvd.wf(c)
+        }
+    }
+
+    #[spec] fn primary_for_view(c: Constants, view: ViewNum) -> nat {
+        view.value % c.cluster_config.n()
+    }
+
+    #[spec] fn current_primary(c: Constants, v: Variables) -> nat {
+        recommends(v.wf(c));
+        primary_for_view(c, v.view)
+    }
+
+    // TODO(jonh): this was opaque in Dafny. Superstition?
+    #[spec] fn have_sufficient_vc_msgs_to_move_to(c: Constants, v: Variables, new_view: ViewNum) -> bool {
+        recommends(v.wf(c));
+        let relevant_vc_msgs =
+            Set::new(|vc_msg|
+                   true
+                && v.view_change_msgs_recvd.msgs.contains(vc_msg)
+                && vc_msg.payload.new_view().value >= new_view.value);
+        let senders = senders_of(relevant_vc_msgs);
+        senders.len() >= c.cluster_config.byzantine_safe_quorum() //F+1
+    }
+
+    // TODO(jonh): this was opaque in Dafny. Superstition?
+    #[spec] fn has_collected_proof_my_view_is_agreed(c: Constants, v: Variables) -> bool {
+        let vc_msgs_for_my_view = Set::new(| msg|
+                                           true
+                                       && v.view_change_msgs_recvd.msgs.contains(msg)
+                                       && msg.payload.new_view() == v.view
+                                       );
+        let senders = senders_of(vc_msgs_for_my_view);
+           true
+        && v.wf(c)
+        && (
+               false
+            || v.view.value == 0 // View 0 is active initially therefore it is initially agreed.
+            || senders.len() >= c.cluster_config.agreement_quorum()
+           )
+    }
+
+    // Constructively demonstrate that we can compute the certificate with the highest View.
+    #[spec] fn highest_view_prepare_certificate(prepare_certificates: Set<PreparedCertificate>) -> PreparedCertificate {
+        // TODO(chris): "only one call to recommends allowed"? Aw c'mooooon.
+        recommends([
+           forall(|cert| #[auto_trigger] prepare_certificates.contains(cert) >>= cert.wf() && !cert.empty()),
+            prepare_certificates.len() > 0
+        ]);
+        // TODO(chris): "only one call to ensures allowed"? Aw c'mooooon.
+        // TODO(jonh): guess this is a lemma
+//        ensures(|out| [
+//            prepare_certificates.contains(out),
+//        // TODO(chris): Eeww. Having to type the out param is a bummer. Maybe macroland solves
+//        // this?
+//            forall(|other| prepare_certificates.contains(other) >>=
+//                out.prototype().xget_view().value >= other.prototype().xget_view().value)
+//        ]);
+        decreases(prepare_certificates.len());
+
+        let any = choose(|any| prepare_certificates.contains(any));
+        if prepare_certificates.len() == 1 {
+            // Nothing to prove in a fn; maybe needed in a lemma?
+            // Library.SingletonSetAxiom(any, prepare_certificates);
+            any
+        } else {
+            let rest = prepare_certificates.difference(set![any]);
+            // TODO(chris): Showstopper! If this line is enabled:
+// thread 'rustc' panicked at 'unexpected SMT output: (error "line 8647 column 85: Sort mismatch at argument #2 for function (declare-fun messages.Message./NewViewMsg', rust_verify/src/verifier.rs:253:21
+//            let highest_of_rest = highest_view_prepare_certificate(rest);
+            let highest_of_rest = any;  // XXX placeholder
+            if any.prototype().xget_view().value > highest_of_rest.prototype().xget_view().value {
+                any
+            } else {
+                highest_of_rest
+            }
+        }
+    }
 }
 
 mod distributed_system {
