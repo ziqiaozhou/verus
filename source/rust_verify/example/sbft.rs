@@ -507,32 +507,6 @@ mod replica {
         }
     }
 
-    struct ViewChangeMsgs { msgs: Set<network::NetMessage<Message>> }
-    impl ViewChangeMsgs {
-        #[spec] fn wf(self, c: Constants) -> bool {
-               true
-            && c.wf()
-            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
-                     true
-                  && msg.payload.xis_ViewChangeMsg()
-                  && c.cluster_config.is_replica(msg.sender))
-        }
-    }
-
-    struct NewViewMsgs { msgs: Set<network::NetMessage<Message>> }
-    impl NewViewMsgs {
-        #[spec] fn wf(self, c: Constants) -> bool {
-               true
-            && c.wf()
-            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
-                     true
-                  && msg.payload.xis_NewViewMsg()
-                  && c.cluster_config.is_replica(msg.sender))
-        }
-    }
-
-    
-
     // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item
     //type PrepareProofSet = Map<HostId, NetMessage<Message>>
     // TODO(utaal): Maps can't Structural, either.
@@ -606,6 +580,32 @@ mod replica {
             && forall(|seqID| #[auto_trigger] self.commits_rcvd.contains(seqID) >>= self.commits_rcvd.index(seqID).wf(c))
         }
     }
+
+    struct ViewChangeMsgs { msgs: Set<network::NetMessage<Message>> }
+    impl ViewChangeMsgs {
+        #[spec] fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
+                     true
+                  && msg.payload.xis_ViewChangeMsg()
+                  && c.cluster_config.is_replica(msg.sender))
+        }
+    }
+
+    struct NewViewMsgs { msgs: Set<network::NetMessage<Message>> }
+    impl NewViewMsgs {
+        #[spec] fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
+                     true
+                  && msg.payload.xis_NewViewMsg()
+                  && c.cluster_config.is_replica(msg.sender))
+        }
+    }
+
+    
 }
 
 mod distributed_system {
