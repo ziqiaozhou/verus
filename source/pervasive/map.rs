@@ -45,6 +45,11 @@ impl<K, V> Map<K, V> {
     }
 
     #[spec] #[verifier(publish)]
+    pub fn contains(self, k: K) -> bool {
+        self.dom().contains(k)
+    }
+
+    #[spec] #[verifier(publish)]
     pub fn contains_pair(self, k: K, v: V) -> bool {
         self.dom().contains(k) && equal(self.index(k), v)
     }

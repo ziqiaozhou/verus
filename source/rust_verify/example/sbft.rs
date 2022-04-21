@@ -1,5 +1,23 @@
 mod pervasive;
 
+mod library {
+    #[allow(unused_imports)]
+    use {
+        builtin::*,
+        builtin_macros::*,
+        crate::*,   // macros are defined at crate root somehow; need this for set![]
+            // TODO(utaal): Need to put set! macro into module namespace for less confusion.
+        crate::pervasive::*,
+        crate::pervasive::set::*,
+        crate::pervasive::map::*,
+    };
+
+    #[spec]
+    pub fn full_imap<K,V>(im:Map<K,V>) -> bool {
+        forall(|k| im.dom().contains(k))
+    }
+}
+
 // TODO(help): what's the equivalent of a module here?
 mod host_identifiers {
     #[allow(unused_imports)]
@@ -20,7 +38,8 @@ mod host_identifiers {
         ensures(num_hosts() > 0);
     }
 
-    // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item
+    // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item.
+    // Sure would be nice to have it.
     //type HostId = int;
     #[derive(PartialEq, Eq, Structural)]
     pub struct HostId { pub value: int }
@@ -62,9 +81,9 @@ mod network {
     //#[derive(PartialEq, Eq, Structural)]
     pub struct MessageOps<Payload>
     {
-        recv:Option<NetMessage<Payload>>,
-        send:Option<NetMessage<Payload>>,
-        signed_msgs_to_check:Set<NetMessage<Payload>>
+        pub recv:Option<NetMessage<Payload>>,
+        pub send:Option<NetMessage<Payload>>,
+        pub signed_msgs_to_check:Set<NetMessage<Payload>>
     }
 
     impl<Payload> MessageOps<Payload> {
@@ -122,18 +141,27 @@ mod messages {
             // TODO(utaal): Need to put set! macro into module namespace for less confusion.
         crate::pervasive::*,
         crate::pervasive::set::*,
+        crate::pervasive::map::*,
         crate::pervasive::option::*,
+        crate::library::*,
         crate::host_identifiers::*,
         crate::network::*,
     };
 
     // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item
-    //type SequenceId = nat;
+    //type SequenceID = nat;
     #[derive(PartialEq, Eq, Structural)]
     pub struct SequenceID  { pub value: nat }
+
+    // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item
+    //type ViewNum = nat
+    #[derive(PartialEq, Eq, Structural)]
     pub struct ViewNum  { pub value: nat }
 
-    pub struct ClientOperation { sender: HostId, timestamp: nat }
+    pub struct ClientOperation {
+        pub sender: HostId,
+        pub timestamp: nat
+    }
 
     pub enum OperationWrapper {
         Noop,
@@ -147,7 +175,7 @@ mod messages {
 
     #[spec]
     pub fn unique_senders(msgs: Set<NetMessage<Message>>) -> bool {
-        && forall(|m1, m2| #[auto_trigger]
+        forall(|m1, m2| #[auto_trigger]
                      true
                   && msgs.contains(m1)
                   && msgs.contains(m2)
@@ -200,27 +228,50 @@ mod messages {
                true
             && self.msgs.len() > 0
             // All the ViewChange messages have to be for the same View. 
-            && forall(|v| self.msgs.contains(v) >>=
+            && forall(|v| #[auto_trigger] self.msgs.contains(v) >>=
                          true
-                      && v.payload.is_ViewChangeMsg()
+                      && v.payload.xis_ViewChangeMsg()
                       && v.payload.wf()
-                      && v.payload.newView == view
+                      && v.payload.new_view() == view
                       )
-            && unique_senders(self.votes)
+            && unique_senders(self.msgs)
+            && self.msgs.len() == quorum_size
         }
     }
 
+    // TODO(utaal): Frustrating blocker (see xis_ placeholder methods below)
     //#[is_variant]
     pub enum Message {
         PrePrepare { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
-        Prepare { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper }
+        Prepare { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
+        Commit { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
+        ClientRequest { client_op: ClientOperation },
+        ViewChangeMsg { new_view: ViewNum, certificates: Map<SequenceID, PreparedCertificate> },
+        NewViewMsg { new_view: ViewNum, vcMsgs: ViewChangeMsgsSelectedByPrimary },
     }
 
     impl Message {
+        #[spec] pub fn xis_PrePrepare(self) -> bool { true }
+        #[spec] pub fn xis_Prepare(self) -> bool { true }
+        #[spec] pub fn xis_ClientRequest(self) -> bool { true }
+        #[spec] pub fn xis_ViewChangeMsg(self) -> bool { true }
+        #[spec] pub fn xis_NewViewMsg(self) -> bool { true }
+        // TODO(utaal): Ewww
+        #[spec] pub fn new_view(self) -> ViewNum {
+            //self.get_ViewChangeMsg_0()
+            ViewNum{value: 0}
+        }
+        #[spec] pub fn certificates(self) -> Map<SequenceID, PreparedCertificate> {
+            Map::empty()
+            //self.get_ViewChangeMsg_1()
+        }
+        #[spec] pub fn get_client_op(self) -> ClientOperation {
+            ClientOperation { sender: HostId{value: 0}, timestamp: 0 }
+        }
+
         #[spec]
-        pub fn xis_Prepare(self) -> bool {
-            // self.is_Prepare()
-            true    // TODO can't get is_variant to work
+        pub fn wf(self) -> bool {
+            self.xis_ViewChangeMsg() >>= full_imap(self.certificates())
         }
     }
 }
@@ -357,6 +408,7 @@ mod client {
     }
 
     // Placeholder for possible client state
+    #[derive(PartialEq, Eq, Structural)]
     pub struct Variables {
         last_request_timestamp: nat,
         last_reply_timestamp: nat
@@ -379,10 +431,203 @@ mod client {
 
     #[spec]
     pub fn send_client_operation(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>) -> bool {
+        let msg = msg_ops.send.value();
            true
         && v.wf(c)
         && msg_ops.is_send()
+        && pending_requests(c, v) == 0
+        && msg.payload.xis_ClientRequest()
+        && msg.sender == c.my_id
+        && msg.payload.get_client_op().sender == c.my_id
+        && msg.payload.get_client_op().timestamp == v.last_request_timestamp + 1
+        && vp == Variables {
+            last_request_timestamp: v.last_request_timestamp + 1,
+            ..vp }
         // ...
+    }
+    
+    #[spec]
+    pub fn init(c: Constants, v: Variables) -> bool {
+           true
+        && v.wf(c)
+        && v.last_request_timestamp == 0
+        && v.last_reply_timestamp == 0
+    }
+
+    pub enum Step {
+        SendClientOperationStep()
+    }
+
+    #[spec]
+    pub fn next_step(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>, step: Step) -> bool {
+        match step {
+            Step::SendClientOperationStep() => send_client_operation(c, v, vp, msg_ops)
+        }
+    }
+
+    #[spec]
+    pub fn next(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>) -> bool {
+        exists(|step| next_step(c, v, vp, msg_ops, step))
+    }
+}
+
+mod replica {
+    #[allow(unused_imports)]
+    use {
+        builtin::*,
+        builtin_macros::*,
+        crate::*,   // macros are defined at crate root somehow; need this for set![]
+            // TODO(utaal): Need to put set! macro into module namespace for less confusion.
+        crate::pervasive::*,
+        crate::pervasive::set::*,
+        crate::pervasive::option::*,
+        crate::library::*,
+        crate::host_identifiers::*,
+        crate::messages::*,
+        crate::pervasive::map::*,
+    };
+
+    pub struct Constants {
+        my_id: HostId,
+        cluster_config: cluster_config::Constants
+    }
+
+    impl Constants {
+        #[spec]
+        pub fn wf(self) -> bool {
+               true
+            && self.cluster_config.wf()
+            && self.cluster_config.is_replica(self.my_id)
+        }
+
+        #[spec] pub fn configure(self, id: HostId, cluster_conf: cluster_config::Constants) -> bool {
+               true
+            && self.my_id == id
+            && self.cluster_config == cluster_conf
+        }
+    }
+
+    struct ViewChangeMsgs { msgs: Set<network::NetMessage<Message>> }
+    impl ViewChangeMsgs {
+        #[spec] fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
+                     true
+                  && msg.payload.xis_ViewChangeMsg()
+                  && c.cluster_config.is_replica(msg.sender))
+        }
+    }
+
+    struct NewViewMsgs { msgs: Set<network::NetMessage<Message>> }
+    impl NewViewMsgs {
+        #[spec] fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && forall(|msg| #[auto_trigger] self.msgs.contains(msg) >>=
+                     true
+                  && msg.payload.xis_NewViewMsg()
+                  && c.cluster_config.is_replica(msg.sender))
+        }
+    }
+
+    
+
+    // TODO(utaal): The verifier does not yet support the following Rust feature: unsupported item
+    //type PrepareProofSet = Map<HostId, NetMessage<Message>>
+    // TODO(utaal): Maps can't Structural, either.
+    //#[derive(PartialEq, Eq, Structural)]
+    struct PrepareProofSet {
+        map: Map<HostId, network::NetMessage<Message>>
+    }
+
+    impl PrepareProofSet {
+        #[spec]
+        pub fn wf(self, c: Constants) -> bool {
+            // TODO(utual): index(x) ==> [x]
+            forall(|x| #[auto_trigger]
+                   true
+                && self.map.contains(x)
+                && c.cluster_config.is_replica(self.map.index(x).sender))
+        }
+    }
+
+    //type PrepareProofSet = Map<HostId, NetMessage<Message>>
+    // TODO(utaal): Maps can't Structural, either.
+    //#[derive(PartialEq, Eq, Structural)]
+    struct CommitProofSet {
+        map: Map<HostId, network::NetMessage<Message>>
+    }
+
+    impl CommitProofSet {
+        #[spec]
+        pub fn wf(self, c: Constants) -> bool {
+            // TODO(utual): index(x) ==> [x]
+            forall(|x| #[auto_trigger]
+                   true
+                && self.map.contains(x)
+                && c.cluster_config.is_replica(self.map.index(x).sender))
+        }
+    }
+
+    //type PrePreparesRecvd = Map<SequenceID, Option<network::NetMessage<Message>>>
+    // TODO(utaal): Maps can't Structural, either.
+    struct PrePreparesRcvd {
+        map: Map<SequenceID, Option<network::NetMessage<Message>>>
+    }
+
+    impl PrePreparesRcvd {
+        #[spec] pub fn wf(self) -> bool {
+               true
+            && full_imap(self.map)
+            && forall(|x| #[auto_trigger]
+                      self.map.contains(x) && self.map.index(x).is_Some()
+                      >>= self.map.index(x).value().payload.xis_PrePrepare())
+        }
+    }
+
+    struct WorkingWindow {
+        committed_client_operations: Map<SequenceID, Option<OperationWrapper>>,
+        pre_prepares_rcvd: PrePreparesRcvd,
+        prepares_rcvd: Map<SequenceID, PrepareProofSet>,
+        commits_rcvd: Map<SequenceID, CommitProofSet>,
+    }
+
+    // TODO(chris): Discussion: I'm needing auto_trigger on EVERY forall. Is that expected?
+    // Is it a sign that I'm an idiot? Will this be why this proof is so timeout-prone?
+    impl WorkingWindow {
+        #[spec] pub fn wf(self, c: Constants) -> bool {
+               true
+            && full_imap(self.committed_client_operations)
+            && full_imap(self.prepares_rcvd)
+            && full_imap(self.commits_rcvd)
+            && self.pre_prepares_rcvd.wf()
+            && forall(|seqID| #[auto_trigger] self.prepares_rcvd.contains(seqID) >>= self.prepares_rcvd.index(seqID).wf(c))
+            && forall(|seqID| #[auto_trigger] self.commits_rcvd.contains(seqID) >>= self.commits_rcvd.index(seqID).wf(c))
+        }
+    }
+}
+
+mod distributed_system {
+    #[allow(unused_imports)]
+    use {
+        builtin::*,
+        builtin_macros::*,
+        crate::*,   // macros are defined at crate root somehow; need this for set![]
+            // TODO(utaal): Need to put set! macro into module namespace for less confusion.
+        crate::pervasive::*,
+        crate::pervasive::set::*,
+        crate::pervasive::option::*,
+        crate::library::*,
+        crate::host_identifiers::*,
+        crate::messages::*,
+    };
+
+    pub enum HostConstants {
+        Foo
+//        Replica { replica_constants: Replica
+//        max_byzantine_faulty_replicas: nat,
+//        num_clients: nat
     }
 }
 
