@@ -664,10 +664,34 @@ mod replica {
            )
     }
 
-    #[proof] fn set_reduction<E>(s: Set<E>, e: E)
+    #[proof] #[verifier(decreases_by)]
+    fn highest_view_prepare_certificate_decreases(prepare_certificates: Set<PreparedCertificate>)
     {
-        requires(s.contains(e));
-        ensures(s.difference(set![e]).len() < s.len());
+        requires([
+                 prepare_certificates.finite(),
+                 0 < prepare_certificates.len(),
+                 false  // TODO(chris): uh oh! Soundness trouble?
+        ]);
+        assert(!equal(prepare_certificates, set![]));
+        let any = choose(|any| prepare_certificates.contains(any));
+        assert(equal(any, prepare_certificates.choose()));
+        assert(prepare_certificates.contains(any));
+        let small = prepare_certificates.difference(set![any]);
+        let reconstructed = small.insert(any);
+        assert_forall_by(|e| {
+            ensures(reconstructed.contains(e) == prepare_certificates.contains(e));
+            if equal(e, any) {
+                assert(reconstructed.contains(e));
+                assert(prepare_certificates.contains(e));
+                assert(reconstructed.contains(e) == prepare_certificates.contains(e));
+            } else {
+                assert(reconstructed.contains(e) == prepare_certificates.contains(e));
+            }
+        });
+        assert(reconstructed.ext_equal(prepare_certificates));
+        assert(equal(reconstructed, prepare_certificates));
+        assert(small.len() + 1 == prepare_certificates.len());
+        assert(small.len() < prepare_certificates.len());
     }
 
     // Constructively demonstrate that we can compute the certificate with the highest View.
@@ -687,17 +711,17 @@ mod replica {
 //                out.prototype().get_view().value >= other.prototype().get_view().value)
 //        ]);
         decreases(prepare_certificates.len());
+        decreases_by(highest_view_prepare_certificate_decreases);
 
         let any = choose(|any| prepare_certificates.contains(any));
-        if prepare_certificates.len() == 1 {
+        if prepare_certificates.len() == 0 {
+            any // silly
+        } else if prepare_certificates.len() == 1 {
             // Nothing to prove in a fn; maybe needed in a lemma?
             // Library.SingletonSetAxiom(any, prepare_certificates);
             any
         } else {
             let rest = prepare_certificates.difference(set![any]);
-            assert!(prepare_certificates.contains(any));
-            set_reduction(prepare_certificates, any);
-            assert!(rest.len() < prepare_certificates.len());
             let highest_of_rest = highest_view_prepare_certificate(rest);
             if any.prototype().get_view().value > highest_of_rest.prototype().get_view().value {
                 any
@@ -705,6 +729,13 @@ mod replica {
                 highest_of_rest
             }
         }
+    }
+
+    #[proof] fn x(s: Set<PreparedCertificate>)
+    {
+        let e = highest_view_prepare_certificate(s);
+        let e2 = highest_view_prepare_certificate(s);
+        assert(equal(e, e2));
     }
 }
 
