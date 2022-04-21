@@ -664,6 +664,12 @@ mod replica {
            )
     }
 
+    #[proof] fn set_reduction<E>(s: Set<E>, e: E)
+    {
+        requires(s.contains(e));
+        ensures(s.difference(set![e]).len() < s.len());
+    }
+
     // Constructively demonstrate that we can compute the certificate with the highest View.
     #[spec] fn highest_view_prepare_certificate(prepare_certificates: Set<PreparedCertificate>) -> PreparedCertificate {
         // TODO(chris): "only one call to recommends allowed"? Aw c'mooooon.
@@ -689,10 +695,10 @@ mod replica {
             any
         } else {
             let rest = prepare_certificates.difference(set![any]);
-            // TODO(chris): Showstopper! If this line is enabled:
-// thread 'rustc' panicked at 'unexpected SMT output: (error "line 8647 column 85: Sort mismatch at argument #2 for function (declare-fun messages.Message./NewViewMsg', rust_verify/src/verifier.rs:253:21
-//            let highest_of_rest = highest_view_prepare_certificate(rest);
-            let highest_of_rest = any;  // XXX placeholder
+            assert!(prepare_certificates.contains(any));
+            set_reduction(prepare_certificates, any);
+            assert!(rest.len() < prepare_certificates.len());
+            let highest_of_rest = highest_view_prepare_certificate(rest);
             if any.prototype().get_view().value > highest_of_rest.prototype().get_view().value {
                 any
             } else {
