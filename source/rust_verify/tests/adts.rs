@@ -682,3 +682,68 @@ test_verify_one_file! {
         }
     } => Err(e) => assert_vir_error(e)
 }
+
+const ENUM_S: &str = code_str! {
+    #[is_variant]
+    enum S {
+        V1,
+        V2,
+    }
+};
+
+test_verify_one_file! {
+    #[ignore] #[test] test_match_exhaustiveness_regression_127 ENUM_S.to_string() + code_str! {
+        fn f(s: S) {
+            match s {
+                S::V1 => assert(true),
+            };
+        }
+    } => Err(_)
+}
+
+test_verify_one_file! {
+    #[test] test_match_empty_branch ENUM_S.to_string() + code_str! {
+        fn f(#[spec] s: S) {
+            match s {
+                S::V1 => assert(s.is_V1()),
+                S::V2 => (),
+            };
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_if_is_variant_regression_125 code! {
+        use crate::pervasive::option::*;
+
+        #[proof]
+        fn foo() {
+            let x = (if (Option::Some(5)).is_Some() { 0 } else { 1 });
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_if_is_variant_underscore_in_name_regression code! {
+        #[is_variant]
+        #[allow(non_camel_case_types)]
+        enum Has_Underscores {
+            #[allow(non_camel_case_types)]
+            More_Underscores,
+            #[allow(non_camel_case_types)]
+            A_Couple_More(nat),
+        }
+
+        #[proof]
+        fn test(h: Has_Underscores) {
+            requires([
+                     h.is_A_Couple_More(),
+                     match h {
+                         Has_Underscores::More_Underscores => false,
+                         Has_Underscores::A_Couple_More(x) => x == 10,
+                     }
+            ]);
+            assert(h.get_A_Couple_More_0() == 10);
+        }
+    } => Ok(())
+}
