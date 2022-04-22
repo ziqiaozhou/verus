@@ -95,6 +95,13 @@ mod network {
         }
 
         #[spec]
+        pub fn is_recv(self) -> bool {
+               true
+            && self.recv.is_Some()
+            && self.send.is_None()
+        }
+
+        #[spec]
         pub fn no_send_recv(self) -> bool {
                true
             && self.recv.is_None()
@@ -867,7 +874,60 @@ mod replica {
 
     }
 
-    
+    // Predicate that describes what is needed and how we mutate the state v into v' when RecvPrePrepare
+    // Action is taken. We use the "binding" variable msg_ops through which we send/recv messages. In this 
+    // predicate we need to reflect in our next state that we have received the PrePrepare message.
+    #[spec] fn RecvPrePrepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    {
+        let msg = msg_ops.recv.value();
+           true
+        && v.wf(c)
+        && msg_ops.is_recv()
+        && is_valid_pre_prepare_to_accept(c, v, msg)
+        && equal(vp, Variables {
+            working_window: WorkingWindow {
+                pre_prepares_rcvd: PrePreparesRcvd {
+                    map: v.working_window.pre_prepares_rcvd.map.insert(
+                                 msg.payload.get_seq_id(), pervasive::option::Option::Some(msg))
+                },
+                ..v.working_window },
+            ..v })
+    }
+
+    // For clarity here we have extracted all preconditions that must hold for a Replica to accept a Prepare
+    #[spec] fn is_valid_prepare_to_accept(c:Constants, v:Variables, msg:network::NetMessage<Message>) -> bool
+    {
+           true
+        && v.wf(c)
+        && msg.payload.is_Prepare()
+        && c.cluster_config.is_replica(msg.sender)
+        && view_is_active(c, v)
+        && msg.payload.get_view() == v.view
+        && v.working_window.pre_prepares_rcvd.map.index(msg.payload.get_seq_id()).is_Some()
+        && equal(v.working_window.pre_prepares_rcvd.map.index(msg.payload.get_seq_id()).value().payload.get_operation_wrapper(), msg.payload.get_operation_wrapper())
+        && !v.working_window.prepares_rcvd.index(msg.payload.get_seq_id()).map.contains(msg.sender) // We stick to the first vote from a peer.
+    }
+
+    // Predicate that describes what is needed and how we mutate the state v into v' when RecvPrepare
+    // Action is taken. We use the "binding" variable msg_ops through which we send/recv messages. In this 
+    // predicate we need to reflect in our next state that we have received the Prepare message.
+    #[spec] fn recv_prepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    {
+        let msg = msg_ops.recv.value();
+           true
+        && v.wf(c)
+        && msg_ops.is_recv()
+        && is_valid_prepare_to_accept(c, v, msg)
+        && equal(vp, Variables {
+            working_window: WorkingWindow {
+                prepares_rcvd: v.working_window.prepares_rcvd.insert(
+                             msg.payload.get_seq_id(),
+                             PrepareProofSet {
+                                 map: v.working_window.prepares_rcvd.index(msg.payload.get_seq_id()).map.insert(
+                                 msg.sender, msg) }),
+                ..v.working_window },
+            ..v })
+    }
     
 }
 
