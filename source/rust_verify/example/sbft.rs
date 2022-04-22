@@ -219,7 +219,7 @@ mod messages {
     }
 
     pub struct ViewChangeMsgsSelectedByPrimary {
-        msgs: Set<NetMessage<Message>>
+        pub msgs: Set<NetMessage<Message>>
     }
 
     impl ViewChangeMsgsSelectedByPrimary {
@@ -246,11 +246,12 @@ mod messages {
         Commit { view: ViewNum, seq_id:SequenceID, operation_wrapper: OperationWrapper },
         ClientRequest { client_op: ClientOperation },
         ViewChangeMsg { new_view: ViewNum, certificates: Map<SequenceID, PreparedCertificate> },
-        NewViewMsg { new_view: ViewNum, vcMsgs: ViewChangeMsgsSelectedByPrimary },
+        NewViewMsg { new_view: ViewNum, vc_msgs: ViewChangeMsgsSelectedByPrimary },
     }
 
     impl Message {
-        // TODO(utaal): Ewww
+        // TODO(utaal): is_ generators are essential. But field accessors are also
+        // essential; observe this heaping mound of tedious, error-prone boilerplate:
         #[spec] pub fn get_new_view(self) -> ViewNum {
             recommends(self.is_ViewChangeMsg() || self.is_NewViewMsg());
             match self {
@@ -259,7 +260,6 @@ mod messages {
                 _ => arbitrary()
             }
         }
-        // TODO(utaal,jonh) meh
         #[spec] pub fn get_view(self) -> ViewNum {
             recommends(self.is_PrePrepare() || self.is_Prepare() || self.is_Commit());
             match self {
@@ -269,6 +269,40 @@ mod messages {
                 _ => arbitrary(),
             }
         }
+        #[spec] pub fn get_seq_id(self) -> SequenceID {
+            recommends(self.is_PrePrepare() || self.is_Prepare() || self.is_Commit());
+            match self {
+                Message::PrePrepare { seq_id, .. } => seq_id,
+                Message::Prepare { seq_id, .. } => seq_id,
+                Message::Commit { seq_id, .. } => seq_id,
+                _ => arbitrary(),
+            }
+        }
+        #[spec] pub fn get_operation_wrapper(self) -> OperationWrapper {
+            recommends(self.is_PrePrepare() || self.is_Prepare() || self.is_Commit());
+            match self {
+                Message::PrePrepare { operation_wrapper, .. } => operation_wrapper,
+                Message::Prepare { operation_wrapper, .. } => operation_wrapper,
+                Message::Commit { operation_wrapper, .. } => operation_wrapper,
+                _ => arbitrary(),
+            }
+        }
+        #[spec] pub fn get_certificates(self) -> Map<SequenceID, PreparedCertificate> {
+            recommends(self.is_ViewChangeMsg());
+            match self {
+                Message::ViewChangeMsg { certificates: certificates, .. } => certificates,
+                _ => arbitrary(),
+            }
+        }
+        #[spec] pub fn get_vc_msgs(self) -> ViewChangeMsgsSelectedByPrimary {
+            recommends(self.is_NewViewMsg());
+            match self {
+                Message::NewViewMsg { vc_msgs: vc_msgs, .. } => vc_msgs,
+                _ => arbitrary(),
+            }
+        }
+        // ....end tedious boilerplate.
+
         #[spec]
         pub fn wf(self) -> bool {
             // TODO(jonh): Ewww
@@ -626,11 +660,11 @@ mod replica {
         }
     }
 
-    #[spec] fn primary_for_view(c: Constants, view: ViewNum) -> nat {
-        view.value % c.cluster_config.n()
+    #[spec] fn primary_for_view(c: Constants, view: ViewNum) -> HostId {
+        HostId{ value: (view.value % c.cluster_config.n()) as int }
     }
 
-    #[spec] fn current_primary(c: Constants, v: Variables) -> nat {
+    #[spec] fn current_primary(c: Constants, v: Variables) -> HostId {
         recommends(v.wf(c));
         primary_for_view(c, v.view)
     }
@@ -731,12 +765,110 @@ mod replica {
         }
     }
 
-    #[proof] fn x(s: Set<PreparedCertificate>)
+    #[spec] fn calculate_restriction_for_seq_id(c: Constants, v: Variables, seq_id: SequenceID, new_view_msg: network::NetMessage<Message>) -> Option<OperationWrapper>
     {
-        let e = highest_view_prepare_certificate(s);
-        let e2 = highest_view_prepare_certificate(s);
-        assert(equal(e, e2));
+        recommends([
+            v.wf(c),
+            new_view_msg.payload.is_NewViewMsg(),
+            new_view_msg.payload.get_vc_msgs().valid(v.view, c.cluster_config.agreement_quorum()),
+            new_view_msg.payload.get_new_view() == v.view,
+            new_view_msg.sender == current_primary(c, v),
+        ]);
+
+        // 1. Take the NewViewMsg for the current View.
+        // 2. Go through all the ViewChangeMsg-s in the NewView and take the valid full 
+        //    PreparedCertificates from them for the seqID.
+        // 3. From all the collected PreparedCertificates take the one with the highest View.
+        // 4. If it is empty  we need to fill with NoOp.
+        // 5. If it contains valid full quorum we take the Client Operation and insist it will be committed in the new View.
+        // var preparedCertificates := set cert | 
+
+        let relevant_prepare_certificates = new_view_msg.payload.get_vc_msgs().msgs
+            .map(|vcm| vcm.payload.get_certificates().index(seq_id))
+            .filter(|cert| cert.wf() && !cert.empty());
+
+        if relevant_prepare_certificates.len() == 0 {
+            // TODO(utaal): Why does Rust try for std::option::Option, even though I explicitly
+            // use crate::pervasive::*?
+            pervasive::option::Option::Some(OperationWrapper::Noop)
+        } else {
+          let highest_view_cert = highest_view_prepare_certificate(relevant_prepare_certificates);
+          pervasive::option::Option::Some(highest_view_cert.prototype().get_operation_wrapper())
+        }
     }
+
+    #[spec] fn view_is_active(c: Constants, v: Variables) -> bool {
+        let relevant_new_view_msgs = v.new_view_msgs_recvd.msgs.filter(|msg| msg.payload.get_new_view() == v.view);
+           true
+        && v.wf(c)
+        && (
+               false
+            || v.view.value == 0 // View 0 is active initially. There are no View Change messages for it.
+            || relevant_new_view_msgs.len() == 1 // The NewViewMsg that the Primary sends contains in itself the selected Quorum of
+                                        // ViewChangeMsg-s based on which we are going to rebuild the previous View's working window.
+        )
+    }
+
+    // Predicate that describes what is needed and how we mutate the state v into v' when SendPrePrepare
+    // Action is taken. We use the "binding" variable msgOps through which we send/recv messages.
+    #[spec] fn send_pre_prepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    {
+        // TODO(utaal): it often makes more sense to 'let' things in the middle of the story
+        // but presently verus demands we pull it to the front.
+        let msg = msg_ops.send.value();
+           true
+        && v.wf(c)
+        && msg_ops.is_send()
+        && current_primary(c, v) == c.my_id
+        && msg.payload.is_PrePrepare() // We have a liveness bug here, we need some state that says for the client which operation ID-s we have executed
+        && equal(v, vp)
+    }
+
+    // Node local invariants that we need to satisfy dafny requires. This gets proven as part of the Distributed system invariants.
+    // That is why it can appear as enabling condition, but does not need to be translated to runtime checks to C++.
+    // For this to be safe it has to appear in the main invarinat in the proof.
+    // NB: Verus fns never require! Just recommend. So that's new.
+    #[spec] fn lite_inv(c:Constants, v:Variables) -> bool {
+           true
+        && v.wf(c)
+        && forall(|new_view_msg| #[auto_trigger]
+            v.new_view_msgs_recvd.msgs.contains(new_view_msg) >>=
+                   true
+                && new_view_msg.payload.get_vc_msgs().valid(v.view, c.cluster_config.agreement_quorum())
+                && primary_for_view(c, new_view_msg.payload.get_new_view()) == new_view_msg.sender)
+    }
+
+    // For clarity here we have extracted all preconditions that must hold for a Replica to accept a PrePrepare
+    // NB(jonh): {:opaque}
+    #[spec] fn is_valid_pre_prepare_to_accept(c:Constants, v:Variables, msg:network::NetMessage<Message>) -> bool
+    {
+        recommends(lite_inv(c, v));
+        // TODO(utaal): (repeated) unhappy to pull up lets
+        let new_view_msgs = v.new_view_msgs_recvd.msgs.filter(|msg| msg.payload.get_new_view() == v.view);
+        let new_view_msg = new_view_msgs.choose();
+
+           true
+        && v.wf(c)
+        && lite_inv(c, v)
+        && msg.payload.is_PrePrepare()
+        && c.cluster_config.is_replica(msg.sender)
+        && view_is_active(c, v)
+        && msg.payload.get_view() == v.view
+        && msg.sender == current_primary(c, v)
+        && v.working_window.pre_prepares_rcvd.map.index(msg.payload.get_seq_id()).is_None()
+        && if new_view_msgs.len() == 0 {
+                true
+            } else {
+                   true
+                && new_view_msgs.len() == 1
+                && equal(pervasive::option::Option::Some(msg.payload.get_operation_wrapper()),
+                       calculate_restriction_for_seq_id(c, v, msg.payload.get_seq_id(), new_view_msg))
+            }
+
+    }
+
+    
+    
 }
 
 mod distributed_system {
