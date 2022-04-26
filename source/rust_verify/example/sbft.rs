@@ -112,13 +112,13 @@ mod network {
     //#[derive(PartialEq, Eq, Structural)]
     // Too bad, Set can't be Structural, so you'll have to .equal().
     pub struct Variables<Payload> {
-        sent_msgs: Set<NetMessage<Payload>>
+        pub sent_msgs: Set<NetMessage<Payload>>
     }
 
     impl<Payload> Variables<Payload> {
         #[spec]
-        pub fn init(v: Variables<Payload>) -> bool {
-            equal(v.sent_msgs, set![])
+        pub fn init(self: Variables<Payload>) -> bool {
+            equal(self.sent_msgs, set![])
         }
 
         #[spec]
@@ -389,7 +389,7 @@ mod cluster_config {
         }
 
         #[spec]
-        pub fn is_faultyReplica(self, id: HostId) -> bool {
+        pub fn is_faulty_replica(self, id: HostId) -> bool {
             recommends(self.wf());
                true
             && ValidHostId(id)
@@ -433,8 +433,8 @@ mod client {
 
     #[derive(PartialEq, Eq, Structural)]
     pub struct Constants {
-        my_id: HostId,
-        cluster_config: cluster_config::Constants
+        pub my_id: HostId,
+        pub cluster_config: cluster_config::Constants
     }
 
     impl Constants {
@@ -534,8 +534,8 @@ mod replica {
     };
 
     pub struct Constants {
-        my_id: HostId,
-        cluster_config: cluster_config::Constants
+        pub my_id: HostId,
+        pub cluster_config: cluster_config::Constants
     }
 
     impl Constants {
@@ -558,7 +558,7 @@ mod replica {
     // TODO(utaal): Maps can't Structural, either.
     //#[derive(PartialEq, Eq, Structural)]
     struct PrepareProofSet {
-        map: Map<HostId, network::NetMessage<Message>>
+        pub map: Map<HostId, network::NetMessage<Message>>
     }
 
     impl PrepareProofSet {
@@ -569,6 +569,11 @@ mod replica {
                    true
                 && self.map.contains(x)
                 && c.cluster_config.is_replica(self.map.index(x).sender))
+        }
+
+        #[spec]
+        pub fn len(self) -> nat {
+            self.map.dom().len()
         }
     }
 
@@ -588,12 +593,17 @@ mod replica {
                 && self.map.contains(x)
                 && c.cluster_config.is_replica(self.map.index(x).sender))
         }
+
+        #[spec]
+        pub fn len(self) -> nat {
+            self.map.dom().len()
+        }
     }
 
     //type PrePreparesRecvd = Map<SequenceID, Option<network::NetMessage<Message>>>
     // TODO(utaal): Maps can't Structural, either.
     struct PrePreparesRcvd {
-        map: Map<SequenceID, Option<network::NetMessage<Message>>>
+        pub map: Map<SequenceID, Option<network::NetMessage<Message>>>
     }
 
     impl PrePreparesRcvd {
@@ -606,11 +616,16 @@ mod replica {
         }
     }
 
+    // TODO(utaal): discuss: I'm pub-ifying a lot of structs because my proof module
+    // wants to reach into them. I wonder what the right software-engineering-clean
+    // pattern should be. Like, I'd still like to tell other modules to keep their
+    // mitts off these fields, but maybe the proof module wants to be a "friend" sort
+    // of thing?
     struct WorkingWindow {
-        committed_client_operations: Map<SequenceID, Option<OperationWrapper>>,
-        pre_prepares_rcvd: PrePreparesRcvd,
-        prepares_rcvd: Map<SequenceID, PrepareProofSet>,
-        commits_rcvd: Map<SequenceID, CommitProofSet>,
+        pub committed_client_operations: Map<SequenceID, Option<OperationWrapper>>,
+        pub pre_prepares_rcvd: PrePreparesRcvd,
+        pub prepares_rcvd: Map<SequenceID, PrepareProofSet>,
+        pub commits_rcvd: Map<SequenceID, CommitProofSet>,
     }
 
     // TODO(chris): Discussion: I'm needing auto_trigger on EVERY forall. Is that expected?
@@ -652,13 +667,13 @@ mod replica {
     }
 
     pub struct Variables {
-        view: ViewNum,
-        working_window: WorkingWindow,
-        view_change_msgs_recvd: ViewChangeMsgs,
-        new_view_msgs_recvd: NewViewMsgs,
+        pub view: ViewNum,
+        pub working_window: WorkingWindow,
+        pub view_change_msgs_recvd: ViewChangeMsgs,
+        pub new_view_msgs_recvd: NewViewMsgs,
     }
     impl Variables {
-        #[spec] fn wf(self, c: Constants) -> bool {
+        #[spec] pub fn wf(self, c: Constants) -> bool {
                true
             && c.wf()
             && self.working_window.wf(c)
@@ -710,8 +725,7 @@ mod replica {
     {
         requires([
                  prepare_certificates.finite(),
-                 0 < prepare_certificates.len(),
-                 false  // TODO(chris): uh oh! Soundness trouble?
+                 0 < prepare_certificates.len()
         ]);
         assert(!equal(prepare_certificates, set![]));
         let any = choose(|any| prepare_certificates.contains(any));
@@ -877,7 +891,7 @@ mod replica {
     // Predicate that describes what is needed and how we mutate the state v into v' when RecvPrePrepare
     // Action is taken. We use the "binding" variable msg_ops through which we send/recv messages. In this 
     // predicate we need to reflect in our next state that we have received the PrePrepare message.
-    #[spec] fn RecvPrePrepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    #[spec] fn recv_pre_prepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
     {
         let msg = msg_ops.recv.value();
            true
@@ -929,9 +943,167 @@ mod replica {
             ..v })
     }
     
+    #[spec] fn is_valid_commit_to_accept(c:Constants, v:Variables, msg:network::NetMessage<Message>) -> bool
+    {
+           true
+        && v.wf(c)
+        && msg.payload.is_Commit()
+        && c.cluster_config.is_replica(msg.sender)
+        && view_is_active(c, v)
+        && msg.payload.get_view() == v.view
+        && v.working_window.pre_prepares_rcvd.map.index(msg.payload.get_seq_id()).is_Some()
+        && equal(v.working_window.pre_prepares_rcvd.map.index(msg.payload.get_seq_id()).value().payload.get_operation_wrapper(),
+            msg.payload.get_operation_wrapper())
+        && !v.working_window.commits_rcvd.index(msg.payload.get_seq_id()).map.contains(msg.sender) // We stick to the first vote from a peer.
+    }
+
+    #[spec] fn recv_commit(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    {
+        let msg = msg_ops.recv.value();
+           true
+        && v.wf(c)
+        && msg_ops.is_recv()
+        && is_valid_commit_to_accept(c, v, msg)
+        && equal(vp, Variables {
+            working_window: WorkingWindow {
+                commits_rcvd: v.working_window.commits_rcvd.insert(
+                    msg.payload.get_seq_id(),
+                    CommitProofSet {
+                        map: v.working_window.commits_rcvd.index(msg.payload.get_seq_id()).map.insert(msg.sender, msg) }),
+                ..v.working_window
+            },
+            ..v
+        })
+    }
+
+    #[spec] fn quorum_of_prepares(c:Constants, v:Variables, seqID:SequenceID) -> bool {
+           true
+        && v.wf(c)
+        && v.working_window.prepares_rcvd.index(seqID).len() >= c.cluster_config.agreement_quorum()
+    }
+
+    #[spec] fn quorum_of_commits(c:Constants, v:Variables, seqID:SequenceID) -> bool {
+           true
+        && v.wf(c)
+        && v.working_window.commits_rcvd.index(seqID).len() >= c.cluster_config.agreement_quorum()
+    }
+
+    #[spec] fn DoCommit(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, seqID:SequenceID) -> bool
+    {
+        let msg = v.working_window.pre_prepares_rcvd.map.index(seqID).value();
+           true
+        && v.wf(c)
+        && msg_ops.no_send_recv()
+        && quorum_of_prepares(c, v, seqID)
+        && quorum_of_commits(c, v, seqID)
+        && v.working_window.pre_prepares_rcvd.map.index(seqID).is_Some()
+        // TODO: We should be able to commit empty (Noop) operations as well
+        && equal(vp, Variables {
+            working_window: WorkingWindow {
+                committed_client_operations: v.working_window.committed_client_operations.insert(
+        // TODO(utaal): Why is default Some in scope?
+                     msg.payload.get_seq_id(), pervasive::option::Option::Some(msg.payload.get_operation_wrapper())),
+                ..v.working_window
+            },
+          ..v })
+    }
+
+    // Predicate that describes what is needed and how we mutate the state v into v' when SendPrepare
+    // Action is taken. We use the "binding" variable msg_ops through which we send/recv messages. In this 
+    // predicate we do not mutate the next state, relying on the fact that messages will be broadcast
+    // and we will be able to receive our own message and store it as described in the RecvPrepare predicate.
+    #[spec]
+    fn send_prepare(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, seq_id:SequenceID) -> bool
+    {
+           true
+        && v.wf(c)
+        && msg_ops.is_send()
+        && view_is_active(c, v)
+        && v.working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
+        && equal(msg_ops.send, pervasive::option::Option::Some(network::NetMessage {
+            sender: c.my_id,
+            payload: Message::Prepare {
+                view: v.view,
+                seq_id: seq_id,
+                operation_wrapper: v.working_window.pre_prepares_rcvd.map.index(seq_id).value().payload.get_operation_wrapper()
+            }}))
+//        && assert msg_ops.send.value.payload.Prepare?; true
+        && equal(vp, v)
+    }
+
+    // Predicate that describes what is needed and how we mutate the state v into vp when SendCommit
+    // Action is taken. We use the "binding" variable msg_ops through which we send/recv messages. In this 
+    // predicate we do not mutate the next state, relying on the fact that messages will be broadcast
+    // and we will be able to receive our own message and store it as described in the RecvCommit predicate.
+    #[spec]
+    fn send_commit(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, seq_id:SequenceID) -> bool
+    {
+           true
+        && v.wf(c)
+        && msg_ops.is_send()
+        && view_is_active(c, v)
+        && quorum_of_prepares(c, v, seq_id)
+        && v.working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
+        && equal(msg_ops.send, pervasive::option::Option::Some(network::NetMessage{
+            sender: c.my_id,
+            payload: Message::Commit{
+                view: v.view,
+                seq_id: seq_id,
+                operation_wrapper: v.working_window.pre_prepares_rcvd.map.index(seq_id).value().payload.get_operation_wrapper()
+        }}))
+//        && assert msg_ops.send.value.payload.Commit?; true
+
+        && equal(vp, v)
+    }
+
+    /* LEFT OFF at: LeaveView */
+
+    // TODO(jonh): add map.contains that means don().contains()
+    #[spec] pub fn init(c:Constants, v:Variables) -> bool {
+           true
+        && v.view.value == 0
+        && forall(|seq_id| #[auto_trigger] v.working_window.committed_client_operations.dom().contains(seq_id)
+                >>= v.working_window.committed_client_operations.index(seq_id).is_None())
+        && forall(|seq_id| #[auto_trigger] v.working_window.pre_prepares_rcvd.map.contains(seq_id)
+                >>= v.working_window.pre_prepares_rcvd.map.index(seq_id).is_None())
+        && forall(|seq_id| #[auto_trigger] v.working_window.prepares_rcvd.contains(seq_id)
+                >>= equal(v.working_window.prepares_rcvd.index(seq_id).map, map![]))
+        && forall(|seq_id| #[auto_trigger] v.working_window.commits_rcvd.contains(seq_id)
+                >>= equal(v.working_window.commits_rcvd.index(seq_id).map, map![]))
+        && equal(v.view_change_msgs_recvd.msgs, set![])
+        && equal(v.new_view_msgs_recvd.msgs, set![])
+    }
+
+    pub enum Step {
+        SendPrePrepareStep(),
+        RecvPrePrepareStep(),
+        SendPrepareStep { seq_id:SequenceID },
+        RecvPrepareStep(),
+        SendCommitStep { seq_id:SequenceID },
+        RecvCommitStep(),
+        DoCommitStep { seq_id:SequenceID }
+    }
+
+    #[spec] fn next_step(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, step: Step) -> bool
+    {
+        match step {
+            Step::SendPrePrepareStep() => send_pre_prepare(c, v, vp, msg_ops),
+            Step::RecvPrePrepareStep() => recv_pre_prepare(c, v, vp, msg_ops),
+            Step::SendPrepareStep { seq_id } => send_prepare(c, v, vp, msg_ops, seq_id),
+            Step::RecvPrepareStep() => recv_prepare(c, v, vp, msg_ops),
+            Step::SendCommitStep { seq_id } => send_commit(c, v, vp, msg_ops, seq_id),
+            Step::RecvCommitStep() => recv_commit(c, v, vp, msg_ops),
+            Step::DoCommitStep { seq_id } => false /* LEFT OFF */
+        }
+    }
+
+    #[spec] fn next(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    {
+        exists(|step| next_step(c, v, vp, msg_ops, step))
+    }
 }
 
-mod distributed_system {
+mod faulty_replica {
     #[allow(unused_imports)]
     use {
         builtin::*,
@@ -941,17 +1113,262 @@ mod distributed_system {
         crate::pervasive::*,
         crate::pervasive::set::*,
         crate::pervasive::option::*,
+        crate::host_identifiers::*,
+        crate::messages::*,
+    };
+
+    #[derive(PartialEq, Eq, Structural)]
+    pub struct Constants {
+        pub my_id: HostId,
+        pub cluster_config: cluster_config::Constants
+    }
+    impl Constants {
+        #[spec] pub fn configure(self, id: HostId, cluster_conf: cluster_config::Constants) -> bool {
+               true
+            && self.my_id == id
+            && self.cluster_config == cluster_conf
+        }
+    }
+
+    // Placeholder for possible client state
+    #[derive(PartialEq, Eq, Structural)]
+    pub struct Variables { }
+
+    #[spec] fn arbitrary_behavior(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>) -> bool {
+        true
+    }
+
+    pub enum Step {
+        ArbitraryBehaviorStep()
+    }
+
+    #[spec]
+    pub fn next_step(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>, step: Step) -> bool {
+        match step {
+            Step::ArbitraryBehaviorStep() => arbitrary_behavior(c, v, vp, msg_ops)
+        }
+    }
+
+    #[spec]
+    pub fn next(c: Constants, v: Variables, vp: Variables, msg_ops: network::MessageOps<Message>) -> bool {
+        exists(|step| next_step(c, v, vp, msg_ops, step))
+    }
+    
+}
+    
+mod distributed_system {
+    #[allow(unused_imports)]
+    use {
+        builtin::*,
+        builtin_macros::*,
+        crate::*,   // macros are defined at crate root somehow; need this for set![]
+            // TODO(utaal): Need to put set! macro into module namespace for less confusion.
+        crate::pervasive::*,
+        crate::pervasive::set::*,
+        crate::pervasive::seq::*,
+        crate::pervasive::option::*,
         crate::library::*,
         crate::host_identifiers::*,
         crate::messages::*,
     };
 
+    #[is_variant]
     pub enum HostConstants {
-        Foo
-//        Replica { replica_constants: Replica
-//        max_byzantine_faulty_replicas: nat,
-//        num_clients: nat
+        Replica { replica_constants: replica::Constants },
+        FaultyReplica { faulty_replica_constants: faulty_replica::Constants },
+        Client { client_constants: client::Constants },
     }
+    impl HostConstants {
+        // TODO(utaal): soooo muuuuuch boooooilerplate
+        #[spec] pub fn get_replica_constants(self) -> replica::Constants {
+            recommends(self.is_Replica());
+            match self {
+                HostConstants::Replica { replica_constants, .. } => replica_constants,
+                _ => arbitrary()
+            }
+        }
+        #[spec] pub fn get_faulty_replica_constants(self) -> faulty_replica::Constants {
+            recommends(self.is_FaultyReplica());
+            match self {
+                HostConstants::FaultyReplica { faulty_replica_constants, .. } => faulty_replica_constants,
+                _ => arbitrary()
+            }
+        }
+        #[spec] pub fn get_client_constants(self) -> client::Constants {
+            recommends(self.is_Client());
+            match self {
+                HostConstants::Client { client_constants, .. } => client_constants,
+                _ => arbitrary()
+            }
+        }
+    }
+
+    #[is_variant]
+    pub enum HostVariables {
+        Replica { replica_variables: replica::Variables },
+        FaultyReplica { faulty_replica_variables: faulty_replica::Variables },
+        Client { client_variables: client::Variables },
+    }
+    impl HostVariables {
+        // TODO(utaal): soooo muuuuuch boooooilerplate
+        #[spec] pub fn get_replica_variables(self) -> replica::Variables {
+            recommends(self.is_Replica());
+            match self {
+                HostVariables::Replica { replica_variables, .. } => replica_variables,
+                _ => arbitrary()
+            }
+        }
+        #[spec] pub fn get_faulty_replica_variables(self) -> faulty_replica::Variables {
+            recommends(self.is_FaultyReplica());
+            match self {
+                HostVariables::FaultyReplica { faulty_replica_variables, .. } => faulty_replica_variables,
+                _ => arbitrary()
+            }
+        }
+        #[spec] pub fn get_client_variables(self) -> client::Variables {
+            recommends(self.is_FaultyReplica());
+            match self {
+                HostVariables::Client { client_variables, .. } => client_variables,
+                _ => arbitrary()
+            }
+        }
+    }
+
+    pub struct Constants {
+        pub hosts: Seq<HostConstants>,
+        /* network: network::Constants, */
+        pub cluster_config: cluster_config::Constants
+    }
+    impl Constants {
+        #[spec] pub fn wf(self) -> bool {
+               true
+            && self.cluster_config.wf()
+            && self.cluster_config.cluster_size() == num_hosts()
+            && self.hosts.len() == num_hosts()
+            && forall(|id| #[auto_trigger] self.cluster_config.is_honest_replica(id) >>=
+                   true
+                && equal(self.hosts.index(id.value), HostConstants::Replica {
+                    replica_constants: replica::Constants {
+                        my_id: id,
+                        cluster_config: self.cluster_config}})
+                && self.hosts.index(id.value).get_replica_constants().configure(id, self.cluster_config)
+                )
+            && forall(|id| #[auto_trigger] self.cluster_config.is_faulty_replica(id) >>=
+                   true
+                && equal(self.hosts.index(id.value), HostConstants::FaultyReplica {
+                    faulty_replica_constants: faulty_replica::Constants {
+                        my_id: id,
+                        cluster_config: self.cluster_config}})
+                && self.hosts.index(id.value).get_faulty_replica_constants().configure(id, self.cluster_config)
+                )
+            && forall(|id| #[auto_trigger] self.cluster_config.is_client(id) >>=
+                   true
+                && equal(self.hosts.index(id.value), HostConstants::Client {
+                    client_constants: client::Constants {
+                        my_id: id,
+                        cluster_config: self.cluster_config}})
+                && self.hosts.index(id.value).get_client_constants().configure(id, self.cluster_config)
+                )
+        }
+    }
+
+    pub struct Variables {
+        pub hosts: Seq<HostVariables>,
+        pub network: network::Variables<Message>,
+    }
+    impl Variables {
+        #[spec] pub fn wf(self, c: Constants) -> bool {
+               true
+            && c.wf()
+            && self.hosts.len() == c.hosts.len()
+            && forall(|id| #[auto_trigger] c.cluster_config.is_honest_replica(id) >>=
+                   true
+                && self.hosts.index(id.value).is_Replica()
+                && self.hosts.index(id.value).get_replica_variables().wf(c.hosts.index(id.value).get_replica_constants())
+                )
+            && forall(|id| #[auto_trigger] c.cluster_config.is_client(id) >>=
+                   true
+                && self.hosts.index(id.value).is_Client()
+                && self.hosts.index(id.value).get_client_variables().wf(c.hosts.index(id.value).get_client_constants())
+                )
+            && forall(|id| #[auto_trigger] c.cluster_config.is_faulty_replica(id) >>=
+                   true
+                && self.hosts.index(id.value).is_FaultyReplica()
+                )
+        }
+    }
+
+    #[spec] fn Init(c:Constants, v:Variables) -> bool {
+           true
+        && v.wf(c)
+        && forall(|id| #[auto_trigger] c.cluster_config.is_honest_replica(id)
+                  >>= replica::init(c.hosts.index(id.value).get_replica_constants(), v.hosts.index(id.value).get_replica_variables()))
+        && forall(|id| #[auto_trigger] c.cluster_config.is_client(id)
+                  >>= client::init(c.hosts.index(id.value).get_client_constants(), v.hosts.index(id.value).get_client_variables()))
+        && v.network.init()
+    }
+}
+
+mod proof {
+    #[allow(unused_imports)]
+    use {
+        builtin::*,
+        builtin_macros::*,
+        crate::*,   // macros are defined at crate root somehow; need this for set![]
+            // TODO(utaal): Need to put set! macro into module namespace for less confusion.
+        crate::pervasive::*,
+        crate::pervasive::set::*,
+        crate::pervasive::seq::*,
+        crate::pervasive::option::*,
+        crate::library::*,
+        crate::host_identifiers::*,
+        crate::messages::*,
+        crate::distributed_system::*,
+    };
+
+    #[spec] fn is_honest_replica(c:Constants, host_id: HostId) -> bool
+    {
+           true
+        && c.wf()
+        && c.cluster_config.is_honest_replica(host_id)
+    }
+
+    // Here's a predicate that will be very useful in constructing invariant conjuncts.
+    #[spec] fn recorded_pre_prepares_recvd_came_from_network(c:Constants, v:Variables) -> bool {
+           true
+        && v.wf(c)
+        && forall(|replica_idx, seq_id: SequenceID| 
+               true
+            && is_honest_replica(c, replica_idx)
+            &&
+                // assert Library.TriggerKeyInFullImap(seq_id, v.hosts[replica_idx].replicaVariables.workingWindow.prePreparesRcvd);
+                v.hosts.index(replica_idx.value).get_replica_variables().working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
+                >>= v.network.sent_msgs.contains(v.hosts.index(replica_idx.value).get_replica_variables().working_window.pre_prepares_rcvd.map.index(seq_id).value())
+        )
+    }
+
+    #[spec] fn recorded_prepares_recvd_came_from_network(c:Constants, v:Variables, observer:HostId) -> bool
+    {
+           true
+        && v.wf(c)
+        && is_honest_replica(c, observer)
+        && forall(|sender, seq_id| {
+            let msg = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender);
+                //&& assert Library.TriggerKeyInFullImap(seq_id, v.hosts[observer].replicaVariables.workingWindow.preparesRcvd);
+            v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.contains(sender)
+            >>= (
+                // TODO(utaal): "`let` expressions are not supported here"
+                //let msg = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).index(sender);
+                   true
+                && v.network.sent_msgs.contains(msg)
+                && msg.sender == sender
+                && msg.payload.get_seq_id() == seq_id // The key we stored matches what is in the msg
+                )
+        })
+    }
+
+    
+
 }
 
 fn main() {}
