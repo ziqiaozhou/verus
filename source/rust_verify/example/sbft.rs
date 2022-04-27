@@ -557,7 +557,7 @@ mod replica {
     //type PrepareProofSet = Map<HostId, NetMessage<Message>>
     // TODO(utaal): Maps can't Structural, either.
     //#[derive(PartialEq, Eq, Structural)]
-    struct PrepareProofSet {
+    pub struct PrepareProofSet {
         pub map: Map<HostId, network::NetMessage<Message>>
     }
 
@@ -580,7 +580,7 @@ mod replica {
     //type PrepareProofSet = Map<HostId, NetMessage<Message>>
     // TODO(utaal): Maps can't Structural, either.
     //#[derive(PartialEq, Eq, Structural)]
-    struct CommitProofSet {
+    pub struct CommitProofSet {
         map: Map<HostId, network::NetMessage<Message>>
     }
 
@@ -602,7 +602,7 @@ mod replica {
 
     //type PrePreparesRecvd = Map<SequenceID, Option<network::NetMessage<Message>>>
     // TODO(utaal): Maps can't Structural, either.
-    struct PrePreparesRcvd {
+    pub struct PrePreparesRcvd {
         pub map: Map<SequenceID, Option<network::NetMessage<Message>>>
     }
 
@@ -621,7 +621,7 @@ mod replica {
     // pattern should be. Like, I'd still like to tell other modules to keep their
     // mitts off these fields, but maybe the proof module wants to be a "friend" sort
     // of thing?
-    struct WorkingWindow {
+    pub struct WorkingWindow {
         pub committed_client_operations: Map<SequenceID, Option<OperationWrapper>>,
         pub pre_prepares_rcvd: PrePreparesRcvd,
         pub prepares_rcvd: Map<SequenceID, PrepareProofSet>,
@@ -642,7 +642,7 @@ mod replica {
         }
     }
 
-    struct ViewChangeMsgs { msgs: Set<network::NetMessage<Message>> }
+    pub struct ViewChangeMsgs { msgs: Set<network::NetMessage<Message>> }
     impl ViewChangeMsgs {
         #[spec] fn wf(self, c: Constants) -> bool {
                true
@@ -654,7 +654,7 @@ mod replica {
         }
     }
 
-    struct NewViewMsgs { msgs: Set<network::NetMessage<Message>> }
+    pub struct NewViewMsgs { msgs: Set<network::NetMessage<Message>> }
     impl NewViewMsgs {
         #[spec] fn wf(self, c: Constants) -> bool {
                true
@@ -752,6 +752,7 @@ mod replica {
     // Constructively demonstrate that we can compute the certificate with the highest View.
     #[spec] fn highest_view_prepare_certificate(prepare_certificates: Set<PreparedCertificate>) -> PreparedCertificate {
         // TODO(chris): "only one call to recommends allowed"? Aw c'mooooon.
+        // TODO(jonh): add decreases_when?
         recommends([
            forall(|cert| #[auto_trigger] prepare_certificates.contains(cert) >>= cert.wf() && !cert.empty()),
             prepare_certificates.len() > 0
@@ -1352,7 +1353,7 @@ mod proof {
            true
         && v.wf(c)
         && is_honest_replica(c, observer)
-        && forall(|sender, seq_id| {
+        && forall(|sender, seq_id| with_triggers!([v.network.sent_msgs.contains(msg), msg.sender == sender]) => {
             let msg = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender);
                 //&& assert Library.TriggerKeyInFullImap(seq_id, v.hosts[observer].replicaVariables.workingWindow.preparesRcvd);
             v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.contains(sender)
