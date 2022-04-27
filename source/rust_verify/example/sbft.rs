@@ -581,7 +581,7 @@ mod replica {
     // TODO(utaal): Maps can't Structural, either.
     //#[derive(PartialEq, Eq, Structural)]
     pub struct CommitProofSet {
-        map: Map<HostId, network::NetMessage<Message>>
+        pub map: Map<HostId, network::NetMessage<Message>>
     }
 
     impl CommitProofSet {
@@ -637,8 +637,8 @@ mod replica {
             && full_imap(self.prepares_rcvd)
             && full_imap(self.commits_rcvd)
             && self.pre_prepares_rcvd.wf()
-            && forall(|seqID| #[auto_trigger] self.prepares_rcvd.contains(seqID) >>= self.prepares_rcvd.index(seqID).wf(c))
-            && forall(|seqID| #[auto_trigger] self.commits_rcvd.contains(seqID) >>= self.commits_rcvd.index(seqID).wf(c))
+            && forall(|seq_id| #[auto_trigger] self.prepares_rcvd.contains(seq_id) >>= self.prepares_rcvd.index(seq_id).wf(c))
+            && forall(|seq_id| #[auto_trigger] self.commits_rcvd.contains(seq_id) >>= self.commits_rcvd.index(seq_id).wf(c))
         }
     }
 
@@ -799,7 +799,7 @@ mod replica {
 
         // 1. Take the NewViewMsg for the current View.
         // 2. Go through all the ViewChangeMsg-s in the NewView and take the valid full 
-        //    PreparedCertificates from them for the seqID.
+        //    PreparedCertificates from them for the seq_id.
         // 3. From all the collected PreparedCertificates take the one with the highest View.
         // 4. If it is empty  we need to fill with NoOp.
         // 5. If it contains valid full quorum we take the Client Operation and insist it will be committed in the new View.
@@ -977,27 +977,27 @@ mod replica {
         })
     }
 
-    #[spec] fn quorum_of_prepares(c:Constants, v:Variables, seqID:SequenceID) -> bool {
+    #[spec] pub fn quorum_of_prepares(c:Constants, v:Variables, seq_id:SequenceID) -> bool {
            true
         && v.wf(c)
-        && v.working_window.prepares_rcvd.index(seqID).len() >= c.cluster_config.agreement_quorum()
+        && v.working_window.prepares_rcvd.index(seq_id).len() >= c.cluster_config.agreement_quorum()
     }
 
-    #[spec] fn quorum_of_commits(c:Constants, v:Variables, seqID:SequenceID) -> bool {
+    #[spec] fn quorum_of_commits(c:Constants, v:Variables, seq_id:SequenceID) -> bool {
            true
         && v.wf(c)
-        && v.working_window.commits_rcvd.index(seqID).len() >= c.cluster_config.agreement_quorum()
+        && v.working_window.commits_rcvd.index(seq_id).len() >= c.cluster_config.agreement_quorum()
     }
 
-    #[spec] fn DoCommit(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, seqID:SequenceID) -> bool
+    #[spec] fn DoCommit(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, seq_id:SequenceID) -> bool
     {
-        let msg = v.working_window.pre_prepares_rcvd.map.index(seqID).value();
+        let msg = v.working_window.pre_prepares_rcvd.map.index(seq_id).value();
            true
         && v.wf(c)
         && msg_ops.no_send_recv()
-        && quorum_of_prepares(c, v, seqID)
-        && quorum_of_commits(c, v, seqID)
-        && v.working_window.pre_prepares_rcvd.map.index(seqID).is_Some()
+        && quorum_of_prepares(c, v, seq_id)
+        && quorum_of_commits(c, v, seq_id)
+        && v.working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
         // TODO: We should be able to commit empty (Noop) operations as well
         && equal(vp, Variables {
             working_window: WorkingWindow {
@@ -1338,11 +1338,11 @@ mod proof {
     #[spec] fn recorded_pre_prepares_recvd_came_from_network(c:Constants, v:Variables) -> bool {
            true
         && v.wf(c)
-        && forall(|replica_idx, seq_id: SequenceID| 
+        && forall(|replica_idx, seq_id: SequenceID| #[auto_trigger]
                true
             && is_honest_replica(c, replica_idx)
             &&
-                // assert Library.TriggerKeyInFullImap(seq_id, v.hosts[replica_idx].replicaVariables.workingWindow.prePreparesRcvd);
+                // assert Library.TriggerKeyInFullImap(seq_id, v.hosts[replica_idx].replicaVariables.workingWindow.pre_prepares_rcvd);
                 v.hosts.index(replica_idx.value).get_replica_variables().working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
                 >>= v.network.sent_msgs.contains(v.hosts.index(replica_idx.value).get_replica_variables().working_window.pre_prepares_rcvd.map.index(seq_id).value())
         )
@@ -1350,24 +1350,267 @@ mod proof {
 
     #[spec] fn recorded_prepares_recvd_came_from_network(c:Constants, v:Variables, observer:HostId) -> bool
     {
+        let prepares_rcvd = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd;
            true
         && v.wf(c)
         && is_honest_replica(c, observer)
-        && forall(|sender, seq_id| with_triggers!([v.network.sent_msgs.contains(msg), msg.sender == sender]) => {
-            let msg = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender);
+        && forall(|sender, seq_id| with_triggers!([
+            prepares_rcvd.index(seq_id).map.index(sender).sender,
+            prepares_rcvd.index(seq_id).map.index(sender).payload.get_seq_id() ] => {
                 //&& assert Library.TriggerKeyInFullImap(seq_id, v.hosts[observer].replicaVariables.workingWindow.preparesRcvd);
-            v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.contains(sender)
-            >>= (
-                // TODO(utaal): "`let` expressions are not supported here"
-                //let msg = v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).index(sender);
+            prepares_rcvd.index(seq_id).map.contains(sender)
+            >>= {
+                let msg = prepares_rcvd.index(seq_id).map.index(sender);
                    true
                 && v.network.sent_msgs.contains(msg)
                 && msg.sender == sender
                 && msg.payload.get_seq_id() == seq_id // The key we stored matches what is in the msg
-                )
-        })
+                }
+        }))
     }
 
+    #[spec] fn recorded_prepares_in_all_hosts_recvd_came_from_network(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|observer| #[auto_trigger]
+              is_honest_replica(c, observer)
+              >>= recorded_prepares_recvd_came_from_network(c, v, observer))
+    }
+
+    #[spec] fn get_k_replicas(c:Constants, k:nat) -> Set<HostId>
+    {
+        recommends([c.wf(), k <= c.cluster_config.n()]);
+        decreases(k);
+        //ensures |hosts| == k
+        //ensures forall host :: host in hosts <==> 0 <= host < k
+        //ensures forall host | host in hosts :: c.clusterConfig.IsReplica(host)
+        if k == 0 { set![] }
+        else { get_k_replicas(c, k-1).union(set![HostId { value: k as int - 1 }]) }
+    }
+
+    #[spec] fn get_all_replicas(c: Constants) -> Set<HostId>
+    {
+      recommends(c.wf());
+      //ensures |hostsSet| == c.clusterConfig.N()
+      //ensures forall host :: host in hostsSet <==> c.clusterConfig.IsReplica(host)
+      get_k_replicas(c, c.cluster_config.n())
+    }
+
+    #[spec] fn sent_prepares_for_seq_id(c:Constants, v:Variables, view:ViewNum, seq_id:SequenceID, 
+                                        operation_wrapper:OperationWrapper) -> Set<network::NetMessage<Message>>
+    {
+        v.network.sent_msgs.filter(|msg|
+                    true
+                  && msg.payload.is_Prepare()
+                  && msg.payload.get_view() == view
+                  && msg.payload.get_seq_id() == seq_id
+                  && equal(msg.payload.get_operation_wrapper(), operation_wrapper)
+                  && get_all_replicas(c).contains(msg.sender)
+        )
+    }
+        
+    #[spec] fn quorum_of_prepares_in_network(c:Constants, v:Variables, view:ViewNum, seq_id:SequenceID, 
+                                        operation_wrapper:OperationWrapper) -> bool {
+      let prepares = sent_prepares_for_seq_id(c, v, view, seq_id, operation_wrapper);
+        true
+      && v.wf(c)
+      && messages::senders_of(prepares).len() >= c.cluster_config.agreement_quorum()
+      //&& (forall prepare | prepare in prepares :: prepare.clientOp == clientOperation)
+    }
+
+    #[spec] fn every_commit_msg_is_supported_by_a_quorum_of_prepares(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|commit_msg| #[auto_trigger]
+                    true
+                && v.network.sent_msgs.contains(commit_msg)
+                 && commit_msg.payload.is_Commit()
+                 && is_honest_replica(c, commit_msg.sender)
+            >>= quorum_of_prepares_in_network(c, v, commit_msg.payload.get_view(), 
+                                         commit_msg.payload.get_seq_id(), commit_msg.payload.get_operation_wrapper()) )
+    }
+
+    // This predicate states that honest replicas accept the first PrePrepare they receive and vote
+    // with a Prepare message only for it. The lock on Prepare is meant to highlight the fact that
+    // even though a replica can send multiple times a Prepare message for a given Sequence ID for
+    // a given View, this message will not change unless a View Change happens.
+    #[spec] fn honest_replicas_lock_on_prepare_for_given_view(c: Constants, v:Variables) -> bool
+    {
+      forall(|msg1, msg2| #[auto_trigger]
+            true
+          && v.network.sent_msgs.contains(msg1)
+          && v.network.sent_msgs.contains(msg2)
+          && msg1.payload.is_Prepare()
+          && msg2.payload.is_Prepare()
+          && msg1.payload.get_view() == msg2.payload.get_view()
+          && msg1.payload.get_seq_id() == msg2.payload.get_seq_id()
+          && msg1.sender == msg2.sender
+          && is_honest_replica(c, msg1.sender)
+          >>= equal(msg1, msg2))
+    }
+
+    // This predicate states that if a replica sends a Commit message for a given Sequence ID for a given View
+    // it will not change its mind, even if it re-sends this message multiple times it will always be the same
+    // for a given View.
+    #[spec] fn /*{:opaque}*/ honest_replicas_lock_on_commit_for_given_view(c:Constants, v:Variables) -> bool {
+        forall(|msg1, msg2| #[auto_trigger]
+            true
+          && v.network.sent_msgs.contains(msg1)
+          && v.network.sent_msgs.contains(msg2)
+          && msg1.payload.is_Commit()
+          && msg2.payload.is_Commit()
+          && msg1.payload.get_view() == msg2.payload.get_view()
+          && msg1.payload.get_seq_id() == msg2.payload.get_seq_id()
+          && msg1.sender == msg2.sender
+          && is_honest_replica(c, msg1.sender)
+          >>= equal(msg1, msg2))
+    }
+
+    #[spec] fn /*{:opaque}*/ commit_msgs_from_honest_senders_agree(c:Constants, v:Variables) -> bool {
+        forall(|msg1, msg2| #[auto_trigger] 
+            true
+          && v.network.sent_msgs.contains(msg1)
+          && v.network.sent_msgs.contains(msg2)
+          && msg1.payload.is_Commit()
+          && msg2.payload.is_Commit()
+          && msg1.payload.get_view() == msg2.payload.get_view()
+          && msg1.payload.get_seq_id() == msg2.payload.get_seq_id()
+          && is_honest_replica(c, msg1.sender)
+          && is_honest_replica(c, msg2.sender)
+          >>= equal(msg1.payload.get_operation_wrapper(), msg2.payload.get_operation_wrapper()))
+    }
+
+    #[spec] fn recorded_prepares_have_valid_sender_id(c:Constants, v:Variables) -> bool {
+            true
+      && v.wf(c)
+      && forall(|replica_idx: HostId, seq_id, sender| with_triggers!([
+            v.hosts.index(replica_idx.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender)
+              ] =>
+            {
+            let prepare_map = v.hosts.index(replica_idx.value).get_replica_variables().working_window.prepares_rcvd;
+                true
+            && is_honest_replica(c, replica_idx)
+            && prepare_map.contains(seq_id)
+            && prepare_map.index(seq_id).map.contains(sender)
+            >>=
+                true
+                && prepare_map.index(seq_id).map.index(sender).sender == sender
+               && c.cluster_config.is_replica(sender)
+            }))
+    }
+
+    #[spec] fn recorded_prepares_client_ops_match_pre_prepare(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|replica_idx: HostId, seq_id, sender| with_triggers!([
+            v.hosts.index(replica_idx.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender)
+          ] =>
+        {
+            let prepare_map = v.hosts.index(replica_idx.value).get_replica_variables().working_window.prepares_rcvd;
+              true
+            && is_honest_replica(c, replica_idx)
+            && prepare_map.contains(seq_id)
+            && prepare_map.index(seq_id).map.contains(sender)
+            >>= {
+                let replica_working_window = v.hosts.index(replica_idx.value).get_replica_variables().working_window;
+                true
+               && replica_working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
+               && equal(replica_working_window.prepares_rcvd.index(seq_id).map.index(sender).payload.get_operation_wrapper(),
+                  replica_working_window.pre_prepares_rcvd.map.index(seq_id).value().payload.get_operation_wrapper())
+            }
+        }))
+    }
+    
+    #[spec] fn /*{:opaque}*/ recorded_commits_client_ops_match_pre_prepare(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|replica_idx: HostId, seq_id, sender| with_triggers!([
+            v.hosts.index(replica_idx.value).get_replica_variables().working_window.commits_rcvd.index(seq_id).map.index(sender)
+      ] =>
+            {
+            let commit_map = v.hosts.index(replica_idx.value).get_replica_variables().working_window.commits_rcvd;
+                true
+            && is_honest_replica(c, replica_idx)
+            && commit_map.contains(seq_id)
+            && commit_map.index(seq_id).map.contains(sender)
+            >>= {
+            let replica_working_window = v.hosts.index(replica_idx.value).get_replica_variables().working_window;
+                true
+               && replica_working_window.pre_prepares_rcvd.map.index(seq_id).is_Some()
+               && equal(replica_working_window.commits_rcvd.index(seq_id).map.index(sender).payload.get_operation_wrapper(),
+                   replica_working_window.pre_prepares_rcvd.map.index(seq_id).value().payload.get_operation_wrapper())
+            }}))
+    }
+
+    #[spec] fn /*{:opaque}*/ every_commit_is_supported_by_recorded_prepares(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|commitMsg| #[auto_trigger]
+                true
+            && v.network.sent_msgs.contains(commitMsg)
+            && commitMsg.payload.is_Commit()
+            && is_honest_replica(c, commitMsg.sender)
+            >>= true
+            && replica::quorum_of_prepares(c.hosts.index(commitMsg.sender.value).get_replica_constants(),
+                                           v.hosts.index(commitMsg.sender.value).get_replica_variables(), 
+                                           commitMsg.payload.get_seq_id()))
+    }
+
+    #[spec] fn /*{:opaque}*/ every_commit_client_op_matches_recorded_pre_prepare(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|commitMsg| #[auto_trigger]
+                true
+                && v.network.sent_msgs.contains(commitMsg)
+                 && commitMsg.payload.is_Commit()
+                 && is_honest_replica(c, commitMsg.sender)
+            >>= {
+            let recordedPrePrepare = 
+                  v.hosts.index(commitMsg.sender.value).get_replica_variables().working_window.pre_prepares_rcvd.map.index(commitMsg.payload.get_seq_id());
+                true
+               && recordedPrePrepare.is_Some()
+               && equal(commitMsg.payload.get_operation_wrapper(), recordedPrePrepare.value().payload.get_operation_wrapper())
+            })
+    }
+
+    #[spec] fn recorded_prepares_match_host_view(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|observer: HostId, seq_id, sender| with_triggers!([
+         v.hosts.index(observer.value).get_replica_variables().working_window.prepares_rcvd.index(seq_id).map.index(sender)
+
+      ] =>
+                {
+                             let replica_vars = v.hosts.index(observer.value).get_replica_variables();
+                             true
+                             && is_honest_replica(c, observer)
+                             && c.cluster_config.is_replica(sender)
+                             && replica_vars.working_window.prepares_rcvd.contains(seq_id)
+                             && replica_vars.working_window.prepares_rcvd.index(seq_id).map.contains(sender)
+                  >>= true
+                     && replica_vars.view == replica_vars.working_window.prepares_rcvd.index(seq_id).map.index(sender).payload.get_view()
+            }))
+    }
+
+    #[spec] fn sent_prepares_match_recorded_pre_prepare_if_host_in_same_view(c:Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|prepare| #[auto_trigger]
+                    true
+                  && v.network.sent_msgs.contains(prepare)
+                  && prepare.payload.is_Prepare()
+                  && is_honest_replica(c, prepare.sender)
+                  && prepare.payload.get_view() == v.hosts.index(prepare.sender.value).get_replica_variables().view
+                    >>= {
+                    let replica_working_window = v.hosts.index(prepare.sender.value).get_replica_variables().working_window;
+                    true
+                       && replica_working_window.pre_prepares_rcvd.map.index(prepare.payload.get_seq_id()).is_Some()
+                       && equal(replica_working_window.pre_prepares_rcvd.map.index(prepare.payload.get_seq_id()).value().payload.get_operation_wrapper(),
+                          prepare.payload.get_operation_wrapper())
+                    })
+    }
+
+    
     
 
 }
