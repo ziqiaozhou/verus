@@ -45,14 +45,14 @@ mod host_identifiers {
     pub struct HostId { pub value: int }
 
     #[spec]
-    pub fn ValidHostId(h: HostId) -> bool {
+    pub fn valid_host_id(h: HostId) -> bool {
         0 <= h.value && h.value < num_hosts()
     }
 
     #[spec]
     fn AllHosts() -> Set<HostId>
     {
-        Set::new(|h: HostId| ValidHostId(h))
+        Set::new(|h: HostId| valid_host_id(h))
             //&& 0<=h.value<num_hosts()  // don't need Dafny's finite-set heuristic
     }
 }
@@ -383,7 +383,7 @@ mod cluster_config {
         pub fn is_honest_replica(self, id: HostId) -> bool {
             recommends(self.wf());
                true
-            && ValidHostId(id)
+            && valid_host_id(id)
             && self.f() <= id.value
             && id.value < self.n()
         }
@@ -392,7 +392,7 @@ mod cluster_config {
         pub fn is_faulty_replica(self, id: HostId) -> bool {
             recommends(self.wf());
                true
-            && ValidHostId(id)
+            && valid_host_id(id)
             && 0 <= id.value
             && id.value < self.f()
         }
@@ -401,7 +401,7 @@ mod cluster_config {
         pub fn is_replica(self, id: HostId) -> bool {
             recommends(self.wf());
                true
-            && ValidHostId(id)
+            && valid_host_id(id)
             && 0 <= id.value
             && id.value < self.n()
         }
@@ -410,7 +410,7 @@ mod cluster_config {
         pub fn is_client(self, id: HostId) -> bool {
             recommends(self.wf());
                true
-            && ValidHostId(id)
+            && valid_host_id(id)
             && self.n() <= id.value
             && id.value < num_hosts()
         }
@@ -850,7 +850,7 @@ mod replica {
     // That is why it can appear as enabling condition, but does not need to be translated to runtime checks to C++.
     // For this to be safe it has to appear in the main invarinat in the proof.
     // NB: Verus fns never require! Just recommend. So that's new.
-    #[spec] fn lite_inv(c:Constants, v:Variables) -> bool {
+    #[spec] pub fn lite_inv(c:Constants, v:Variables) -> bool {
            true
         && v.wf(c)
         && forall(|new_view_msg| #[auto_trigger]
@@ -1085,7 +1085,20 @@ mod replica {
         DoCommitStep { seq_id:SequenceID }
     }
 
-    #[spec] fn next_step(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, step: Step) -> bool
+    impl Step {
+        #[spec] pub fn get_seq_id(self) -> SequenceID
+        {
+            match self {
+                Step::SendPrepareStep { seq_id } => seq_id,
+                Step::SendCommitStep { seq_id } => seq_id,
+                Step::DoCommitStep { seq_id } => seq_id,
+                _ => arbitrary()
+            }
+        }
+    }
+
+
+    #[spec] pub fn next_step(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>, step: Step) -> bool
     {
         match step {
             Step::SendPrePrepareStep() => send_pre_prepare(c, v, vp, msg_ops),
@@ -1098,7 +1111,7 @@ mod replica {
         }
     }
 
-    #[spec] fn next(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
+    #[spec] pub fn next(c:Constants, v:Variables, vp:Variables, msg_ops:network::MessageOps<Message>) -> bool
     {
         exists(|step| next_step(c, v, vp, msg_ops, step))
     }
@@ -1308,6 +1321,57 @@ mod distributed_system {
                   >>= client::init(c.hosts.index(id.value).get_client_constants(), v.hosts.index(id.value).get_client_variables()))
         && v.network.init()
     }
+
+    // Jay Normal Form - Dafny syntactic sugar, useful for selecting the next step
+    pub struct Step {
+        pub id:HostId,
+        pub msg_ops: network::MessageOps<Message>,
+    }
+
+    #[spec] fn replica_step(c:Constants, v:Variables, vp:Variables, step: Step) -> bool {
+           true
+        && v.wf(c)
+        && vp.wf(c)
+        && c.cluster_config.is_honest_replica(step.id)
+        && replica::next(c.hosts.index(step.id.value).get_replica_constants(),
+        v.hosts.index(step.id.value).get_replica_variables(),
+        vp.hosts.index(step.id.value).get_replica_variables(), step.msg_ops)
+    }
+
+    #[spec] fn faulty_replica_step(c:Constants, v:Variables, vp:Variables, step: Step) -> bool {
+           true
+        && v.wf(c)
+        && vp.wf(c)
+        && c.cluster_config.is_faulty_replica(step.id)
+        //&& assert(v.hosts.index(step.id.value).FaultyReplica?);
+        && faulty_replica::next(c.hosts.index(step.id.value).get_faulty_replica_constants(),
+            v.hosts.index(step.id.value).get_faulty_replica_variables(),
+            vp.hosts.index(step.id.value).get_faulty_replica_variables(), step.msg_ops)
+    }
+
+    #[spec] fn client_step(c:Constants, v:Variables, vp:Variables, step: Step) -> bool {
+           true
+        && v.wf(c)
+        && vp.wf(c)
+        && c.cluster_config.is_client(step.id)
+        && client::next(c.hosts.index(step.id.value).get_client_constants(),
+        v.hosts.index(step.id.value).get_client_variables(),
+        vp.hosts.index(step.id.value).get_client_variables(), step.msg_ops)
+    }
+
+    #[spec] pub fn next_step(c:Constants, v:Variables, vp:Variables, step: Step) -> bool {
+               true
+        && v.wf(c)
+        && vp.wf(c)
+        && (replica_step(c, v, vp, step) || client_step(c, v, vp, step) || faulty_replica_step(c, v, vp, step))
+        && forall(|other| valid_host_id(other) && other != step.id
+                >>= equal(vp.hosts.index(other.value), v.hosts.index(other.value)))
+        && network::Variables::next(/*c.network,*/ v.network, vp.network, step.msg_ops, step.id)
+    }
+
+    #[spec] pub fn next(c:Constants, v:Variables, vp:Variables) -> bool {
+        exists(|step| next_step(c, v, vp, step))
+    }
 }
 
 mod proof {
@@ -1383,7 +1447,7 @@ mod proof {
         decreases(k);
         //ensures |hosts| == k
         //ensures forall host :: host in hosts <==> 0 <= host < k
-        //ensures forall host | host in hosts :: c.clusterConfig.IsReplica(host)
+        //ensures forall host | host in hosts :: c.cluster_config.IsReplica(host)
         if k == 0 { set![] }
         else { get_k_replicas(c, k-1).union(set![HostId { value: k as int - 1 }]) }
     }
@@ -1391,8 +1455,8 @@ mod proof {
     #[spec] fn get_all_replicas(c: Constants) -> Set<HostId>
     {
       recommends(c.wf());
-      //ensures |hostsSet| == c.clusterConfig.N()
-      //ensures forall host :: host in hostsSet <==> c.clusterConfig.IsReplica(host)
+      //ensures |hostsSet| == c.cluster_config.N()
+      //ensures forall host :: host in hostsSet <==> c.cluster_config.IsReplica(host)
       get_k_replicas(c, c.cluster_config.n())
     }
 
@@ -1610,7 +1674,178 @@ mod proof {
                     })
     }
 
+    #[spec] fn all_replicas_lite_inv(c: Constants, v:Variables) -> bool {
+        true
+      && v.wf(c)
+      && forall(|replica_idx: HostId| #[auto_trigger]
+                true
+            && 0 <= replica_idx.value   // TODO(jonh): use nat in HostId type!
+            && replica_idx.value < c.hosts.len()
+            && c.cluster_config.is_honest_replica(replica_idx)
+            >>= replica::lite_inv(
+                c.hosts.index(replica_idx.value).get_replica_constants(),
+                v.hosts.index(replica_idx.value).get_replica_variables()))
+    }
+
+    #[spec] fn inv(c: Constants, v:Variables) -> bool {
+      //&& PrePreparesCarrySameClientOpsForGivenSeqID(c, v)
+      // Do not remove, lite invariant about internal honest Node invariants:
+         true
+      && all_replicas_lite_inv(c, v)
+      && recorded_prepares_have_valid_sender_id(c, v)
+      && sent_prepares_match_recorded_pre_prepare_if_host_in_same_view(c, v)
+      && recorded_pre_prepares_recvd_came_from_network(c, v)
+      && recorded_prepares_in_all_hosts_recvd_came_from_network(c, v)
+      && recorded_prepares_match_host_view(c, v)
+      && every_commit_msg_is_supported_by_a_quorum_of_prepares(c, v)
+      && recorded_prepares_client_ops_match_pre_prepare(c, v)
+      && recorded_commits_client_ops_match_pre_prepare(c, v)
+      && every_commit_is_supported_by_recorded_prepares(c, v)
+      && every_commit_client_op_matches_recorded_pre_prepare(c, v)
+      && honest_replicas_lock_on_prepare_for_given_view(c, v)
+      && honest_replicas_lock_on_commit_for_given_view(c, v)
+      && commit_msgs_from_honest_senders_agree(c, v)
+    }
+
+    #[spec] fn honest_replicas(c: Constants) -> Set<HostId>
+    {
+        recommends(c.wf());
+        Set::new(|sender: HostId| 0 <= sender.value && sender.value < c.cluster_config.n() && is_honest_replica(c, sender))
+    }
+
+    // TODO(chris): Would like #[proof] while {}
+    /*
+    #[proof] fn count_honest_replicas(c: Constants)
+    {
+        requires(c.wf());
+        ensures(honest_replicas(c).len() >= c.cluster_config.agreement_quorum());
+
+        #[proof] let count = 0;
+        #[proof] let f = c.cluster_config.f();
+        #[proof] let n = c.cluster_config.n();
+        while(count < n) {
+            invariant([
+                count <= n,
+                Set::new(|sender: HostId| 0 <= sender.value && sender.value < count && is_honest_replica(c, sender)).len()
+                    == if count < f { 0 } else { count - f },
+                ]);
+            {
+                let oldSet = Set::new(|sender: HostId| 0 <= sender.value && sender.value < count && is_honest_replica(c, sender));
+                let newSet = Set::new(|sender: HostId| 0 <= sender.value && sender.value < count as int + 1 && is_honest_replica(c, sender));
+                if(count >= f) {
+                    assert(equal(newSet, oldSet.union(set![HostId{value: count}])));
+                }
+                count = count + 1;
+            }
+        }
+    }
+    */
+
+    #[proof] fn count_honest_replicas_recursive(c: Constants, count: nat)
+    {
+        requires(c.wf());
+        ensures(
+                Set::new(|sender: HostId| 0 <= sender.value && sender.value < count && is_honest_replica(c, sender)).len()
+                    == if count < c.cluster_config.f() { 0 } else { count - c.cluster_config.f() });
+        if count > 0 {
+            count_honest_replicas_recursive(c, count-1);
+        }
+    }
+
+    #[proof] fn count_honest_replicas(c: Constants)
+    {
+        requires(c.wf());
+        ensures(honest_replicas(c).len() >= c.cluster_config.agreement_quorum());
+
+        count_honest_replicas_recursive(c, c.cluster_config.n());
+    }
+
+    #[proof] fn find_quorum_intersection(c: Constants, senders1:Set<HostId>, senders2:Set<HostId>) -> HostId
+    {
+        requires([
+          c.wf(),
+          senders1.len() >= c.cluster_config.agreement_quorum(), //TODO: rename hosts
+          senders2.len() >= c.cluster_config.agreement_quorum(),
+          senders1.subset_of(get_all_replicas(c)),
+          senders2.subset_of(get_all_replicas(c)),
+        ]);
+        ensures(|common| [
+          is_honest_replica(c, common),
+          senders1.contains(common),
+          senders2.contains(common),
+        ]);
+
+        let f = c.cluster_config.f();
+        let n = c.cluster_config.n();
+
+        assert(2 * f + 1 <= senders1.len());
+        assert(2 * f + 1 <= senders2.len());
+
+        let common_senders = senders1.intersect(senders2);
+        if(common_senders.len() < f + 1) {
+            /*
+            calc {
+                n;
+                == (3 * f) + 1;
+                < |senders1| + |senders2| - |senders1*senders2|;
+                == |senders1 + senders2|; 
+                <= {
+                    Library.SubsetCardinality(senders1 + senders2, getAllReplicas(c));
+                }
+                n;
+            }
+            */
+            assert(false); // Proof by contradiction.
+        }
+        assert(f + 1 <= common_senders.len());
+
+        let common_honest = common_senders.intersect(honest_replicas(c));
+        count_honest_replicas(c);
+        if(common_honest.len() == 0) {
+            /*
+            Library.SubsetCardinality(common_senders + HonestReplicas(c), getAllReplicas(c));
+            */
+            assert(false); //Proof by contradiction
+        }
+
+        let result = choose(|result| common_honest.contains(result));
+        return result;
+    }
     
+    #[proof] fn wlog_commit_agreement(c: Constants, v:Variables, vp:Variables, step:Step,
+                                      msg1:network::NetMessage<Message>,
+                                      msg2:network::NetMessage<Message>)
+    {
+        requires([
+            inv(c, v),
+            next_step(c, v, vp, step),
+            vp.network.sent_msgs.contains(msg1),
+            vp.network.sent_msgs.contains(msg2),
+            msg1.payload.is_Commit(),
+            msg2.payload.is_Commit(),
+            msg1.payload.get_view() == msg2.payload.get_view(),
+            msg1.payload.get_seq_id() == msg2.payload.get_seq_id(),
+            v.network.sent_msgs.contains(msg1),
+            !v.network.sent_msgs.contains(msg2),
+            is_honest_replica(c, msg1.sender),
+            is_honest_replica(c, msg2.sender),
+        ]);
+        ensures(equal(msg1.payload.get_operation_wrapper(), msg2.payload.get_operation_wrapper()));
+
+        let prepares1 = sent_prepares_for_seq_id(c, v, msg1.payload.get_view(), msg1.payload.get_seq_id(), msg1.payload.get_operation_wrapper());
+        let senders1 = senders_of(prepares1);
+        assert(senders1.len() >= c.cluster_config.agreement_quorum());
+
+        let h_c = c.hosts.index(step.id.value).get_replica_constants();
+        let h_v = v.hosts.index(step.id.value).get_replica_variables();
+        let h_vp = vp.hosts.index(step.id.value).get_replica_variables();
+        let h_step = choose(|h_step| replica::next_step(h_c, h_v, h_vp, step.msg_ops, h_step));
+
+        let senders2 = h_v.working_window.prepares_rcvd.index(h_step.get_seq_id()).map.dom();
+        assert(senders2.len() >= c.cluster_config.agreement_quorum());
+
+        let equivocating_honest_sender = find_quorum_intersection(c, senders1, senders2);
+    }
     
 
 }
