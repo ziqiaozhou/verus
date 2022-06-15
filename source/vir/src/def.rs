@@ -44,7 +44,7 @@ const PREFIX_REQUIRES: &str = "req%";
 const PREFIX_ENSURES: &str = "ens%";
 const PREFIX_RECURSIVE: &str = "rec%";
 const PREFIX_SIMPLIFY_TEMP_VAR: &str = "tmp%%";
-const PREFIX_TEMP_VAR: &str = "tmp%";
+pub(crate) const PREFIX_TEMP_VAR: &str = "tmp%";
 const PREFIX_PRE_VAR: &str = "pre%";
 const PREFIX_BOX: &str = "Poly%";
 const PREFIX_UNBOX: &str = "%Poly%";
@@ -67,10 +67,11 @@ const MONOTYPE_APP_END: &str = ">";
 const DECREASE_AT_ENTRY: &str = "decrease%init";
 const TRAIT_SELF_TYPE_PARAM: &str = "Self%";
 
-pub const SUFFIX_SNAP_MUT: &str = "_mutation";
-pub const SUFFIX_SNAP_JOIN: &str = "_join";
-pub const SUFFIX_SNAP_WHILE_BEGIN: &str = "_while_begin";
-pub const SUFFIX_SNAP_WHILE_END: &str = "_while_end";
+pub const SUFFIX_SNAP_ENTRY: &str = "ENTRY";
+pub const SUFFIX_SNAP_MUT: &str = "MUTATION";
+pub const SUFFIX_SNAP_JOIN: &str = "JOIN";
+pub const SUFFIX_SNAP_WHILE_BEGIN: &str = "WHILE_BEGIN";
+pub const SUFFIX_SNAP_WHILE_END: &str = "WHILE_END";
 
 // List of constant strings that can appear in generated AIR code
 pub const FUEL_ID: &str = "FuelId";
@@ -347,6 +348,10 @@ pub fn monotyp_apply(datatype: &Path, args: &Vec<Path>) -> Path {
 
 pub fn snapshot_ident(name: &str) -> Ident {
     Arc::new(format!("{}{}", PREFIX_SNAPSHOT, name))
+}
+
+pub fn mk_snapshot_ident(snapshot_count: u32, suffix: &str) -> Ident {
+    Arc::new(format!("{}_{}{}", snapshot_count, PREFIX_SNAPSHOT, suffix))
 }
 
 /// For a given snapshot, does it represent the state

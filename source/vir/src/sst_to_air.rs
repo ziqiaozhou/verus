@@ -5,14 +5,14 @@ use crate::ast::{
 };
 use crate::ast_util::{bitwidth_from_type, get_field, get_variant};
 use crate::context::Ctx;
-use crate::def::{fn_inv_name, fn_namespace_name};
+use crate::def::{fn_inv_name, fn_namespace_name, SUFFIX_SNAP_ENTRY};
 use crate::def::{
-    fun_to_string, path_to_string, prefix_box, prefix_ensures, prefix_fuel_id, prefix_lambda_type,
-    prefix_pre_var, prefix_requires, prefix_unbox, snapshot_ident, suffix_global_id,
-    suffix_local_expr_id, suffix_local_stmt_id, suffix_local_unique_id, suffix_typ_param_id,
-    variant_field_ident, variant_ident, SnapPos, SpanKind, Spanned, FUEL_BOOL, FUEL_BOOL_DEFAULT,
-    FUEL_DEFAULTS, FUEL_ID, FUEL_PARAM, FUEL_TYPE, POLY, SNAPSHOT_ASSIGN, SNAPSHOT_CALL,
-    SNAPSHOT_PRE, SUCC, SUFFIX_SNAP_JOIN, SUFFIX_SNAP_MUT, SUFFIX_SNAP_WHILE_BEGIN,
+    fun_to_string, mk_snapshot_ident, path_to_string, prefix_box, prefix_ensures, prefix_fuel_id,
+    prefix_lambda_type, prefix_pre_var, prefix_requires, prefix_unbox, snapshot_ident,
+    suffix_global_id, suffix_local_expr_id, suffix_local_stmt_id, suffix_local_unique_id,
+    suffix_typ_param_id, variant_field_ident, variant_ident, SnapPos, SpanKind, Spanned, FUEL_BOOL,
+    FUEL_BOOL_DEFAULT, FUEL_DEFAULTS, FUEL_ID, FUEL_PARAM, FUEL_TYPE, POLY, SNAPSHOT_ASSIGN,
+    SNAPSHOT_CALL, SNAPSHOT_PRE, SUCC, SUFFIX_SNAP_JOIN, SUFFIX_SNAP_MUT, SUFFIX_SNAP_WHILE_BEGIN,
     SUFFIX_SNAP_WHILE_END,
 };
 use crate::def::{CommandsWithContext, CommandsWithContextX};
@@ -381,7 +381,7 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: ExprCtxt) -> Expr {
         (ExpX::VarAt(x, VarAt::Pre), false) => match expr_ctxt.mode {
             ExprMode::Spec => string_var(&prefix_pre_var(&suffix_local_unique_id(x))),
             ExprMode::Body => {
-                Arc::new(ExprX::Old(snapshot_ident(SNAPSHOT_PRE), suffix_local_unique_id(x)))
+                Arc::new(ExprX::Old(mk_snapshot_ident(0, SNAPSHOT_PRE), suffix_local_unique_id(x)))
             }
             ExprMode::BodyPre => string_var(&suffix_local_unique_id(x)),
         },
@@ -787,14 +787,10 @@ impl State {
         self.sids.pop();
     }
 
-    fn get_new_sid(&mut self, suffix: &str) -> Ident {
-        self.snapshot_count += 1;
-        Arc::new(format!("{}{}", self.snapshot_count, suffix))
-    }
-
     /// replace the current sid (without changing scope depth)
     fn update_current_sid(&mut self, suffix: &str) -> Ident {
-        let sid = self.get_new_sid(suffix);
+        self.snapshot_count += 1;
+        let sid = mk_snapshot_ident(self.snapshot_count, suffix);
         self.sids.pop();
         self.sids.push(sid.clone());
         sid
@@ -807,7 +803,20 @@ impl State {
     //     return HashSet::new();
     // }
 
+    /// connect a statement to a snapshot.  
+    /// Should not connect to more than one snapshot
     fn map_span(&mut self, stm: &Stm, kind: SpanKind) {
+        // println!("map_span: trying to connect {:?} of {:?}", stm, kind);
+        // println!("current snap_map");
+        // for sp in &self.snap_map {
+        //     // println!("{:?}" , sp);
+        //     if sp.0.as_string == stm.span.as_string {
+        //         if sp.1.snapshot_id != self.get_current_sid() {
+        //             println!("{:?}", self.get_current_sid());
+        //             panic!("already connected to a snapshot");
+        //         }
+        //     }
+        // }
         let spos = SnapPos { snapshot_id: self.get_current_sid(), kind: kind };
         // let aset = self.get_assigned_set(stm);
         // println!("{:?} {:?}", stm.span, aset);
@@ -863,20 +872,24 @@ fn loc_to_field_path(loc: &Exp) -> (UniqueIdent, LocFieldInfo<Vec<FieldOpr>>) {
     }
 }
 
-fn snapshotted_var_locs(arg: &Exp, snapshot_name: &str) -> Exp {
+fn snapshotted_var_locs(arg: &Exp, snap_count: u32, snapshot_name: &str) -> Exp {
     crate::sst_visitor::map_exp_visitor(arg, &mut |e| match &e.x {
-        ExpX::VarLoc(x) => {
-            SpannedTyped::new(&e.span, &e.typ, ExpX::Old(snapshot_ident(snapshot_name), x.clone()))
-        }
+        ExpX::VarLoc(x) => SpannedTyped::new(
+            &e.span,
+            &e.typ,
+            ExpX::Old(mk_snapshot_ident(snap_count, snapshot_name), x.clone()),
+        ),
         _ => e.clone(),
     })
 }
 
-fn snapshotted_vars(arg: &Exp, snapshot_name: &str) -> Exp {
+fn snapshotted_vars(arg: &Exp, snap_count: u32, snapshot_name: &str) -> Exp {
     crate::sst_visitor::map_exp_visitor(arg, &mut |e| match &e.x {
-        ExpX::Var(x) => {
-            SpannedTyped::new(&e.span, &e.typ, ExpX::Old(snapshot_ident(snapshot_name), x.clone()))
-        }
+        ExpX::Var(x) => SpannedTyped::new(
+            &e.span,
+            &e.typ,
+            ExpX::Old(mk_snapshot_ident(snap_count, snapshot_name), x.clone()),
+        ),
         _ => e.clone(),
     })
 }
@@ -884,6 +897,7 @@ fn snapshotted_vars(arg: &Exp, snapshot_name: &str) -> Exp {
 fn assume_other_fields_unchanged(
     ctx: &Ctx,
     snapshot_name: &str,
+    snap_count: u32,
     stm_span: &Span,
     base: &UniqueIdent,
     mutated_fields: &LocFieldInfo<Vec<Vec<FieldOpr>>>,
@@ -894,6 +908,7 @@ fn assume_other_fields_unchanged(
     let eqs = assume_other_fields_unchanged_inner(
         ctx,
         snapshot_name,
+        snap_count,
         stm_span,
         &base_exp,
         updates,
@@ -906,6 +921,7 @@ fn assume_other_fields_unchanged(
 fn assume_other_fields_unchanged_inner(
     ctx: &Ctx,
     snapshot_name: &str,
+    snap_count: u32,
     stm_span: &Span,
     base: &Exp,
     updates: &Vec<Vec<FieldOpr>>,
@@ -940,6 +956,7 @@ fn assume_other_fields_unchanged_inner(
                         assume_other_fields_unchanged_inner(
                             ctx,
                             snapshot_name,
+                            snap_count,
                             stm_span,
                             &field_exp,
                             further_updates,
@@ -949,7 +966,7 @@ fn assume_other_fields_unchanged_inner(
                     } else {
                         let old = exp_to_expr(
                             ctx,
-                            &snapshotted_var_locs(&field_exp, snapshot_name),
+                            &snapshotted_var_locs(&field_exp, snap_count, snapshot_name),
                             expr_ctxt,
                         );
                         let new = exp_to_expr(ctx, &field_exp, expr_ctxt);
@@ -988,8 +1005,10 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
 
             let typ_args: Vec<Expr> = vec_map(typs, typ_to_id);
             if func.x.params.iter().any(|p| p.x.is_mut) && ctx.debug {
-                unimplemented!("&mut args are unsupported in debugger mode");
+                println!("&mut arg in debugger mode: {:?}", func.x.params);
+                // unimplemented!("&mut args are unsupported in debugger mode");
             }
+
             let mut call_snapshot = false;
             let mut ens_args_wo_typ = Vec::new();
             let mut mutated_fields: BTreeMap<_, LocFieldInfo<Vec<_>>> = BTreeMap::new();
@@ -1002,7 +1021,10 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
                             SpannedTyped::new(
                                 &e.span,
                                 &e.typ,
-                                ExpX::Old(snapshot_ident(SNAPSHOT_CALL), x.clone()),
+                                ExpX::Old(
+                                    mk_snapshot_ident(state.snapshot_count + 1, SNAPSHOT_CALL),
+                                    x.clone(),
+                                ),
                             )
                         }
                         _ => e.clone(),
@@ -1019,7 +1041,8 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
                         .or_insert(LocFieldInfo { base_typ, base_span, a: Vec::new() })
                         .a
                         .push(fields);
-                    let arg_old = snapshotted_var_locs(arg, SNAPSHOT_CALL);
+                    let arg_old =
+                        snapshotted_var_locs(arg, state.snapshot_count + 1, SNAPSHOT_CALL);
                     ens_args_wo_typ.push(exp_to_expr(ctx, &arg_old, expr_ctxt));
                     ens_args_wo_typ.push(exp_to_expr(ctx, &arg_x, expr_ctxt));
                 } else {
@@ -1034,6 +1057,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
                     assume_other_fields_unchanged(
                         ctx,
                         SNAPSHOT_CALL,
+                        state.snapshot_count + 1,
                         &stm.span,
                         base,
                         mutated_fields,
@@ -1048,8 +1072,24 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
                 }))
                 .collect::<Vec<_>>();
             if call_snapshot {
-                stmts.push(Arc::new(StmtX::Snapshot(snapshot_ident(SNAPSHOT_CALL))));
+                stmts.push(Arc::new(StmtX::Snapshot(mk_snapshot_ident(
+                    state.snapshot_count + 1,
+                    SNAPSHOT_CALL,
+                ))));
                 stmts.extend(mut_stmts.into_iter());
+                if ctx.debug {
+                    // for above code, temporarily put state.snapshot_count + 1
+                    // since we are now inside of `if call_snapshot`, invoke `state.update_current_sid`
+                    // this snapshot is for **before** mutation via &mut
+                    let _ = state.update_current_sid(SNAPSHOT_CALL);
+                    state.map_span(&stm, SpanKind::Start); // REVIEW: full?
+
+                    // this snapshot is for **after** mutation via &mut
+                    let after_sid = state.update_current_sid(SNAPSHOT_CALL);
+                    state.map_span(&stm, SpanKind::End); // REVIEW: full?
+                    let snapshot = Arc::new(StmtX::Snapshot(after_sid.clone()));
+                    stmts.push(snapshot);
+                }
             } else {
                 assert_eq!(mut_stmts.len(), 0);
                 if ctx.debug {
@@ -1188,9 +1228,13 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
             } else {
                 let (base_var, LocFieldInfo { base_typ, base_span, a: fields }) =
                     loc_to_field_path(dest);
-                stmts.push(Arc::new(StmtX::Snapshot(snapshot_ident(SNAPSHOT_ASSIGN))));
+                stmts.push(Arc::new(StmtX::Snapshot(mk_snapshot_ident(
+                    state.snapshot_count + 1,
+                    SNAPSHOT_ASSIGN,
+                ))));
                 stmts.push(Arc::new(StmtX::Havoc(suffix_local_unique_id(&base_var))));
-                let snapshotted_rhs = snapshotted_vars(rhs, SNAPSHOT_ASSIGN);
+                let snapshotted_rhs =
+                    snapshotted_vars(rhs, state.snapshot_count + 1, SNAPSHOT_ASSIGN);
                 let eqx = ExpX::Binary(BinaryOp::Eq(Mode::Spec), dest.clone(), snapshotted_rhs);
                 let eq = SpannedTyped::new(&stm.span, &Arc::new(TypX::Bool), eqx);
                 stmts.extend(stm_to_stmts(
@@ -1201,6 +1245,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
                 stmts.extend(assume_other_fields_unchanged(
                     ctx,
                     SNAPSHOT_ASSIGN,
+                    state.snapshot_count + 1,
                     &stm.span,
                     &base_var,
                     &LocFieldInfo { base_typ, base_span, a: vec![fields] },
@@ -1533,7 +1578,8 @@ pub fn body_stm_to_air(
         declared.insert(decl.ident.clone(), decl.typ.clone());
     }
 
-    let initial_sid = Arc::new("0_entry".to_string());
+    // let initial_sid = Arc::new("0_entry".to_string());
+    let initial_sid = mk_snapshot_ident(0, SUFFIX_SNAP_ENTRY);
 
     let mask = mask_set_from_spec(mask_spec, mode);
 
@@ -1561,7 +1607,7 @@ pub fn body_stm_to_air(
     let mut stmts = stm_to_stmts(ctx, &mut state, &stm);
 
     if has_mut_params {
-        stmts.insert(0, Arc::new(StmtX::Snapshot(snapshot_ident(SNAPSHOT_PRE))));
+        stmts.insert(0, Arc::new(StmtX::Snapshot(mk_snapshot_ident(0, SNAPSHOT_PRE))));
     }
 
     if ctx.debug {

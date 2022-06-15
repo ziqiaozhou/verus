@@ -5,7 +5,7 @@ use crate::ast::{
 };
 use crate::errors::{error_from_labels, error_from_spans};
 use crate::errors::{ErrorLabel, ErrorLabels};
-use crate::model::{ModelDef, ModelDefX, ModelDefs};
+use crate::model::{SMTModelDef, SMTModelDefX, SMTModelDefs};
 use crate::printer::node_to_string;
 use sise::Node;
 use std::io::Write;
@@ -518,7 +518,7 @@ impl Parser {
         map_nodes_to_vec(nodes, &|c| self.node_to_command(c))
     }
 
-    fn node_to_model_def(&self, node: &Node) -> Result<Option<ModelDef>, String> {
+    fn node_to_model_def(&self, node: &Node) -> Result<Option<SMTModelDef>, String> {
         match node {
             Node::List(nodes) => match &nodes[..] {
                 [Node::Atom(s), Node::Atom(x), Node::List(param_nodes), t, body]
@@ -526,9 +526,10 @@ impl Parser {
                 {
                     let name = Arc::new(x.clone());
                     let params = self.nodes_to_binders(param_nodes, &|t| self.node_to_typ(t))?;
-                    let ret = self.node_to_typ(t)?;
+                    let params = if (&*params).len() == 0 { None } else { Some(params) };
+                    let return_type = self.node_to_typ(t)?;
                     let body = Arc::new(node_to_string(body));
-                    Ok(Some(Arc::new(ModelDefX { name, params, ret, body })))
+                    Ok(Some(Arc::new(SMTModelDefX { name, params, return_type, body })))
                 }
                 _ => Ok(None),
             },
@@ -536,18 +537,18 @@ impl Parser {
         }
     }
 
-    fn nodes_to_model_defs(&self, nodes: &[Node]) -> Result<ModelDefs, String> {
+    fn nodes_to_model_defs(&self, nodes: &[Node]) -> Result<SMTModelDefs, String> {
         map_nodes_to_vec_opt(nodes, &|n| self.node_to_model_def(n))
     }
 
-    pub fn node_to_model(&self, node: &Node) -> Result<ModelDefs, String> {
+    pub fn node_to_model(&self, node: &Node) -> Result<SMTModelDefs, String> {
         match node {
             Node::Atom(_) => Err(format!("expected model, found: {}", node_to_string(node))),
             Node::List(nodes) => self.nodes_to_model_defs(nodes),
         }
     }
 
-    pub fn lines_to_model(&self, lines: &Vec<String>) -> ModelDefs {
+    pub fn lines_to_model(&self, lines: &Vec<String>) -> SMTModelDefs {
         let mut model_bytes: Vec<u8> = Vec::new();
         for line in lines {
             writeln!(model_bytes, "{}", line).expect("model_bytes");

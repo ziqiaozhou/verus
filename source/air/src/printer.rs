@@ -83,7 +83,7 @@ impl Printer {
         Printer { print_as_smt }
     }
 
-    pub(crate) fn typ_to_node(&self, typ: &Typ) -> Node {
+    pub fn typ_to_node(&self, typ: &Typ) -> Node {
         match &**typ {
             TypX::Bool => str_to_node("Bool"),
             TypX::Int => str_to_node("Int"),
@@ -119,7 +119,7 @@ impl Printer {
         }
     }
 
-    pub(crate) fn expr_to_node(&self, expr: &Expr) -> Node {
+    pub fn expr_to_node(&self, expr: &Expr) -> Node {
         match &**expr {
             ExprX::Const(Constant::Bool(b)) => Node::Atom(b.to_string()),
             ExprX::Const(Constant::Nat(n)) => Node::Atom((**n).clone()),

@@ -43,7 +43,7 @@ pub(crate) enum ContextState {
     NotStarted,
     ReadyForQuery,
     FoundResult,
-    FoundInvalid(Vec<AssertionInfo>, Model),
+    FoundInvalid(Vec<AssertionInfo>, Model, Arc<Vec<Arc<crate::ast::ExprX>>>),
     Canceled,
 }
 
@@ -323,7 +323,10 @@ impl Context {
         only_check_earlier: bool,
         query_context: QueryContext<'_, '_>,
     ) -> ValidityResult {
-        if let ContextState::FoundInvalid(infos, air_model) = self.state.clone() {
+        if let ContextState::FoundInvalid(infos, air_model, disable_labels) = self.state.clone() {
+            for disable_label in &*disable_labels {
+                self.smt_log.log_assert(&disable_label);
+            }
             crate::smt_verify::smt_check_assertion(
                 self,
                 infos,
@@ -342,14 +345,15 @@ impl Context {
         self.state = ContextState::ReadyForQuery;
     }
 
-    pub fn eval_expr(&mut self, expr: sise::Node) -> String {
+    pub fn eval_expr(&mut self, expr: sise::Node) -> Result<String, String> {
         self.smt_log.log_eval(expr);
         let smt_output =
             self.smt_manager.get_smt_process().send_commands(self.smt_log.take_pipe_data());
+        // println!("context::eval_expr says {:?} ", smt_output);
         if smt_output.len() != 1 {
-            panic!("unexpected output from SMT eval {:?}", &smt_output);
+            return Err(format!("unexpected output from SMT eval {:?}", &smt_output));
         }
-        smt_output[0].clone()
+        Ok(smt_output[0].clone())
     }
 
     pub fn command(

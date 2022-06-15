@@ -569,7 +569,10 @@ pub fn func_def_to_air(
     function: &Function,
     phase: FuncDefPhase,
     checking_recommends: bool,
-) -> Result<(Arc<Vec<CommandsWithContext>>, Vec<(Span, SnapPos)>), VirErr> {
+) -> Result<
+    (Arc<Vec<CommandsWithContext>>, Vec<(Span, SnapPos)>, Vec<Arc<crate::sst::LocalDeclX>>),
+    VirErr,
+> {
     let erasure_mode = match (function.x.mode, function.x.is_const) {
         (Mode::Spec, true) => Mode::Exec,
         (mode, _) => mode,
@@ -579,7 +582,7 @@ pub fn func_def_to_air(
         | (FuncDefPhase::CheckingSpecs, Mode::Proof | Mode::Exec, _, Some(_))
         | (FuncDefPhase::CheckingSpecs, Mode::Spec, false, Some(_))
         | (FuncDefPhase::CheckingProofExec, Mode::Spec, _, Some(_)) => {
-            Ok((Arc::new(vec![]), vec![]))
+            Ok((Arc::new(vec![]), vec![], vec![]))
         }
         (FuncDefPhase::CheckingSpecs, Mode::Spec, true, Some(body))
         | (FuncDefPhase::CheckingProofExec, Mode::Proof | Mode::Exec, _, Some(body)) => {
@@ -704,7 +707,7 @@ pub fn func_def_to_air(
             );
 
             state.finalize();
-            Ok((Arc::new(commands), snap_map))
+            Ok((Arc::new(commands), snap_map, state.local_decls))
         }
     }
 }

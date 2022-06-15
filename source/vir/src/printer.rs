@@ -62,7 +62,7 @@ fn int_range_to_node(int_range: &IntRange) -> Node {
     }
 }
 
-fn typ_to_node(typ: &Typ) -> Node {
+pub(crate) fn typ_to_node(typ: &Typ) -> Node {
     match &**typ {
         TypX::Bool => node!(Bool),
         TypX::Int(range) => nodes!(Int {int_range_to_node(range)}),

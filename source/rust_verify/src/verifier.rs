@@ -235,6 +235,8 @@ impl Verifier {
         snap_map: &Vec<(air::ast::Span, SnapPos)>,
         command: &Command,
         context: &(&air::ast::Span, &str),
+        krate: &Krate,
+        local_decls: &Vec<vir::sst::LocalDecl>,
     ) -> bool {
         let report_long_running = || {
             let mut counter = 0;
@@ -312,13 +314,18 @@ impl Verifier {
                         }
 
                         self.errors.push(errors);
+
                         if self.args.debug {
                             let mut debugger = Debugger::new(
                                 air_model,
                                 assign_map,
                                 snap_map,
                                 compiler.session().source_map(),
+                                krate.datatypes.clone(),
+                                air_context,
+                                local_decls,
                             );
+
                             debugger.start_shell(air_context);
                         }
                     }
@@ -382,6 +389,8 @@ impl Verifier {
         module: &vir::ast::Path,
         function_name: Option<&Fun>,
         comment: &str,
+        krate: &Krate,
+        local_decls: &Vec<vir::sst::LocalDecl>,
     ) -> bool {
         if let Some(verify_function) = &self.args.verify_function {
             if let Some(function_name) = function_name {
@@ -409,6 +418,8 @@ impl Verifier {
                     snap_map,
                     &command,
                     &(span, desc),
+                    krate,
+                    local_decls,
                 );
                 invalidity = invalidity || result_invalidity;
                 let time1 = Instant::now();
@@ -564,13 +575,15 @@ impl Verifier {
                     module,
                     Some(&function.x.name),
                     &("Function-Termination ".to_string() + &fun_as_rust_dbg(f)),
+                    krate,
+                    &vec![],
                 );
                 let check_recommends = function.x.attrs.check_recommends;
                 if (invalidity && !self.args.no_auto_recommends_check) || check_recommends {
                     // Rerun failed query to report possible recommends violations
                     // or (optionally) check recommends for spec function bodies
                     ctx.fun = mk_fun_ctx(&function, true);
-                    let (commands, snap_map) = vir::func_to_air::func_def_to_air(
+                    let (commands, snap_map, local_decls) = vir::func_to_air::func_def_to_air(
                         ctx,
                         &function,
                         vir::func_to_air::FuncDefPhase::CheckingSpecs,
@@ -589,6 +602,8 @@ impl Verifier {
                         module,
                         Some(&function.x.name),
                         &(s.to_string() + &fun_as_rust_dbg(&function.x.name)),
+                        krate,
+                        &local_decls,
                     );
                 }
             }
@@ -617,7 +632,7 @@ impl Verifier {
             let mut recommends_rerun = false;
             loop {
                 ctx.fun = mk_fun_ctx(&function, recommends_rerun);
-                let (commands, snap_map) = vir::func_to_air::func_def_to_air(
+                let (commands, snap_map, local_decls) = vir::func_to_air::func_def_to_air(
                     ctx,
                     &function,
                     vir::func_to_air::FuncDefPhase::CheckingProofExec,
@@ -636,6 +651,8 @@ impl Verifier {
                     module,
                     Some(&function.x.name),
                     &(s.to_string() + &fun_as_rust_dbg(&function.x.name)),
+                    krate,
+                    &local_decls,
                 );
                 if invalidity && !recommends_rerun && !self.args.no_auto_recommends_check {
                     // Rerun failed query to report possible recommends violations

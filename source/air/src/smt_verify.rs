@@ -5,7 +5,7 @@ use crate::ast_util::{ident_var, mk_and, mk_implies, mk_not, str_ident, str_var}
 use crate::context::{AssertionInfo, AxiomInfo, Context, ContextState, ValidityResult};
 use crate::def::{GLOBAL_PREFIX_LABEL, PREFIX_LABEL, QUERY};
 use crate::errors::{Error, ErrorLabel};
-pub use crate::model::{Model, ModelDef};
+pub use crate::model::{Model, ModelDef, SMTModelDef, SMTModelDefX, SMTModelDefs};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -253,20 +253,28 @@ pub(crate) fn smt_check_assertion<'ctx>(
         context.smt_log.log_word("get-model");
         let smt_output =
             context.smt_manager.get_smt_process().send_commands(context.smt_log.take_pipe_data());
-        let model = crate::parser::Parser::new().lines_to_model(&smt_output);
-        let mut model_defs: HashMap<Ident, ModelDef> = HashMap::new();
+        let model: Arc<Vec<SMTModelDef>> = crate::parser::Parser::new().lines_to_model(&smt_output);
+        let mut model_defs: HashMap<Ident, SMTModelDef> = HashMap::new();
         for def in model.iter() {
             model_defs.insert(def.name.clone(), def.clone());
         }
+
+        let mut disable_labels: Vec<Arc<ExprX>> = vec![];
         for info in infos.iter_mut() {
             if let Some(def) = model_defs.get(&info.label) {
                 if *def.body == "true" {
+                    // if let ModelExpr::Const(ModelConstant::Bool(true)) = def.body {
                     discovered_error = Some(info.error.clone());
 
                     // Disable this label in subsequent check-sat calls to get additional errors
+                    // Since this assertion is true in the Z3's model
                     info.disabled = true;
                     let disable_label = mk_not(&ident_var(&info.label));
-                    context.smt_log.log_assert(&disable_label);
+
+                    // For now temporarily, postpone this assertions to keep Z3 in `sat` mode.
+                    // Or push/pop??
+                    disable_labels.push(disable_label.clone());
+                    // context.smt_log.log_assert(&disable_label);
 
                     break;
                 }
@@ -275,15 +283,16 @@ pub(crate) fn smt_check_assertion<'ctx>(
         for (_, info) in context.axiom_infos.map().iter() {
             if let Some(def) = model_defs.get(&info.label) {
                 if *def.body == "true" {
+                    // if let ModelExpr::Const(ModelConstant::Bool(true)) = def.body {
                     discovered_additional_info.append(&mut (*info.labels).clone());
                     break;
                 }
             }
         }
 
-        if context.debug {
-            println!("Z3 model: {:?}", &model);
-        }
+        // if context.debug {
+        //     println!("Z3 model: {:?}", &model);
+        // }
 
         // Attach the additional info to the error
         // For example, the error might be something like "precondition not satisfied"
@@ -294,7 +303,12 @@ pub(crate) fn smt_check_assertion<'ctx>(
 
         let error = discovered_error.expect("discovered_error");
         let e = error.append_labels(&discovered_additional_info);
-        context.state = ContextState::FoundInvalid(infos, air_model.clone());
+
+        let mut air_model = air_model.clone();
+        air_model.smt_model = model_defs;
+        //  Model{ id_snapshots: air_model.id_snapshots, parameters: air_model.parameters, z3_model: HashMap::new() };
+        context.state =
+            ContextState::FoundInvalid(infos, air_model.clone(), Arc::new(disable_labels));
         ValidityResult::Invalid(air_model, e)
     }
 }
