@@ -4,7 +4,7 @@ mod common;
 use common::*;
 
 test_verify_one_file! {
-    #[test] #[ignore] test_trigger_block_regression_121 code! {
+    #[test] test_trigger_block_regression_121_1 code! {
         use seq::*;
 
         struct Node {
@@ -22,7 +22,30 @@ test_verify_one_file! {
             }
         }
 
-    } => Err(err) => assert_one_fails(err)
+    } => Err(err) => assert_vir_error(err)
+}
+
+test_verify_one_file! {
+    #[test] test_trigger_block_regression_121_2 code! {
+        use seq::*;
+
+        struct Node {
+            base_v: nat,
+            values: Seq<nat>,
+            nodes: Seq<Box<Node>>,
+        }
+
+        impl Node {
+            #[spec] fn inv(&self) -> bool {
+                forall(|i: nat, j: nat| with_triggers!([self.nodes.index(i).values.index(j)] =>
+                                                       (i < self.nodes.len() && j < self.nodes.index(i).values.len()) >>= {
+                    let values = self.nodes.index(i).values;
+                    self.base_v <= values.index(j)
+                }))
+            }
+        }
+
+    } => Ok(())
 }
 
 test_verify_one_file! {
@@ -74,4 +97,18 @@ test_verify_one_file! {
             assume(false)
         }
     } => Err(e) => assert_vir_error(e)
+}
+
+test_verify_one_file! {
+    #[test] test_recommends_regression_163 code! {
+        fndecl!(fn some_fn(a: int) -> bool);
+
+        #[proof]
+        fn p() {
+            ensures([
+                forall_arith(|a: int, b: int| #[trigger] (a * b) == b * a),
+                forall(|a: int| some_fn(a)), // FAILS
+            ]);
+        }
+    } => Err(e) => assert_one_fails(e)
 }

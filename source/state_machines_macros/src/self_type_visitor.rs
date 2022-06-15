@@ -41,7 +41,14 @@ fn replace_self_shardable_type(stype: &mut ShardableType, path: &Path) {
         ShardableType::Option(ty) => {
             replace_self_type(ty, path);
         }
+        ShardableType::PersistentOption(ty) => {
+            replace_self_type(ty, path);
+        }
         ShardableType::Map(key, val) => {
+            replace_self_type(key, path);
+            replace_self_type(val, path);
+        }
+        ShardableType::PersistentMap(key, val) => {
             replace_self_type(key, path);
             replace_self_type(val, path);
         }
@@ -55,6 +62,7 @@ fn replace_self_shardable_type(stype: &mut ShardableType, path: &Path) {
             replace_self_type(key, path);
             replace_self_type(val, path);
         }
+        ShardableType::Count => {}
     }
 }
 
