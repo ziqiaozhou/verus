@@ -276,17 +276,23 @@ impl Model {
                     && typs.len() == 1
                 {
                     self.build_vec_constant(var, expr, typ, path, typs, context)?
-                } else if path.segments[0].to_string() == "pervasive".to_string() {
-                    println!("About to panic, {:?}, {:?}, {:?}", var, expr, typ);
+                }
+                // white-list pervasive's datatypes
+                // all datatypes should be white-listed
+                else if path.segments[0].to_string() == "pervasive".to_string()
+                    && path.segments[1].to_string() != "option".to_string()
+                    && path.segments[1].to_string() != "result".to_string()
+                {
                     return Err(format!(
-                        "Now Pervasive only supports seq/vec, but got {:?}",
+                        "Now Pervasive only supported seq/vec/option/result, but got {:?}",
                         &path
                     ));
                 } else {
                     // TODO: how to get information from user -> how to "debug" user-defined container
                     // now datatype should be struct or enum at this point (container type should be handled in a separte routine)
 
-                    let ident = &path.segments[0];
+                    // let ident = &path.segments[0];
+                    let ident = crate::sst_to_air::path_to_air_ident(path);
                     let dtyp = self
                         .find_datatype(path.clone())
                         .expect(format!("Couldn't find dataype with path: {:?}", path).as_str());
@@ -301,9 +307,8 @@ impl Model {
                         // Note that `struct` has only one variant, while enum possible have many variants
                         // (eval (is-Message./Move  msg@))              // Might be Z3 specific
                         // (eval ((_ is Message./Move) msg@))           // SMTLIB "tester"
-                        // println!("is this variant? {:?} : {:?}", variant.name, variant.a);
-                        let appl =
-                            format!("is-{}./{}", ident.to_string(), variant.name.to_string());
+                        //  pervasive.option.Option./Some/_0
+                        let appl = format!("is-{}/{}", ident.to_string(), variant.name.to_string());
                         let items = vec![Node::Atom(appl), self.model_expr_to_node(&expr)];
                         let result = context.eval_expr(Node::List(items)).unwrap();
                         let res = self.string_to_bool(result);
@@ -319,7 +324,7 @@ impl Model {
                             // println!("field {:?} : {:?}", field.name, field.a.0);
 
                             let appl = format!(
-                                "{}./{}/?{}",
+                                "{}/{}/?{}",
                                 ident.to_string(),
                                 variant.name.to_string(),
                                 field.name.to_string()

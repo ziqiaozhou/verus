@@ -133,11 +133,11 @@ impl Debugger {
             for line in min_line..max_line {
                 match line_map.get(&line) {
                     Some(snap) => {
-                        println!("{} to {:?}", line, snap);
+                        // println!("{} to {:?}", line, snap);
                         cur_snap = snap.clone();
                     }
                     None => {
-                        println!("{} (missing) to {:?}", line, cur_snap);
+                        // println!("{} (missing) to {:?}", line, cur_snap);
                         let _ = line_map.insert(line, cur_snap.clone());
                     }
                 }

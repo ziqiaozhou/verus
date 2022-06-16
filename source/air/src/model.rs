@@ -78,10 +78,10 @@ impl Model {
             }
         }
 
-        for (sid, snapshot) in &snapshots {
-            println!("air model, sid: {:?}", sid);
-            println!("air model, snapshot: {:?}", snapshot);
-        }
+        // for (sid, snapshot) in &snapshots {
+        //     println!("air model, sid: {:?}", sid);
+        //     println!("air model, snapshot: {:?}", snapshot);
+        // }
 
         Model {
             model: HashMap::new(),

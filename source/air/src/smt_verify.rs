@@ -283,6 +283,7 @@ pub(crate) fn smt_check_assertion<'ctx>(
         for (_, info) in context.axiom_infos.map().iter() {
             if let Some(def) = model_defs.get(&info.label) {
                 if *def.body == "true" {
+                    println!("discovered: {:?}", info);
                     // if let ModelExpr::Const(ModelConstant::Bool(true)) = def.body {
                     discovered_additional_info.append(&mut (*info.labels).clone());
                     break;
