@@ -15,6 +15,7 @@ use crate::util::{vec_map, vec_map_result};
 use air::ast::{Binder, BinderX, Binders, Span};
 use air::errors::error_with_label;
 use air::scope_map::ScopeMap;
+use core::panic;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -553,6 +554,83 @@ fn is_small_exp_or_loc(exp: &Exp) -> bool {
     }
 }
 
+fn subsitute_argument(exp: &Exp, arg_map: &HashMap<Arc<String>, Exp>) -> Exp {
+    // println!("hello subsitute this {:?}", exp);
+    match &exp.x {
+        ExpX::Var((id, _num)) => match arg_map.get(id) {
+            Some(e) => e.clone(),
+            None => exp.clone(),
+        },
+        // ExpX::Call(_x, _typs, es) => {
+        //     for e in es.iter() {
+        //     }
+        // }
+        // ExpX::Unary(_op, e1) => {
+        // }
+        ExpX::UnaryOpr(uop, e1) => {
+            let e1_replaced = subsitute_argument(e1, arg_map);
+            let new_exp = ExpX::UnaryOpr(uop.clone(), e1_replaced);
+            SpannedTyped::new(&exp.span, &exp.typ, new_exp)
+        }
+        ExpX::Binary(bop, e1, e2) => {
+            println!("found bop {:?}, span {:?}", bop, exp.span);
+            let e1_replaced = subsitute_argument(e1, arg_map);
+            let e2_replaced = subsitute_argument(e2, arg_map);
+            let new_exp = ExpX::Binary(*bop, e1_replaced, e2_replaced);
+            SpannedTyped::new(&exp.span, &exp.typ, new_exp)
+        }
+        // ExpX::If(e1, e2, e3) => {
+        // }
+        _ => exp.clone(),
+    }
+}
+
+// simply inline, the caller of `inline` should call `split_expr` with the inlined expr.
+fn tr_inline_function(ctx: &Ctx, fun: Function, exps: &Exps) -> Exp {
+    // println!("hello tr_split_expr found {:?}", fun.x.name);
+    // println!("hello tr_split_expr found {:?}", fun.x.mode);
+    // println!("hello tr_split_expr found {:?}", fun.x.body);
+
+    let body = fun.x.body.as_ref().unwrap();
+    let params = &fun.x.params;
+    let pars = crate::func_to_air::params_to_pars(params, false);
+    // ast --> sst
+    let mut state = crate::ast_to_sst::State::new();
+    state.declare_params(&pars);
+    state.view_as_spec = true;
+    let body_exp = expr_to_pure_exp(&ctx, &mut state, &body).expect("tr_inlnie_function");
+    let mut arg_map: HashMap<Arc<String>, Exp> = HashMap::new();
+    let mut count = 0;
+    for param in &**params {
+        arg_map.insert(param.x.name.clone(), exps[count].clone());
+        count = count + 1;
+    }
+    return subsitute_argument(&body_exp, &arg_map);
+}
+
+fn tr_split_expr(ctx: &Ctx, exp: &Exp) -> Exps {
+    // should do recursive call
+    match &exp.x {
+        ExpX::Binary(bop, e1, e2) => {
+            match bop {
+                BinaryOp::And => {
+                    // println!("found and. span1 {:?}, span2 {:?}", e1.span, e2.span);
+                    return Arc::new(vec![e1.clone(), e2.clone()]);
+                }
+                _ => return Arc::new(vec![exp.clone()]),
+            }
+        }
+        ExpX::Call(fun_name, typs, exps) => {
+            let fun = get_function(ctx, &exp.span, fun_name).unwrap();
+            let inlined_exp = tr_inline_function(ctx, fun, exps);
+            // println!("inlined_exp: {:?}", inlined_exp);
+            return tr_split_expr(ctx, &inlined_exp);
+        }
+        // cases that cannot be splitted
+        _ => return Arc::new(vec![exp.clone()]),
+    }
+}
+
 fn stm_call(
     ctx: &Ctx,
     state: &mut State,
@@ -563,8 +641,34 @@ fn stm_call(
     dest: Option<Dest>,
 ) -> Result<Stm, VirErr> {
     let fun = get_function(ctx, span, &name)?;
-    let mut small_args: Vec<Exp> = Vec::new();
     let mut stms: Vec<Stm> = Vec::new();
+
+    // if name == pervasive assert,
+    // take the boolean argument, and split this expressino into pieces.
+    // then push all these as extra assertions
+    // return as previously
+    if ctx.debug {
+        if name.path.segments[0].to_string() == "pervasive".to_string()
+            && name.path.segments[1].to_string() == "assert".to_string()
+        {
+            let exprs = tr_split_expr(ctx, &args[0].0);
+            if exprs.len() > 1 {
+                println!("splitted!");
+                for small_exp in &*exprs {
+                    let call = StmX::Call(
+                        name.clone(),
+                        fun.x.mode,
+                        typs.clone(),
+                        Arc::new(vec![small_exp.clone()]),
+                        dest.clone(),
+                    );
+                    stms.push(Spanned::new(small_exp.span.clone(), call));
+                }
+            }
+        };
+    }
+
+    let mut small_args: Vec<Exp> = Vec::new();
     for arg in args.iter() {
         if is_small_exp_or_loc(&arg.0) {
             small_args.push(arg.0.clone());

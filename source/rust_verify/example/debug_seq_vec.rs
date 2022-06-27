@@ -18,7 +18,7 @@ fn seq_first_elt_is_10(v: Seq<u32>) -> u32 {
     requires([
         // v.len() == 0,
         v.len() > 5,
-        // v.index(0) == 10,  // comment this to make this proof fail
+        v.index(0) == 10,  // comment this to make this proof fail
     ]);
     ensures(|ret:u32| ret == 10u32);
     v.index(0)
@@ -47,7 +47,7 @@ fn seq_push(v1: Seq<i32>, v2:Seq<i32>, num:i32) -> (Seq<i32>, Seq<i32>) {
     ]);
     
     let result = (v1.push(num), v2.push(num));               //  TODO: not present in query const if not used in line 50
-    // assert(result.0.index(3) == result.1.index(3));       // Fails without this assertion
+    assert(result.0.index(3) == result.1.index(3));       // Fails without this assertion
     result
 }
 
@@ -60,7 +60,7 @@ fn seq_push(v1: Seq<i32>, v2:Seq<i32>, num:i32) -> (Seq<i32>, Seq<i32>) {
 fn vec_first_elt_is_10(v: Vec<u32>) -> u32 {
     requires([
         v.len() > 5,
-        // v.view().index(0) == 10,  // comment this to make this proof fail
+        v.view().index(0) == 10,  // comment this to make this proof fail
     ]);
     ensures(|ret:u32| ret == 10u32);
     *v.index(0)
@@ -95,6 +95,6 @@ fn vec_sorted_after_push(v: &mut Vec<u32>, value: u32) {
     #[spec] let initial_len = v.view().len();
     v.push(11u32);
     // assert(v.index(4) < 10);
-    assert(v.index(initial_len) == 11);  // Fails without this line. 
+    // assert(v.index(initial_len) == 11);  // Fails without this line. 
     v.push(12u32);
 }

@@ -265,6 +265,8 @@ pub(crate) fn smt_check_assertion<'ctx>(
                 if *def.body == "true" {
                     // if let ModelExpr::Const(ModelConstant::Bool(true)) = def.body {
                     discovered_error = Some(info.error.clone());
+                    // println!("{:?}", info.error.labels);
+                    // println!("{:?}", info.error.spans);
 
                     // Disable this label in subsequent check-sat calls to get additional errors
                     // Since this assertion is true in the Z3's model
