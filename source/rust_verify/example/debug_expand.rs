@@ -63,4 +63,25 @@ proof fn test_expansion_match() {
 }
 
 
+
+// example3: 2-level failure
+spec fn is_good_integer_2(z: int) -> bool 
+{
+  z >= 0 && z != 5
+//          ^^^^^^
+}
+spec fn is_good_option(opt: Option<int>) -> bool
+{
+  match opt {
+    Option::Some(x) => is_good_integer_2(x),
+    Option::None => true,
+  }
+}
+
+proof fn test_expansion() {
+  let x = Option::Some(5);
+  let y = Option::Some(4);
+  assert(is_good_option(x));
+}
+
 }

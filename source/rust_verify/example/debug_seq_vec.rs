@@ -18,7 +18,7 @@ fn seq_first_elt_is_10(v: Seq<u32>) -> u32 {
     requires([
         // v.len() == 0,
         v.len() > 5,
-        v.index(0) == 10,  // comment this to make this proof fail
+        // v.index(0) == 10,  // comment this to make this proof fail
     ]);
     ensures(|ret:u32| ret == 10u32);
     v.index(0)

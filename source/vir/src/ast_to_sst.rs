@@ -560,10 +560,15 @@ fn subsitute_argument(exp: &Exp, arg_map: &HashMap<Arc<String>, Exp>) -> Exp {
             Some(e) => e.clone(),
             None => exp.clone(),
         },
-        // ExpX::Call(_x, _typs, es) => {
-        //     for e in es.iter() {
-        //     }
-        // }
+        ExpX::Call(x, typs, es) => {
+            let mut es_replaced = vec![];
+            for e in es.iter() {
+                let e_replaced = subsitute_argument(e, arg_map);
+                es_replaced.push(e_replaced);
+            }
+            let new_exp = ExpX::Call(x.clone(), typs.clone(), Arc::new(es_replaced));
+            SpannedTyped::new(&exp.span, &exp.typ, new_exp)
+        }
         // ExpX::Unary(_op, e1) => {
         // }
         ExpX::UnaryOpr(uop, e1) => {
@@ -585,7 +590,6 @@ fn subsitute_argument(exp: &Exp, arg_map: &HashMap<Arc<String>, Exp>) -> Exp {
             SpannedTyped::new(&exp.span, &exp.typ, new_exp)
         }
         ExpX::Bind(bnd, e1) => {
-            // println!("subsitute bnd {:?}  \n e1:  {:?}", bnd, e1);
             let e1_replaced = subsitute_argument(e1, arg_map);
             let bnd_replaced: Bnd = match &bnd.x {
                 BndX::Let(binders) => {
@@ -633,49 +637,115 @@ fn tr_inline_function(ctx: &Ctx, fun: Function, exps: &Exps) -> Exp {
     return subsitute_argument(&body_exp, &arg_map);
 }
 
-fn tr_split_expr(ctx: &Ctx, exp: &Exp) -> Exps {
+// when inlining function, log call stack into `trace`
+pub type TracedExp = Arc<TracedExpX>;
+pub type TracedExps = Arc<Vec<TracedExp>>;
+pub struct TracedExpX {
+    pub e: Exp,
+    pub trace: air::errors::Error,
+}
+impl TracedExpX {
+    pub fn new(e: Exp, trace: air::errors::Error) -> TracedExp {
+        Arc::new(TracedExpX { e, trace })
+    }
+}
+
+fn merge_two_es(es1: TracedExps, es2: TracedExps) -> TracedExps {
+    let mut merged_vec = vec![];
+    for e in &*es1 {
+        merged_vec.push(e.clone());
+    }
+    for e in &*es2 {
+        merged_vec.push(e.clone());
+    }
+    return Arc::new(merged_vec);
+}
+
+// Note: this splitting referenced Dafny - https://github.com/dafny-lang/dafny/blob/cf285b9282499c46eb24f05c7ecc7c72423cd878/Source/Dafny/Verifier/Translator.cs#L11100
+fn tr_split_expr(ctx: &Ctx, exp: &TracedExp) -> TracedExps {
     // TODO: should do recursive call
     // TODO: add `position`.
-    //       when '!position`, split on `OR`. use `and` instead of `->` for ite
+    //       when '!position`, 1)  split on `OR`.  2) use `and` instead of `->` for ite.  3) for implies, change
     // assert exp.typ == bool
-    match &exp.x {
+    match &exp.e.x {
         ExpX::Binary(bop, e1, e2) => {
             match bop {
                 BinaryOp::And => {
-                    // println!("found and. span1 {:?}, span2 {:?}", e1.span, e2.span);
-                    let es1 = tr_split_expr(ctx, e1);
-                    let es2 = tr_split_expr(ctx, e2);
-                    let mut merged_vec = vec![];
-                    for e in &*es1 {
-                        merged_vec.push(e.clone());
-                    }
+                    let es1 = tr_split_expr(ctx, &TracedExpX::new(e1.clone(), exp.trace.clone()));
+                    let es2 = tr_split_expr(ctx, &TracedExpX::new(e2.clone(), exp.trace.clone()));
+                    return merge_two_es(es1, es2);
+                }
+                // in case of implies, split rhs. (e.g.  A => (B && C)  to  [ (A => B) , (A => C) ] )
+                // if !position, TODO
+                BinaryOp::Implies => {
+                    let es2 = tr_split_expr(ctx, &TracedExpX::new(e2.clone(), exp.trace.clone()));
+                    let mut splitted: Vec<TracedExp> = vec![];
                     for e in &*es2 {
-                        merged_vec.push(e.clone());
+                        let new_e = ExpX::Binary(BinaryOp::Implies, e1.clone(), e.e.clone());
+                        let new_exp = SpannedTyped::new(&e.e.span, &exp.e.typ, new_e);
+                        let new_tr_exp = TracedExpX::new(new_exp, e.trace.clone());
+                        splitted.push(new_tr_exp);
                     }
-                    return Arc::new(merged_vec);
+                    return Arc::new(splitted);
                 }
                 _ => return Arc::new(vec![exp.clone()]),
             }
         }
+        // TODO: check the visibility of the function
+        //       when the function is not visible, remind the user that it is not visible
         ExpX::Call(fun_name, typs, exps) => {
-            let fun = get_function(ctx, &exp.span, fun_name).unwrap();
+            let fun = get_function(ctx, &exp.e.span, fun_name).unwrap();
             let inlined_exp = tr_inline_function(ctx, fun, exps);
-            // println!("inlined_exp: {:?}", inlined_exp);
-            return tr_split_expr(ctx, &inlined_exp);
+            let inlined_tr_exp = TracedExpX::new(
+                inlined_exp,
+                exp.trace.primary_label(&exp.e.span, "TODO: pretty print inlined expr"),
+            );
+            return tr_split_expr(ctx, &inlined_tr_exp);
         }
         ExpX::If(e1, e2, e3) => {
             let then_e = ExpX::Binary(BinaryOp::Implies, e1.clone(), e2.clone());
-            let then_exp = SpannedTyped::new(&e2.span, &exp.typ, then_e);
+            let then_exp = SpannedTyped::new(&e2.span, &exp.e.typ, then_e);
 
             let not_e1 =
-                SpannedTyped::new(&e1.span, &exp.typ, ExpX::Unary(UnaryOp::Not, e1.clone()));
+                SpannedTyped::new(&e1.span, &exp.e.typ, ExpX::Unary(UnaryOp::Not, e1.clone()));
             let else_e = ExpX::Binary(BinaryOp::Implies, not_e1, e3.clone());
-            let else_exp = SpannedTyped::new(&e3.span, &exp.typ, else_e);
+            let else_exp = SpannedTyped::new(&e3.span, &exp.e.typ, else_e);
 
-            return Arc::new(vec![then_exp, else_exp]);
+            let es1 = tr_split_expr(ctx, &TracedExpX::new(then_exp.clone(), exp.trace.clone()));
+            let es2 = tr_split_expr(ctx, &TracedExpX::new(else_exp.clone(), exp.trace.clone()));
+            return merge_two_es(es1, es2);
         }
+        ExpX::UnaryOpr(uop, e1) => {
+            let es1 = tr_split_expr(ctx, &TracedExpX::new(e1.clone(), exp.trace.clone()));
+            let mut splitted: Vec<TracedExp> = vec![];
+            for e in &*es1 {
+                let new_e = ExpX::UnaryOpr(uop.clone(), e.e.clone());
+                let new_exp = SpannedTyped::new(&e.e.span, &exp.e.typ, new_e);
+                let new_tr_exp = TracedExpX::new(new_exp, e.trace.clone());
+                splitted.push(new_tr_exp);
+            }
+            return Arc::new(splitted);
+        }
+        ExpX::Bind(bnd, e1) => {
+            let es1 = tr_split_expr(ctx, &TracedExpX::new(e1.clone(), exp.trace.clone()));
+            let mut splitted: Vec<TracedExp> = vec![];
+            for e in &*es1 {
+                // REVIEW: should I split expression in `let sth = exp`?
+                let new_expx = ExpX::Bind(bnd.clone(), e.e.clone());
+                let new_exp = SpannedTyped::new(&e.e.span, &exp.e.typ, new_expx);
+                let new_tr_exp = TracedExpX::new(new_exp, e.trace.clone());
+                splitted.push(new_tr_exp);
+            }
+            return Arc::new(splitted);
+        }
+
+        // TODO: more cases
+
         // cases that cannot be splitted
-        _ => return Arc::new(vec![exp.clone()]),
+        _ => {
+            println!("unsplitted: {:?}", exp.e.x);
+            return Arc::new(vec![exp.clone()]);
+        }
     }
 }
 
@@ -696,16 +766,19 @@ fn stm_call(
     // then push all these as extra assertions
     // return as previously
     if ctx.debug {
+        // TODO: grap the failing assertion's span, and only split for that assertion
         if name.path.segments[0].to_string() == "pervasive".to_string()
             && name.path.segments[1].to_string() == "assert".to_string()
         {
-            let exprs = tr_split_expr(ctx, &args[0].0);
+            let error = air::errors::error("splitted assertion failure", span);
+            let exprs = tr_split_expr(ctx, &TracedExpX::new(args[0].0.clone(), error.clone()));
             if exprs.len() > 1 {
                 for small_exp in &*exprs {
-                    let error = air::errors::error("splitted assertion failure", &small_exp.span);
-                    let additional_assert = StmX::Assert(Some(error), small_exp.clone());
-
-                    stms.push(Spanned::new(small_exp.span.clone(), additional_assert));
+                    let additional_assert = StmX::Assert(
+                        Some(small_exp.trace.primary_span(&small_exp.e.span)),
+                        small_exp.e.clone(),
+                    );
+                    stms.push(Spanned::new(small_exp.e.span.clone(), additional_assert));
                 }
             }
         };
