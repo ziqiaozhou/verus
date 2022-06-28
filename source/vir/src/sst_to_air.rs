@@ -1123,7 +1123,10 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Vec<Stmt> {
             vec![Arc::new(StmtX::Block(Arc::new(stmts)))] // wrap in block for readability
         }
         StmX::Assert(error, expr) => {
+            println!("hey from assert expr - {:?}", expr);
             let air_expr = exp_to_expr(ctx, &expr, expr_ctxt);
+            println!("hey from assert air_expr - {:?}", air_expr);
+
             let error = match error {
                 Some(error) => error.clone(),
                 None => error_with_label(

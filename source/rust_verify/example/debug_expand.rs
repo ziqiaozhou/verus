@@ -1,3 +1,5 @@
+// rust_verify/tests/example.rs expect-failures
+
 #[allow(unused_imports)]
 use builtin_macros::*;
 #[allow(unused_imports)]
@@ -44,6 +46,21 @@ proof fn test_expansion_easy()
 }
 
 
+
+// example2: simple `match` inline
+spec fn is_good_opt(opt: Option<int>) -> bool
+{
+  match opt {
+    Option::Some(k) => k > 10,
+    Option::None => true,
+  }
+}
+
+proof fn test_expansion_match() {
+  let x = Option::Some(5);
+  let y = Option::Some(4);
+  assert(is_good_opt(x));
+}
 
 
 }
