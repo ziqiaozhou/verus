@@ -1,7 +1,8 @@
 #![feature(rustc_attrs)]
 #![feature(negative_impls)]
+#![no_std]
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 #[proof]
 pub fn admit() {
@@ -345,44 +346,42 @@ split_tuple!(tracked_split_tuple8, Tracked, [A1 A2 A3 A4 A5 A6 A7 A8]);
 #[allow(non_camel_case_types)]
 pub struct int;
 
-// TODO: we should eventually be able to remove this and other int/nat ops,
-// since we now have SpecAdd, etc.
-impl std::ops::Add for int {
+impl core::ops::Add for int {
     type Output = Self;
     fn add(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Sub for int {
+impl core::ops::Sub for int {
     type Output = Self;
     fn sub(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Mul for int {
+impl core::ops::Mul for int {
     type Output = Self;
     fn mul(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Div for int {
+impl core::ops::Div for int {
     type Output = Self;
     fn div(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Rem for int {
+impl core::ops::Rem for int {
     type Output = Self;
     fn rem(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Neg for int {
+impl core::ops::Neg for int {
     type Output = Self;
     fn neg(self) -> Self::Output {
         unimplemented!()
@@ -397,14 +396,14 @@ impl PartialEq for int {
 
 impl Eq for int {}
 
-impl std::cmp::PartialOrd for int {
-    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+impl core::cmp::PartialOrd for int {
+    fn partial_cmp(&self, _other: &Self) -> Option<core::cmp::Ordering> {
         unimplemented!()
     }
 }
 
-impl std::cmp::Ord for int {
-    fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
+impl core::cmp::Ord for int {
+    fn cmp(&self, _other: &Self) -> core::cmp::Ordering {
         unimplemented!()
     }
 }
@@ -412,35 +411,35 @@ impl std::cmp::Ord for int {
 #[allow(non_camel_case_types)]
 pub struct nat;
 
-impl std::ops::Add for nat {
+impl core::ops::Add for nat {
     type Output = Self;
     fn add(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Sub for nat {
+impl core::ops::Sub for nat {
     type Output = Self;
     fn sub(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Mul for nat {
+impl core::ops::Mul for nat {
     type Output = Self;
     fn mul(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Div for nat {
+impl core::ops::Div for nat {
     type Output = Self;
     fn div(self, _other: Self) -> Self::Output {
         unimplemented!()
     }
 }
 
-impl std::ops::Rem for nat {
+impl core::ops::Rem for nat {
     type Output = Self;
     fn rem(self, _other: Self) -> Self::Output {
         unimplemented!()
@@ -455,14 +454,14 @@ impl PartialEq for nat {
 
 impl Eq for nat {}
 
-impl std::cmp::PartialOrd for nat {
-    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+impl core::cmp::PartialOrd for nat {
+    fn partial_cmp(&self, _other: &Self) -> Option<core::cmp::Ordering> {
         unimplemented!()
     }
 }
 
-impl std::cmp::Ord for nat {
-    fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
+impl core::cmp::Ord for nat {
+    fn cmp(&self, _other: &Self) -> core::cmp::Ordering {
         unimplemented!()
     }
 }
@@ -480,7 +479,7 @@ pub trait Structural {
 
 #[doc(hidden)]
 pub struct AssertParamIsStructural<T: Structural + ?Sized> {
-    _field: std::marker::PhantomData<T>,
+    _field: core::marker::PhantomData<T>,
 }
 
 macro_rules! impl_structural {
@@ -508,7 +507,7 @@ impl !Send for NoSyncSend {}
 #[allow(dead_code)]
 pub struct SyncSendIfSyncSend<T> {
     no_sync_send: NoSyncSend,
-    t: std::marker::PhantomData<T>,
+    t: core::marker::PhantomData<T>,
 }
 
 unsafe impl<T: Sync + Send> Sync for SyncSendIfSyncSend<T> {}
@@ -520,7 +519,7 @@ unsafe impl<T: Sync + Send> Send for SyncSendIfSyncSend<T> {}
 #[allow(dead_code)]
 pub struct SendIfSend<T> {
     no_sync_send: NoSyncSend,
-    t: std::marker::PhantomData<T>,
+    t: core::marker::PhantomData<T>,
 }
 
 unsafe impl<T: Send> Send for SendIfSend<T> {}
@@ -529,7 +528,7 @@ unsafe impl<T: Send> Send for SendIfSend<T> {}
 #[allow(dead_code)]
 pub struct SyncSendIfSend<T> {
     no_sync_send: NoSyncSend,
-    t: std::marker::PhantomData<T>,
+    t: core::marker::PhantomData<T>,
 }
 
 unsafe impl<T: Send> Sync for SyncSendIfSend<T> {}
@@ -690,7 +689,7 @@ pub trait SpecShr<Rhs = Self> {
 
 // Chained inequalities x <= y < z
 pub struct SpecChain {
-    data: std::marker::PhantomData<int>,
+    data: PhantomData<int>,
 }
 
 #[spec]

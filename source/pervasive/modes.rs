@@ -1,7 +1,7 @@
 #[allow(unused_imports)] use builtin::*;
 #[allow(unused_imports)] use builtin_macros::*;
 #[allow(unused_imports)] use crate::pervasive::*;
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 // TODO: the *_exec* functions would be better in builtin,
 // but it's painful to implement the support in erase.rs at the moment.
@@ -59,6 +59,7 @@ pub fn tracked_unwrap_trk<A>(a: Tracked<Trk<A>>) -> (ret: Tracked<A>)
 
 } // verus
 
+
 // TODO: replace Spec and Proof entirely with Ghost and Tracked
 
 #[verifier(external_body)]
@@ -69,6 +70,7 @@ pub struct Spec<#[verifier(strictly_positive)] A> {
 pub struct Proof<A>(
     #[proof] pub A,
 );
+
 
 impl<A> Spec<A> {
     fndecl!(pub fn value(self) -> A);
@@ -108,6 +110,7 @@ impl<A> PartialEq for Spec<A> {
 impl<A> Eq for Spec<A> {
 }
 
+
 impl<A> PartialEq for Proof<A> {
     #[verifier(external_body)]
     fn eq(&self, _rhs: &Proof<A>) -> bool {
@@ -117,6 +120,7 @@ impl<A> PartialEq for Proof<A> {
 
 impl<A> Eq for Proof<A> {
 }
+
 
 #[allow(dead_code)]
 #[inline(always)]
