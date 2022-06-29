@@ -6,30 +6,68 @@ use builtin_macros::*;
 use crate::pervasive::*;
 #[allow(unused_imports)]
 use crate::pervasive::seq::*;
+use core::ops::{Index};
 
 verus! {
 
-#[verifier(external_body)]
-pub struct Vec<#[verifier(strictly_positive)] A> {
-    pub vec: std::vec::Vec<A>,
+seq_macro::seq!(N in 0..63 {
+    pub struct VecArray64<A> {
+        // Expands to Variant64, Variant65, ...
+        #(
+            pub val_~N: A,
+        )*
+    }
+});
+
+seq_macro::seq!(N in 0..63 {
+impl<A: core::default::Default> VecArray64<A> {
+    #[verifier(external_body)]
+    pub fn new(a: A) -> Self {
+            VecArray64 {
+                // Expands to Variant64, Variant65, ...
+                #(
+                    val_~N: core::default::Default::default(),
+                )*
+            }
+    }
+    pub fn update(&mut self, i: usize, val: A) {
+        //concat_idents!(self.val, i)
+       self.val_0 = val;
+    }
+}
+});
+
+impl<A> Index<usize> for VecArray64<A> {
+    type Output = A;
+    fn index(&self, i: usize) -> &A {
+        //concat_idents!(self.val, i)
+        &self.val_0
+    }
 }
 
-impl<A> Vec<A> {
+#[verifier(external_body)]
+pub struct Vec<#[verifier(strictly_positive)] A> {
+    pub vec: VecArray64<A>,
+    pub index: usize,
+}
+
+impl<A: core::default::Default> Vec<A> {
     pub spec fn view(&self) -> Seq<A>;
 
     #[verifier(external_body)]
-    pub fn new() -> (v: Self)
+    pub fn new(a: A) -> (v: Self)
         ensures
             v@ === Seq::empty(),
     {
-        Vec { vec: std::vec::Vec::new() }
+        let val =  VecArray64::new(a);
+        Vec { vec: val, index: 0 }
     }
     
-    pub fn empty() -> (v: Self)
+    pub fn empty(a: A) -> (v: Self)
         ensures
             v@ === Seq::empty(),
     {
-        Vec::new()
+        Vec::new(a)
     }
 
     #[verifier(external_body)]
@@ -37,20 +75,19 @@ impl<A> Vec<A> {
         ensures
             self@ === old(self)@.push(value),
     {
-        self.vec.push(value);
+        self.vec.update(self.index, value);
+        self.index += 1;
     }
 
     #[verifier(external_body)]
-    pub fn pop(&mut self) -> (value: A)
+    pub fn pop(&mut self)
         requires
             old(self).len() > 0,
         ensures
             value === old(self)[old(self).len() - 1],
             self@ === old(self)@.subrange(0, old(self).len() - 1),
     {
-        unsafe {
-            self.vec.pop().unwrap_unchecked()  // Safe to unwrap given the precondition above
-        }
+        self.index = self.index - 1;
     }
 
     #[verifier(inline)]
@@ -76,7 +113,7 @@ impl<A> Vec<A> {
         ensures
             self@ === old(self)@.update(i as int, a),
     {
-        self.vec[i] = a;
+        self.vec.update(i, a);
     }
 
     pub spec fn spec_len(&self) -> usize;
@@ -88,7 +125,7 @@ impl<A> Vec<A> {
         ensures
             l == self.len(),
     {
-        self.vec.len()
+        self.index + 1
     }
 }
 
