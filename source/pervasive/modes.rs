@@ -1,7 +1,7 @@
 #[allow(unused_imports)] use builtin::*;
 #[allow(unused_imports)] use builtin_macros::*;
 #[allow(unused_imports)] use crate::pervasive::*;
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 #[verifier(external_body)]
 pub struct Ghost<#[verifier(strictly_positive)] A> {
@@ -63,7 +63,7 @@ impl<A> Clone for Ghost<A> {
 impl<A> Copy for Ghost<A> {
 }
 
-impl<A> std::ops::Deref for Ghost<A> {
+impl<A> core::ops::Deref for Ghost<A> {
     type Target = A;
     #[spec]
     #[verifier(external)]
@@ -72,7 +72,7 @@ impl<A> std::ops::Deref for Ghost<A> {
     }
 }
 
-impl<A> std::ops::Deref for Tracked<A> {
+impl<A> core::ops::Deref for Tracked<A> {
     type Target = A;
     #[spec]
     #[verifier(external)]

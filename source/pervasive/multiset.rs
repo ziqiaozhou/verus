@@ -26,7 +26,7 @@ use crate::pervasive::set::*;
 
 #[verifier(external_body)]
 pub struct Multiset<#[verifier(strictly_positive)] V> {
-    dummy: std::marker::PhantomData<V>,
+    dummy: core::marker::PhantomData<V>,
 }
 
 impl<V> Multiset<V> {

@@ -6,12 +6,13 @@ use builtin_macros::*;
 use crate::pervasive::*;
 #[allow(unused_imports)]
 use crate::pervasive::seq::*;
+extern crate alloc;
 
 verus! {
 
 #[verifier(external_body)]
 pub struct Vec<#[verifier(strictly_positive)] A> {
-    pub vec: std::vec::Vec<A>,
+    pub vec: alloc::vec::Vec<A>,
 }
 
 impl<A> Vec<A> {
@@ -22,7 +23,7 @@ impl<A> Vec<A> {
         ensures
             v.view() === Seq::empty(),
     {
-        Vec { vec: std::vec::Vec::new() }
+        Vec { vec: alloc::vec::Vec::new() }
     }
     
     pub fn empty() -> (v: Self)
