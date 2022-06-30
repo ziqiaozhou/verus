@@ -19,6 +19,13 @@ pub mod thread;
 #[allow(unused_imports)]
 use builtin::*;
 
+macro_rules! println {
+    () => {
+    };
+    ($($arg:tt)*) => {{
+    }};
+}
+
 #[proof]
 pub fn assume(b: bool) {
     ensures(b);
