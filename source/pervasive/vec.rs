@@ -6,54 +6,68 @@ use builtin_macros::*;
 use crate::pervasive::*;
 #[allow(unused_imports)]
 use crate::pervasive::seq::*;
+use core::ops::{Index};
 
 verus! {
 
 seq_macro::seq!(N in 0..63 {
-    struct VecArray64<#[verifier(strictly_positive)] A> {
+    pub struct VecArray64<A> {
         // Expands to Variant64, Variant65, ...
         #(
-            val~N: A,
+            pub val_~N: A,
         )*
     }
 });
 
-impl<A> VecArray64<A> {
-    fn new() -> Self {
-        seq_macro::seq!(N in 0..63 {
+seq_macro::seq!(N in 0..63 {
+impl<A: core::default::Default> VecArray64<A> {
+    #[verifier(external_body)]
+    pub fn new(a: A) -> Self {
             VecArray64 {
                 // Expands to Variant64, Variant65, ...
                 #(
-                    val~N: 0 as A,
+                    val_~N: core::default::Default::default(),
                 )*
             }
-        })
+    }
+    pub fn update(&mut self, i: usize, val: A) {
+        //concat_idents!(self.val, i)
+       self.val_0 = val;
+    }
+}
+});
+
+impl<A> Index<usize> for VecArray64<A> {
+    type Output = A;
+    fn index(&self, i: usize) -> &A {
+        //concat_idents!(self.val, i)
+        &self.val_0
     }
 }
 
-    
 #[verifier(external_body)]
 pub struct Vec<#[verifier(strictly_positive)] A> {
-    pub vec: VecArray64,
+    pub vec: VecArray64<A>,
     pub index: usize,
 }
 
-impl<A> Vec<A> {
+impl<A: core::default::Default> Vec<A> {
     pub spec fn view(&self) -> Seq<A>;
 
     #[verifier(external_body)]
-    pub fn new() -> (v: Self)
+    pub fn new(a: A) -> (v: Self)
         ensures
             v.view() === Seq::empty(),
     {
-        Vec { vec: VecArray64::new(), index: 0 }
+        let val =  VecArray64::new(a);
+        Vec { vec: val, index: 0 }
     }
     
-    pub fn empty() -> (v: Self)
+    pub fn empty(a: A) -> (v: Self)
         ensures
             v.view() === Seq::empty(),
     {
-        Vec::new()
+        Vec::new(a)
     }
 
     #[verifier(external_body)]
@@ -61,19 +75,18 @@ impl<A> Vec<A> {
         ensures
             self.view() === old(self).view().push(value),
     {
-        self.vec[self.index] = value;
+        self.vec.update(self.index, value);
+        self.index += 1;
     }
 
     #[verifier(external_body)]
-    pub fn pop(&mut self) -> (value: A)
+    pub fn pop(&mut self)
         requires
             old(self).len() > 0,
         ensures
-            value === old(self).view().index(old(self).view().len() as int - 1),
-            self.view() === old(self).view().subrange(0, old(self).view().len() as int - 1),
+           self.len() == old(self).len()-1,
     {
-        self.index = self.index - 1
-        self.vec[self.index+1]
+        self.index = self.index - 1;
     }
 
     #[verifier(external_body)]
@@ -94,7 +107,7 @@ impl<A> Vec<A> {
         ensures
             self.view() === old(self).view().update(i, a),
     {
-        self.vec[i] = a;
+        self.vec.update(i, a);
     }
 
     #[verifier(external_body)]
