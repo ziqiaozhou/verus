@@ -41,8 +41,8 @@ impl<A> Tracked<A> {
     #[proof]
     #[verifier(external_body)]
     #[verifier(returns(proof))]
-    pub fn get(#[proof] self) -> A {
-        ensures(|a: A| equal(a, self.value()));
+    pub fn get(self) -> A {
+        //ensures(|a: A| equal(a, self.value()));
         unimplemented!()
     }
 }
@@ -82,14 +82,16 @@ impl<A> core::ops::Deref for Tracked<A> {
     }
 }
 
-verus! {
 
+verus! {
+/*
 pub tracked struct TrackedAndGhost<T, G>(
     pub tracked T,
     pub ghost G,
 );
-
+*/
 } // verus
+
 
 // TODO: replace Spec and Proof entirely with Ghost and Tracked
 
@@ -97,10 +99,11 @@ pub tracked struct TrackedAndGhost<T, G>(
 pub struct Spec<#[verifier(strictly_positive)] A> {
     phantom: PhantomData<A>,
 }
-
+/* 
 pub struct Proof<A>(
     #[proof] pub A,
 );
+*/
 
 impl<A> Spec<A> {
     fndecl!(pub fn value(self) -> A);
@@ -140,6 +143,7 @@ impl<A> PartialEq for Spec<A> {
 impl<A> Eq for Spec<A> {
 }
 
+/*
 impl<A> PartialEq for Proof<A> {
     #[verifier(external_body)]
     fn eq(&self, _rhs: &Proof<A>) -> bool {
@@ -150,6 +154,7 @@ impl<A> PartialEq for Proof<A> {
 impl<A> Eq for Proof<A> {
 }
 
+
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_proof_from_false<A>() -> Proof<A> {
@@ -157,3 +162,4 @@ pub fn exec_proof_from_false<A>() -> Proof<A> {
 
     Proof(proof_from_false())
 }
+*/
