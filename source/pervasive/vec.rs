@@ -6,13 +6,36 @@ use builtin_macros::*;
 use crate::pervasive::*;
 #[allow(unused_imports)]
 use crate::pervasive::seq::*;
-extern crate alloc;
 
 verus! {
 
+seq_macro::seq!(N in 0..63 {
+    struct VecArray64<#[verifier(strictly_positive)] A> {
+        // Expands to Variant64, Variant65, ...
+        #(
+            val~N: A,
+        )*
+    }
+});
+
+impl<A> VecArray64<A> {
+    fn new() -> Self {
+        seq_macro::seq!(N in 0..63 {
+            VecArray64 {
+                // Expands to Variant64, Variant65, ...
+                #(
+                    val~N: 0 as A,
+                )*
+            }
+        })
+    }
+}
+
+    
 #[verifier(external_body)]
 pub struct Vec<#[verifier(strictly_positive)] A> {
-    pub vec: alloc::vec::Vec<A>,
+    pub vec: VecArray64,
+    pub index: usize,
 }
 
 impl<A> Vec<A> {
@@ -23,7 +46,7 @@ impl<A> Vec<A> {
         ensures
             v.view() === Seq::empty(),
     {
-        Vec { vec: alloc::vec::Vec::new() }
+        Vec { vec: VecArray64::new(), index: 0 }
     }
     
     pub fn empty() -> (v: Self)
@@ -38,7 +61,7 @@ impl<A> Vec<A> {
         ensures
             self.view() === old(self).view().push(value),
     {
-        self.vec.push(value);
+        self.vec[self.index] = value;
     }
 
     #[verifier(external_body)]
@@ -49,9 +72,8 @@ impl<A> Vec<A> {
             value === old(self).view().index(old(self).view().len() as int - 1),
             self.view() === old(self).view().subrange(0, old(self).view().len() as int - 1),
     {
-        unsafe {
-            self.vec.pop().unwrap_unchecked()  // Safe to unwrap given the precondition above
-        }
+        self.index = self.index - 1
+        self.vec[self.index+1]
     }
 
     #[verifier(external_body)]
@@ -81,7 +103,7 @@ impl<A> Vec<A> {
         ensures
             l == self.view().len(),
     {
-        self.vec.len()
+        self.index + 1
     }
 }
 
