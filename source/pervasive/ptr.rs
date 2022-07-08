@@ -1,12 +1,11 @@
 use core::mem::MaybeUninit;
-use core::alloc::{Layout};
 
 #[allow(unused_imports)] use builtin::*;
 #[allow(unused_imports)] use builtin_macros::*;
 #[allow(unused_imports)] use crate::pervasive::*;
 #[allow(unused_imports)] use crate::pervasive::modes::*;
 
-extern crate alloc;
+//extern crate alloc;
 
 /// `PPtr<V>` (which stands for "permissioned pointer")
 /// is a wrapper around a raw pointer to `V` on the heap.
@@ -155,7 +154,7 @@ impl<V> PPtr<V> {
         opens_invariants_none();
 
         let p = PPtr {
-            uptr: alloc::boxed::Box::leak(box MaybeUninit::uninit()).as_mut_ptr(),
+            uptr: MaybeUninit::uninit().as_mut_ptr(),
         };
         let Proof(t) = exec_proof_from_false();
         (p, Proof(t))
@@ -291,7 +290,7 @@ impl<V> PPtr<V> {
         opens_invariants_none();
 
         unsafe {
-            alloc::alloc::dealloc(self.uptr as *mut u8, Layout::for_value(&*self.uptr));
+           // alloc::alloc::dealloc(self.uptr as *mut u8, Layout::for_value(&*self.uptr));
         }
     }
 
