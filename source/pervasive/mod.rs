@@ -14,7 +14,7 @@ pub mod invariant;
 pub mod modes;
 pub mod multiset;
 pub mod state_machine_internal;
-pub mod thread;
+//pub mod thread;
 
 #[allow(unused_imports)]
 use builtin::*;
