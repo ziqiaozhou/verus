@@ -19,23 +19,13 @@ seq_macro::seq!(N in 0..63 {
     }
 });
 
-seq_macro::seq!(N in 0..63 {
-impl<A: core::default::Default> VecArray64<A> {
-    #[verifier(external_body)]
-    pub fn new(a: A) -> Self {
-            VecArray64 {
-                // Expands to Variant64, Variant65, ...
-                #(
-                    val_~N: core::default::Default::default(),
-                )*
-            }
-    }
+impl<A> VecArray64<A> {
     pub fn update(&mut self, i: usize, val: A) {
         //concat_idents!(self.val, i)
        self.val_0 = val;
     }
 }
-});
+
 
 impl<A> Index<usize> for VecArray64<A> {
     type Output = A;
@@ -45,29 +35,22 @@ impl<A> Index<usize> for VecArray64<A> {
     }
 }
 
-#[verifier(external_body)]
+//#[verifier(external_body)]
 pub struct Vec<#[verifier(strictly_positive)] A> {
     pub vec: VecArray64<A>,
     pub index: usize,
 }
 
-impl<A: core::default::Default> Vec<A> {
+impl<A> Vec<A> {
     pub spec fn view(&self) -> Seq<A>;
 
     #[verifier(external_body)]
-    pub fn new(a: A) -> (v: Self)
+    pub fn init(&self, size: usize, val: A)
         ensures
-            v.view() === Seq::empty(),
+            self.view() === Seq::empty(),
+            self.view().len() == size,
+            forall|i: usize| i < size ==>  (self.view().index(i) === val)
     {
-        let val =  VecArray64::new(a);
-        Vec { vec: val, index: 0 }
-    }
-    
-    pub fn empty(a: A) -> (v: Self)
-        ensures
-            v.view() === Seq::empty(),
-    {
-        Vec::new(a)
     }
 
     #[verifier(external_body)]
