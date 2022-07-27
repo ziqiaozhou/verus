@@ -1,7 +1,13 @@
+#![no_std]
 #![feature(rustc_attrs)]
 #![feature(negative_impls)]
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
+use core::{panic::PanicInfo};
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
 
 #[proof]
 pub fn admit() {
