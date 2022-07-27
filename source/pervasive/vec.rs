@@ -56,7 +56,7 @@ impl<A> Vec<A> {
     #[verifier(external_body)]
     pub fn push(&mut self, value: A)
         ensures
-            self.view() === old(self).view().push(value),
+            self@ === old(self)@.push(value),
     {
         self.vec.update(self.index, value);
         self.index += 1;
@@ -72,13 +72,18 @@ impl<A> Vec<A> {
         self.index = self.index - 1;
     }
 
+    #[verifier(inline)]
+    pub open spec fn spec_index(self, i: int) -> A {
+        self@[i]
+    }
+
     #[verifier(external_body)]
     #[verifier(autoview)]
     pub fn index(&self, i: usize) -> (r: &A)
         requires
-            i < self.view().len(),
+            i < self.len(),
         ensures
-            *r === self.view().index(i),
+            *r === self[i as int],
     {
         &self.vec[i]
     }
@@ -86,21 +91,32 @@ impl<A> Vec<A> {
     #[verifier(external_body)]
     pub fn set(&mut self, i: usize, a: A)
         requires
-            i < old(self).view().len(),
+            i < old(self).len(),
         ensures
-            self.view() === old(self).view().update(i, a),
+            self@ === old(self)@.update(i as int, a),
     {
         self.vec.update(i, a);
     }
 
+    pub spec fn spec_len(&self) -> usize;
+
     #[verifier(external_body)]
+    #[verifier(when_used_as_spec(spec_len))]
     #[verifier(autoview)]
     pub fn len(&self) -> (l: usize)
         ensures
-            l == self.view().len(),
+            l == self.len(),
     {
         self.index + 1
     }
+}
+
+#[verifier(external_body)]
+#[verifier(broadcast_forall)]
+pub proof fn axiom_spec_len<A>(v: Vec<A>)
+    ensures
+        #[trigger] v.spec_len() == v.view().len(),
+{
 }
 
 } // verus!
