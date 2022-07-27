@@ -11,7 +11,7 @@ verus! {
 
 #[verifier(external_body)]
 pub struct Vec<#[verifier(strictly_positive)] A> {
-    pub vec: std::vec::Vec<A>,
+    pub vec: core::vec::Vec<A>,
 }
 
 impl<A> Vec<A> {
@@ -22,7 +22,7 @@ impl<A> Vec<A> {
         ensures
             v@ === Seq::empty(),
     {
-        Vec { vec: std::vec::Vec::new() }
+        Vec { vec: core::vec::Vec::new() }
     }
     
     pub fn empty() -> (v: Self)

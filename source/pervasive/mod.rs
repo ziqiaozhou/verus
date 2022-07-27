@@ -1,20 +1,20 @@
-pub mod map;
+//pub mod map;
 pub mod option;
 pub mod result;
-pub mod vec;
-pub mod seq;
-pub mod seq_lib;
-pub mod set;
-pub mod set_lib;
+//pub mod vec;
+//pub mod seq;
+//pub mod seq_lib;
+//pub mod set;
+//pub mod set_lib;
 pub mod cell;
 pub mod ptr;
 pub mod invariant;
-pub mod atomic;
-pub mod atomic_ghost;
+//pub mod atomic;
+//pub mod atomic_ghost;
 pub mod modes;
-pub mod multiset;
-pub mod state_machine_internal;
-pub mod thread;
+//pub mod multiset;
+//pub mod state_machine_internal;
+//pub mod thread;
 
 #[allow(unused_imports)]
 use builtin::*;
@@ -90,7 +90,7 @@ pub fn unreached<A>() -> A {
 
 #[verifier(external_body)]
 pub fn print_u64(i: u64) {
-    println!("{}", i);
+    //println!("{}", i);
 }
 
 /// Allows you to prove a boolean predicate by assuming its negation and proving

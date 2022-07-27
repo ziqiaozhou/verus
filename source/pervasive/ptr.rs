@@ -1,6 +1,6 @@
-use std::mem::MaybeUninit;
-use std::alloc::{Layout};
-use std::alloc::{dealloc};
+use core::mem::MaybeUninit;
+//use core::alloc::{Layout};
+//use core::alloc::{dealloc};
 
 #[allow(unused_imports)] use builtin::*;
 #[allow(unused_imports)] use builtin_macros::*;
@@ -12,7 +12,7 @@ verus!{
 /// `PPtr<V>` (which stands for "permissioned pointer")
 /// is a wrapper around a raw pointer to `V` on the heap.
 ///
-/// Technically, it is a wrapper around `*mut std::mem::MaybeUninit<V>`, that is, the object
+/// Technically, it is a wrapper around `*mut core::mem::MaybeUninit<V>`, that is, the object
 /// it points to may be uninitialized.
 ///
 /// In order to access (read or write) the value behind the pointer, the user needs
@@ -226,7 +226,7 @@ impl<V> PPtr<V> {
 
         unsafe {
             let mut m = MaybeUninit::uninit();
-            std::mem::swap(&mut m, &mut *self.uptr);
+            core::mem::swap(&mut m, &mut *self.uptr);
             m.assume_init()
         }
     }
@@ -249,7 +249,7 @@ impl<V> PPtr<V> {
 
         unsafe {
             let mut m = MaybeUninit::new(in_v);
-            std::mem::swap(&mut m, &mut *self.uptr);
+            core::mem::swap(&mut m, &mut *self.uptr);
             m.assume_init()
         }
     }
@@ -290,7 +290,7 @@ impl<V> PPtr<V> {
         opens_invariants_none();
 
         unsafe {
-            dealloc(self.uptr as *mut u8, Layout::for_value(&*self.uptr));
+            //dealloc(self.uptr as *mut u8, Layout::for_value(&*self.uptr));
         }
     }
 
