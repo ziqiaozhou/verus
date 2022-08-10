@@ -57,7 +57,7 @@ pub fn output_token_stream(bundle: SMBundle, concurrent: bool) -> parse::Result<
     let final_code = quote! {
         ::builtin_macros::verus_old_todo_replace_this!{
             #[allow(unused_parens)]
-            mod #sm_name {
+            pub mod #sm_name {
                 use super::*;
 
                 #root_stream
@@ -68,7 +68,6 @@ pub fn output_token_stream(bundle: SMBundle, concurrent: bool) -> parse::Result<
             }
         }
     };
-
     return Ok(final_code);
 }
 
@@ -277,7 +276,7 @@ pub fn output_primary_stuff(
                 rel_fn = quote! {
                     #[spec]
                     #[verifier(publish)]
-                    pub fn #name (#args) -> ::std::primitive::bool {
+                    pub fn #name (#args) -> bool {
                         #f
                     }
                 };
@@ -286,7 +285,7 @@ pub fn output_primary_stuff(
                 rel_fn = quote! {
                     #[spec]
                     #[verifier(publish)]
-                    pub fn #name (#args) -> ::std::primitive::bool {
+                    pub fn #name (#args) -> bool {
                         #f
                     }
                 };
@@ -307,7 +306,7 @@ pub fn output_primary_stuff(
             let rel_fn = quote! {
                 #[spec]
                 #[verifier(publish)]
-                pub fn #name (#params) -> ::std::primitive::bool {
+                pub fn #name (#params) -> bool {
                     #f
                 }
             };
@@ -436,7 +435,7 @@ fn output_step_datatype(
     if is_init {
         impl_stream.extend(quote! {
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn init_by(post: #self_ty, #label_param step: #step_ty) -> ::std::primitive::bool {
+            pub fn init_by(post: #self_ty, #label_param step: #step_ty) -> bool {
                 match step {
                     #(#arms)*
                     // The dummy step never corresponds to a valid transition.
@@ -445,7 +444,7 @@ fn output_step_datatype(
             }
 
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn init(post: #self_ty, #label_param) -> ::std::primitive::bool {
+            pub fn init(post: #self_ty, #label_param) -> bool {
                 ::builtin::exists(|step: #step_ty| Self::init_by(post, #label_arg step))
             }
         });
@@ -472,7 +471,7 @@ fn output_step_datatype(
 
         impl_stream.extend(quote!{
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn next_by(pre: #self_ty, post: #self_ty, #label_param step: #step_ty) -> ::std::primitive::bool {
+            pub fn next_by(pre: #self_ty, post: #self_ty, #label_param step: #step_ty) -> bool {
                 match step {
                     #(#arms)*
                     #type_ident::dummy_to_use_type_params(_) => false,
@@ -480,12 +479,12 @@ fn output_step_datatype(
             }
 
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn next(pre: #self_ty, post: #self_ty, #label_param) -> ::std::primitive::bool {
+            pub fn next(pre: #self_ty, post: #self_ty, #label_param) -> bool {
                 ::builtin::exists(|step: #step_ty| Self::next_by(pre, post, #label_arg step))
             }
 
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn next_strong_by(pre: #self_ty, post: #self_ty, #label_param step: #step_ty) -> ::std::primitive::bool {
+            pub fn next_strong_by(pre: #self_ty, post: #self_ty, #label_param step: #step_ty) -> bool {
                 match step {
                     #(#arms_strong)*
                     #type_ident::dummy_to_use_type_params(_) => false,
@@ -493,7 +492,7 @@ fn output_step_datatype(
             }
 
             #[spec] #[verifier(opaque)] #[verifier(publish)]
-            pub fn next_strong(pre: #self_ty, post: #self_ty, #label_param) -> ::std::primitive::bool {
+            pub fn next_strong(pre: #self_ty, post: #self_ty, #label_param) -> bool {
                 ::builtin::exists(|step: #step_ty| Self::next_by(pre, post, #label_arg step))
             }
         });
@@ -780,7 +779,7 @@ fn output_other_fns(
     impl_stream.extend(quote! {
         #[spec]
         #[verifier(publish)]
-        pub fn invariant(&self) -> ::std::primitive::bool {
+        pub fn invariant(&self) -> bool {
             #conj
         }
     });
