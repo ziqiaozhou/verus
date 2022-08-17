@@ -421,6 +421,15 @@ fn check_item<'tcx>(
             };
             vir.traits.push(spanned_new(item.span, traitx));
         }
+        ItemKind::TyAlias(_ty, _generics) => {
+            // type alias (like lines of the form `type X = ...;`
+            // Nothing to do here - we can rely on Rust's type resolution to handle these
+        }
+        ItemKind::GlobalAsm(..) =>
+        //if get_verifier_attrs(ctxt.tcx.hir().attrs(item.hir_id()))?.external =>
+        {
+            return Ok(());
+        }
         _ => {
             unsupported_err!(item.span, "unsupported item", item);
         }
@@ -448,8 +457,13 @@ fn check_foreign_item<'tcx>(
                 generics,
             )?;
         }
+        ForeignItemKind::Static(..)
+            if get_verifier_attrs(ctxt.tcx.hir().attrs(item.hir_id()))?.external =>
+        {
+            return Ok(());
+        }
         _ => {
-            unsupported_err!(item.span, "unsupported item", item);
+            unsupported_err!(item.span, "unsupported foreign item", item);
         }
     }
     Ok(())
