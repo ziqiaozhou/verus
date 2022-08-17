@@ -190,6 +190,11 @@ pub fn assert_nonlinear_by(_: ()) {
 }
 
 #[proof]
+pub fn assert_bitvector_by(_: ()) {
+    unimplemented!();
+}
+
+#[proof]
 pub fn assert_forall_by<A>(_a: A) {
     unimplemented!();
 }
@@ -221,7 +226,7 @@ pub struct Tracked<#[verifier(strictly_positive)] A> {
 
 impl<A> Ghost<A> {
     #[spec]
-    pub fn value(self) -> A {
+    pub fn view(self) -> A {
         unimplemented!()
     }
 
@@ -237,11 +242,25 @@ impl<A> Ghost<A> {
     pub fn assume_new() -> Self {
         Ghost { phantom: PhantomData }
     }
+
+    // note that because we return #[spec], not #[exec], we do not implement the Borrow trait
+    #[spec]
+    #[verifier(external_body)]
+    pub fn borrow(&self) -> &A {
+        unimplemented!()
+    }
+
+    // note that because we return #[spec], not #[exec], we do not implement the BorrowMut trait
+    #[proof]
+    #[verifier(external)]
+    pub fn borrow_mut(#[proof] &mut self) -> &mut A {
+        unimplemented!()
+    }
 }
 
 impl<A> Tracked<A> {
     #[spec]
-    pub fn value(self) -> A {
+    pub fn view(self) -> A {
         unimplemented!()
     }
 
@@ -250,6 +269,29 @@ impl<A> Tracked<A> {
     #[inline(always)]
     pub fn assume_new() -> Self {
         Tracked { phantom: PhantomData }
+    }
+
+    #[proof]
+    #[verifier(external_body)]
+    #[verifier(returns(proof))]
+    pub fn get(#[proof] self) -> A {
+        unimplemented!()
+    }
+
+    // note that because we return #[proof], not #[exec], we do not implement the Borrow trait
+    #[proof]
+    #[verifier(external_body)]
+    #[verifier(returns(proof))]
+    pub fn borrow(#[proof] &self) -> &A {
+        unimplemented!()
+    }
+
+    // note that because we return #[proof], not #[exec], we do not implement the BorrowMut trait
+    #[proof]
+    #[verifier(external_body)]
+    #[verifier(returns(proof))]
+    pub fn borrow_mut(#[proof] &mut self) -> &mut A {
+        unimplemented!()
     }
 }
 
@@ -262,24 +304,6 @@ impl<A> Clone for Ghost<A> {
 }
 
 impl<A> Copy for Ghost<A> {}
-
-impl<A> std::ops::Deref for Ghost<A> {
-    type Target = A;
-    #[spec]
-    #[verifier(external)]
-    fn deref(&self) -> &A {
-        unimplemented!()
-    }
-}
-
-impl<A> std::ops::Deref for Tracked<A> {
-    type Target = A;
-    #[spec]
-    #[verifier(external)]
-    fn deref(&self) -> &A {
-        unimplemented!()
-    }
-}
 
 macro_rules! emit_phantom {
     ($x:ident) => {

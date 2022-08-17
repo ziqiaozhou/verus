@@ -133,9 +133,6 @@ pub const QID_ACCESSOR: &str = "accessor";
 pub const QID_INVARIANT: &str = "invariant";
 pub const QID_HAS_TYPE_ALWAYS: &str = "has_type_always";
 
-// We assume that usize is at least ARCH_SIZE_MIN_BITS wide
-pub const ARCH_SIZE_MIN_BITS: u32 = 32;
-
 pub const SUPPORTED_CRATES: [&str; 2] = ["builtin", "pervasive"];
 
 pub fn path_to_string(path: &Path) -> String {
@@ -441,6 +438,7 @@ pub struct CommandsWithContextX {
     pub desc: String,
     pub commands: Commands,
     pub prover_choice: ProverChoice,
+    pub skip_recommends: bool,
 }
 
 impl CommandsWithContextX {
@@ -449,12 +447,14 @@ impl CommandsWithContextX {
         desc: String,
         commands: Commands,
         prover_choice: ProverChoice,
+        skip_recommends: bool,
     ) -> CommandsWithContext {
         Arc::new(CommandsWithContextX {
             span: span,
             desc: desc,
             commands: commands,
             prover_choice: prover_choice,
+            skip_recommends: skip_recommends,
         })
     }
 }

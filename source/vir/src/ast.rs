@@ -15,6 +15,11 @@ pub use air::ast::{Binder, Binders};
 /// Result<T, VirErr> is used when an error might need to be reported to the user
 pub type VirErr = Error;
 
+pub enum VirErrAs {
+    Warning(VirErr),
+    Note(VirErr),
+}
+
 /// A non-qualified name, such as a local variable name or type parameter name
 pub type Ident = Arc<String>;
 pub type Idents = Arc<Vec<Ident>>;
@@ -106,6 +111,17 @@ pub enum TriggerAnnotation {
     Trigger(Option<u64>),
 }
 
+/// Operations on Ghost and Tracked
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ModeCoercion {
+    /// Mutable borrows (Ghost::borrow_mut and Tracked::borrow_mut) are treated specially by
+    /// the mode checker when checking assignments.
+    BorrowMut,
+    /// All other cases are treated uniformly by the mode checker based on their op/from/to-mode.
+    /// (This includes Ghost::borrow, Tracked::get, etc.)
+    Other,
+}
+
 /// Primitive unary operations
 /// (not arbitrary user-defined functions -- these are represented by ExprX::Call)
 #[derive(Copy, Clone, Debug)]
@@ -120,7 +136,7 @@ pub enum UnaryOp {
     /// Force integer value into range given by IntRange (e.g. by using mod)
     Clip(IntRange),
     /// Operations that coerce from/to builtin::Ghost or builtin::Tracked
-    CoerceMode { op_mode: Mode, from_mode: Mode, to_mode: Mode },
+    CoerceMode { op_mode: Mode, from_mode: Mode, to_mode: Mode, kind: ModeCoercion },
     /// Internal consistency check to make sure finalize_exp gets called
     /// (appears only briefly in SST before finalize_exp is called)
     MustBeFinalized,
@@ -339,6 +355,7 @@ pub enum InvAtomicity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AssertQueryMode {
     NonLinear,
+    BitVector,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -391,8 +408,7 @@ pub enum ExprX {
     WithTriggers { triggers: Arc<Vec<Exprs>>, body: Expr },
     /// Assign to local variable
     /// init_not_mut = true ==> a delayed initialization of a non-mutable variable
-    /// lhs_type_mode = Some(mode) ==> assignment to Ghost<t> or Tracked<t>
-    Assign { init_not_mut: bool, lhs_type_mode: Option<Mode>, lhs: Expr, rhs: Expr },
+    Assign { init_not_mut: bool, lhs: Expr, rhs: Expr },
     /// Reveal definition of an opaque function with some integer fuel amount
     Fuel(Fun, u32),
     /// Header, which must appear at the beginning of a function or while loop.
@@ -403,8 +419,6 @@ pub enum ExprX {
     Admit,
     /// Forall or assert-by statement; proves "forall vars. ensure" via proof.
     Forall { vars: Binders<Typ>, require: Expr, ensure: Expr, proof: Expr },
-    /// bit vector assertions
-    AssertBV(Expr),
     /// If-else
     If(Expr, Expr, Option<Expr>),
     /// Match (Note: ast_simplify replaces Match with other expressions)
@@ -423,7 +437,7 @@ pub enum ExprX {
     Ghost { alloc_wrapper: Option<Fun>, tracked: bool, expr: Expr },
     /// Sequence of statements, optionally including an expression at the end
     Block(Stmts, Option<Expr>),
-    /// assert_by with smt.arith.nl=true
+    /// `assert_by` with a dedicated prover option (nonlinear_arith, bit_vector)
     AssertQuery { requires: Exprs, ensures: Exprs, proof: Expr, mode: AssertQueryMode },
 }
 

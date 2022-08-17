@@ -231,8 +231,13 @@ fn expr_to_node(expr: &Expr) -> Node {
                     nodes
                 }
                 UnaryOp::Clip(range) => nodes_vec!(clip {int_range_to_node(range)}),
-                UnaryOp::CoerceMode { op_mode, from_mode, to_mode } => {
-                    nodes_vec!(coerce_mode {str_to_node(&format!("{op_mode}"))} {str_to_node(&format!("{from_mode}"))} {str_to_node(&format!("{to_mode}"))})
+                UnaryOp::CoerceMode { op_mode, from_mode, to_mode, kind } => {
+                    nodes_vec!(coerce_mode
+                        {str_to_node(&format!("{op_mode}"))}
+                        {str_to_node(&format!("{from_mode}"))}
+                        {str_to_node(&format!("{to_mode}"))}
+                        {str_to_node(&format!("{:?}", kind))}
+                    )
                 }
                 UnaryOp::MustBeFinalized => nodes_vec!(MustBeFinalized),
             };
@@ -292,13 +297,10 @@ fn expr_to_node(expr: &Expr) -> Node {
             let ts = Node::List(triggers.iter().map(exprs_to_node).collect());
             nodes!(with_triggers {ts} {expr_to_node(body)})
         }
-        ExprX::Assign { init_not_mut, lhs_type_mode, lhs: e0, rhs: e1 } => {
+        ExprX::Assign { init_not_mut, lhs: e0, rhs: e1 } => {
             let mut nodes = nodes_vec!(assign);
             if *init_not_mut {
                 nodes.push(str_to_node(":init_not_mut"));
-            }
-            if let Some(mode) = lhs_type_mode {
-                nodes.push(str_to_node(&format!("{:?}", mode)));
             }
             nodes.push(expr_to_node(e0));
             nodes.push(expr_to_node(e1));
@@ -315,7 +317,6 @@ fn expr_to_node(expr: &Expr) -> Node {
         ExprX::AssertQuery { requires, ensures, proof, mode } => {
             nodes!(assertQuery {str_to_node(":requires")} {exprs_to_node(requires)} {str_to_node(":ensures")} {exprs_to_node(ensures)} {str_to_node(":proof")} {expr_to_node(proof)} {str_to_node(":mode")} {str_to_node(&format!("{:?}", mode))})
         }
-        ExprX::AssertBV(expr) => nodes!(assertbv {expr_to_node(expr)}),
         ExprX::If(e0, e1, e2) => {
             let mut nodes = nodes_vec!(if { expr_to_node(e0) } {
                 expr_to_node(e1)

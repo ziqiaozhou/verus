@@ -29,8 +29,8 @@ use air::ast::{
 };
 use air::ast_util::{
     bool_typ, bv_typ, ident_apply, ident_binder, ident_typ, ident_var, int_typ, mk_and,
-    mk_bind_expr, mk_eq, mk_exists, mk_implies, mk_ite, mk_let, mk_not, mk_option_command, mk_or,
-    mk_xor, str_apply, str_ident, str_typ, str_var, string_var,
+    mk_bind_expr, mk_bitvector_option, mk_eq, mk_exists, mk_implies, mk_ite, mk_let, mk_not,
+    mk_option_command, mk_or, mk_xor, str_apply, str_ident, str_typ, str_var, string_var,
 };
 use air::errors::{error, error_with_label};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -436,7 +436,7 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                 format!("error: unable to get bit-width from constant of type {:?}", exp.typ),
             );
         }
-        (ExpX::Const(c), false) => {
+        (ExpX::Const(c), _) => {
             let expr = constant_to_expr(ctx, c);
             expr
         }
@@ -1138,7 +1138,9 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
         StmX::Call(x, mode, typs, args, dest) => {
             let mut stmts: Vec<Stmt> = Vec::new();
             let func = &ctx.func_map[x];
-            if func.x.require.len() > 0 && (!ctx.checking_recommends() || *mode == Mode::Spec) {
+            if func.x.require.len() > 0
+                && (!ctx.checking_recommends_for_non_spec() || *mode == Mode::Spec)
+            {
                 let f_req = prefix_requires(&fun_to_air_ident(&func.x.name));
                 let mut req_args = vec_map(typs, typ_to_id);
                 for arg in args.iter() {
@@ -1310,44 +1312,56 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                         stm.span.clone(),
                         "assert_nonlinear_by".to_string(),
                         Arc::new(vec![
-                            mk_option_command("smt.arith.nl", "true"),
+                            mk_option_command("smt.arith.solver", "6"),
                             Arc::new(CommandX::CheckValid(query)),
-                            mk_option_command("smt.arith.nl", "false"),
                         ]),
-                        ProverChoice::DefaultProver,
+                        ProverChoice::Spinoff,
+                        true,
                     ));
                 }
+                _ => unreachable!("bitvector mode in wrong place"),
             }
 
             vec![]
         }
-        StmX::AssertBV(expr) => {
-            // here expr is boxed/unboxed in poly::poly_expr
-            // this is for integer version
-            // for bitvector part, box/unbox will be completely removed in exp_to_bv_expr
+        StmX::AssertBitVector { requires, ensures } => {
+            if ctx.debug {
+                unimplemented!("AssertBitVector is unsupported in debugger mode");
+            }
             let bv_expr_ctxt = &ExprCtxt::new_mode_bv(ExprMode::Body, true);
-            let error = error_with_label(
-                "assertion failed".to_string(),
-                &stm.span,
-                "assertion failed".to_string(),
-            );
-            let local = state.local_bv_shared.clone();
-            let air_expr = exp_to_expr(ctx, &expr, bv_expr_ctxt)?;
-            let assertion = Arc::new(StmtX::Assert(error, air_expr));
-            // this creates a separate query for the bv assertion
+
+            let requires_air: Vec<Expr> =
+                vec_map_result(requires, |e| exp_to_expr(ctx, e, bv_expr_ctxt))?;
+
+            let ensures_air: Vec<(Span, Expr)> =
+                vec_map_result(ensures, |e| match exp_to_expr(ctx, e, bv_expr_ctxt) {
+                    Ok(ens_air) => Ok((e.span.clone(), ens_air)),
+                    Err(vir_err) => Err(vir_err.clone()),
+                })?;
+
+            let mut local = state.local_bv_shared.clone();
+            for req in requires_air.iter() {
+                local.push(Arc::new(DeclX::Axiom(req.clone())));
+            }
+
+            let mut air_body: Vec<Stmt> = Vec::new();
+            for (span, ens) in ensures_air.iter() {
+                let error = error("bitvector ensures not satisfied", span);
+                let ens_stmt = StmtX::Assert(error, ens.clone());
+                air_body.push(Arc::new(ens_stmt));
+            }
+            let assertion = one_stmt(air_body);
             let query = Arc::new(QueryX { local: Arc::new(local), assertion });
+            let mut bv_commands = mk_bitvector_option();
+            bv_commands.push(Arc::new(CommandX::CheckValid(query)));
             state.commands.push(CommandsWithContextX::new(
                 stm.span.clone(),
-                "assert_bit_vector".to_string(),
-                Arc::new(vec![
-                    mk_option_command("smt.case_split", "0"),
-                    Arc::new(CommandX::CheckValid(query)),
-                    mk_option_command("smt.case_split", "3"),
-                ]),
-                ProverChoice::DefaultProver,
+                "assert_bitvector_by".to_string(),
+                Arc::new(bv_commands),
+                ProverChoice::Spinoff,
+                true,
             ));
-
-            vec![Arc::new(StmtX::Assume(exp_to_expr(ctx, &expr, expr_ctxt)?))]
+            vec![]
         }
         StmX::Assume(expr) => {
             if ctx.debug {
@@ -1510,6 +1524,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                 desc: "while loop".to_string(),
                 commands: Arc::new(vec![Arc::new(CommandX::CheckValid(query))]),
                 prover_choice: ProverChoice::DefaultProver,
+                skip_recommends: false,
             }));
 
             // At original site of while loop, assert invariant, havoc, assume invariant + neg_cond
@@ -1858,21 +1873,16 @@ pub fn body_stm_to_air(
             "Singular check valid".to_string(),
             Arc::new(vec![singular_command]),
             ProverChoice::Singular,
+            true,
         ));
     } else {
         let query = Arc::new(QueryX { local: Arc::new(local), assertion });
         let commands = if is_nonlinear {
-            vec![
-                mk_option_command("smt.arith.nl", "true"),
-                Arc::new(CommandX::CheckValid(query)),
-                mk_option_command("smt.arith.nl", "false"),
-            ]
+            vec![mk_option_command("smt.arith.solver", "6"), Arc::new(CommandX::CheckValid(query))]
         } else if is_bit_vector_mode {
-            vec![
-                mk_option_command("smt.case_split", "0"),
-                Arc::new(CommandX::CheckValid(query)),
-                mk_option_command("smt.case_split", "3"),
-            ]
+            let mut bv_commands = mk_bitvector_option();
+            bv_commands.push(Arc::new(CommandX::CheckValid(query)));
+            bv_commands
         } else {
             vec![Arc::new(CommandX::CheckValid(query))]
         };
@@ -1880,7 +1890,12 @@ pub fn body_stm_to_air(
             func_span.clone(),
             "function body check".to_string(),
             Arc::new(commands),
-            if is_spinoff_prover { ProverChoice::Spinoff } else { ProverChoice::DefaultProver },
+            if is_spinoff_prover || is_bit_vector_mode || is_nonlinear {
+                ProverChoice::Spinoff
+            } else {
+                ProverChoice::DefaultProver
+            },
+            is_integer_ring || is_bit_vector_mode || is_nonlinear,
         ));
     }
     Ok((state.commands, state.snap_map))

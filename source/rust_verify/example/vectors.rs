@@ -35,7 +35,7 @@ fn binary_search(v: &Vec<u64>, k: u64) -> (r: usize)
             i2 = ix;
         }
 
-        assert(i2 - i1 < *d);
+        assert(i2 - i1 < d@);
     }
     i1
 }
@@ -51,9 +51,9 @@ fn reverse(v: &mut Vec<u64>)
     while n < length / 2
         invariant
             length == v.len(),
-            forall|i: int| 0 <= i < n ==> v[i] == v1[length - i - 1],
-            forall|i: int| 0 <= i < n ==> v1[i] == v[length - i - 1],
-            forall|i: int| n <= i && i + n < length ==> #[trigger] v[i] == v1[i],
+            forall|i: int| 0 <= i < n ==> v[i] == v1@[length - i - 1],
+            forall|i: int| 0 <= i < n ==> v1@[i] == v[length - i - 1],
+            forall|i: int| n <= i && i + n < length ==> #[trigger] v[i] == v1@[i],
     {
         let x = *v.index(n);
         let y = *v.index(length - 1 - n);
@@ -72,12 +72,12 @@ fn pusher() -> Vec<u64> {
     v.push(3);
     v.push(4);
     let goal: Ghost<Seq<u64>> = ghost(Seq::new(5, |i: int| i as u64));
-    assert(v@.ext_equal(*goal));
+    assert(v@.ext_equal(goal@));
     assert(v[2] == 2);
 
     v.pop();
     v.push(4);
-    assert(v@.ext_equal(*goal));
+    assert(v@.ext_equal(goal@));
 
     v
 }
