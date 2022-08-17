@@ -404,6 +404,9 @@ pub(crate) fn impl_def_id_to_self_ty<'tcx>(tcx: TyCtxt<'tcx>, impl_def_id: DefId
 pub(crate) fn ty_to_vir<'tcx>(tcx: TyCtxt<'tcx>, ty: &Ty) -> Typ {
     let Ty { hir_id: _, kind, span } = ty;
     match kind {
+        rustc_hir::TyKind::Never => {
+            Arc::new(TypX::Tuple(Arc::new(vec![])))
+        }
         rustc_hir::TyKind::Tup(tys) => {
             Arc::new(TypX::Tuple(Arc::new(tys.iter().map(|t| ty_to_vir(tcx, t)).collect())))
         }
