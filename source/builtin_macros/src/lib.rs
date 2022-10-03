@@ -19,6 +19,11 @@ pub fn fndecl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     proc_macro::TokenStream::from(fndecl::fndecl(proc_macro2::TokenStream::from(input)))
 }
 
+#[proc_macro_attribute]
+pub fn verus_code(_attr: proc_macro::TokenStream, code: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    syntax::rewrite_items(code, true)
+}
+
 #[proc_macro]
 pub fn verus(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     syntax::rewrite_items(input, true)
