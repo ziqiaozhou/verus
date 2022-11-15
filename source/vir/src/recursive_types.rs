@@ -280,10 +280,6 @@ pub(crate) fn check_recursive_types(krate: &Krate) -> Result<(), VirErr> {
             match &**bound {
                 GenericBoundX::Traits(ts) if function.x.attrs.broadcast_forall && ts.len() != 0 => {
                     // See the todo!() in func_to_air.rs
-                    return error(
-                        &function.span,
-                        "not yet supported: bounds on broadcast_forall function type parameters",
-                    );
                 }
                 GenericBoundX::Traits(..) => {}
             }

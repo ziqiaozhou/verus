@@ -677,7 +677,10 @@ pub fn func_axioms_to_air(
                             binders.push(Arc::new(bind));
                         }
                         GenericBoundX::Traits(_) => {
-                            todo!()
+                            vars.push(crate::def::suffix_typ_param_id(&name));
+                            let typ = Arc::new(TypX::TypeId);
+                            let bind = BinderX { name: name.clone(), a: typ };
+                            binders.push(Arc::new(bind));
                         }
                     }
                 }
