@@ -204,10 +204,10 @@ pub(crate) fn check_recursive_types(krate: &Krate) -> Result<(), VirErr> {
                     if function.x.attrs.broadcast_forall =>
                 {
                     // See the todo!() in func_to_air.rs
-                    return err_str(
+                    /*return err_str(
                         &function.span,
                         "not yet supported: bounds on broadcast_forall function type parameters",
-                    );
+                    );*/
                 }
                 (_, FunctionKind::Static) => {}
                 _ => {
