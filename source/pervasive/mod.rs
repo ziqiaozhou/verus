@@ -6,6 +6,7 @@ pub mod seq_lib;
 pub mod set;
 pub mod set_lib;
 pub mod cell;
+#[cfg(not(feature = "non_std"))]
 pub mod cell_old_style;
 pub mod invariant;
 pub mod atomic;
