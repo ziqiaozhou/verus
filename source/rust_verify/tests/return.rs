@@ -105,9 +105,42 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     #[test] regression_215 verus_code! {
-        // NOTE: we may want to allow this, but fixing the panic in #215 was the priority
         fn f() {
             return ();
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[ignore] #[test] returning_named_unit verus_code! {
+        // TODO All of these panic right now
+
+        // This should probably pass:
+
+        proof fn f() -> (n: ())
+            ensures n === ()
+        {
+            return ();
+        }
+
+        // This should either pass or fail with a sensible error message:
+
+        proof fn g() -> (n: ())
+            ensures n === ()
+        {
+            return;
+        }
+
+        proof fn f_fail() -> (n: ())
+            ensures n === ()
+        {
+            return (); // FAILS
+        }
+
+        proof fn g_fail() -> (n: ())
+            ensures n === ()
+        {
+            return; // FAILS
+        }
+    } => Err(err) => assert_fails(err, 2)
 }

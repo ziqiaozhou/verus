@@ -159,3 +159,34 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    #[test] parse_named_return_type_with_comma_in_type_args verus_code! {
+        use map::*;
+
+        proof fn some_proof() -> (m: Map<int, int>)
+            ensures m === Map::empty()
+        {
+            Map::empty()
+        }
+
+        proof fn cats() {
+            let m = some_proof();
+            assert(m === Map::empty());
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] forall_in_ensures_with_return_keyword_regression_216 verus_code! {
+        #[spec]
+        fn f(a: nat) -> bool {
+            true
+        }
+
+        fn g() -> bool {
+            ensures(|res: bool| forall(|i: nat| f(i)));
+            return true;
+        }
+    } => Ok(())
+}

@@ -1,3 +1,4 @@
+use crate::ast::Exprs;
 use crate::ast::{
     ArithOp, AssertQueryMode, BinaryOp, CallTarget, ComputeMode, Constant, Expr, ExprX, Fun,
     Function, Ident, Mode, PatternX, SpannedTyped, Stmt, StmtX, Typ, TypX, Typs, UnaryOp, UnaryOpr,
@@ -16,14 +17,14 @@ use crate::sst_util::{free_vars_exp, free_vars_stm};
 use crate::sst_visitor::{map_exp_visitor, map_stm_exp_visitor};
 use crate::util::{vec_map, vec_map_result};
 use air::ast::{Binder, BinderX, Binders, Span};
-use air::errors::error_with_label;
+use air::messages::{error_with_label, Diagnostics};
 use air::scope_map::ScopeMap;
 use num_bigint::BigInt;
 use num_traits::identities::Zero;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-pub(crate) struct State {
+pub(crate) struct State<'a> {
     // View exec/proof code as spec
     // (used for is_const functions, which are viewable both as spec and exec)
     pub(crate) view_as_spec: bool,
@@ -40,12 +41,12 @@ pub(crate) struct State {
     // Variables that we considered renaming, but ended up being Bind variables
     // rather than LocalDecls
     dont_rename: HashSet<UniqueIdent>,
-    // If we allow return expressions, this is the return variable and ensures clauses:
-    pub(crate) ret_post: Option<(Option<UniqueIdent>, Vec<Stm>, Exps)>,
     // If > 0, disable checking recommends (used to make sure pure expressions stay pure)
     disable_recommends: u64,
     // Mapping from a function's name to the SST version of its body.  Used by the interpreter.
     pub fun_ssts: SstMap,
+    // Diagnostic output
+    pub diagnostics: &'a (dyn Diagnostics + 'a),
 }
 
 #[derive(Clone)]
@@ -91,8 +92,8 @@ macro_rules! unwrap_or_return_never {
     };
 }
 
-impl State {
-    pub fn new() -> Self {
+impl<'a> State<'a> {
+    pub fn new(diagnostics: &'a impl Diagnostics) -> Self {
         let mut rename_map = ScopeMap::new();
         rename_map.push_scope(true);
         State {
@@ -102,9 +103,9 @@ impl State {
             rename_map,
             rename_counters: HashMap::new(),
             dont_rename: HashSet::new(),
-            ret_post: None,
             disable_recommends: 0,
             fun_ssts: crate::update_cell::UpdateCell::new(HashMap::new()),
+            diagnostics,
         }
     }
 
@@ -218,7 +219,7 @@ impl State {
                             assert!(!substs.contains_key(&unique));
                             substs.insert(unique, arg.clone());
                         }
-                        let e = crate::sst_util::subst_exp(typ_substs, substs, body);
+                        let e = crate::sst_util::subst_exp(&typ_substs, &substs, body);
                         // keep the original outer span for better trigger messages
                         let e = SpannedTyped::new(&exp.span, &e.typ, e.x.clone());
                         return Ok(e);
@@ -267,16 +268,29 @@ impl State {
         exp
     }
 
-    // Erase unused unique ids from Vars, perform inlining, and choose triggers
+    // Erase unused unique ids from Vars, perform inlining, choose triggers,
+    // and perform splitting if necessary
     pub(crate) fn finalize_stm(
         &self,
         ctx: &Ctx,
+        diagnostics: &impl Diagnostics,
         fun_ssts: &SstMap,
         stm: &Stm,
+        ensures: &Exprs,
+        ens_pars: &Pars,
+        dest: Option<UniqueIdent>,
     ) -> Result<Stm, VirErr> {
         let stm = map_stm_exp_visitor(stm, &|exp| self.finalize_exp(ctx, fun_ssts, exp))?;
         if ctx.expand_flag {
-            crate::split_expression::all_split_exp(ctx, fun_ssts, &stm)
+            crate::split_expression::all_split_exp(
+                ctx,
+                diagnostics,
+                fun_ssts,
+                &stm,
+                ensures,
+                ens_pars,
+                dest,
+            )
         } else {
             Ok(stm)
         }
@@ -496,12 +510,13 @@ pub(crate) fn check_pure_expr_bind(
 
 pub(crate) fn expr_to_decls_exp(
     ctx: &Ctx,
+    diagnostics: &impl Diagnostics,
     fun_ssts: &SstMap,
     view_as_spec: bool,
     params: &Pars,
     expr: &Expr,
 ) -> Result<(Vec<LocalDecl>, Exp), VirErr> {
-    let mut state = State::new();
+    let mut state = State::new(diagnostics);
     state.view_as_spec = view_as_spec;
     state.declare_params(params);
     let exp = expr_to_pure_exp(ctx, &mut state, expr)?;
@@ -512,11 +527,12 @@ pub(crate) fn expr_to_decls_exp(
 
 pub(crate) fn expr_to_bind_decls_exp(
     ctx: &Ctx,
+    diagnostics: &impl Diagnostics,
     fun_ssts: &SstMap,
     params: &Pars,
     expr: &Expr,
 ) -> Result<Exp, VirErr> {
-    let mut state = State::new();
+    let mut state = State::new(diagnostics);
     for param in params.iter() {
         let id = state.declare_new_var(&param.x.name, &param.x.typ, false, false);
         state.dont_rename.insert(id);
@@ -529,20 +545,22 @@ pub(crate) fn expr_to_bind_decls_exp(
 
 pub(crate) fn expr_to_exp(
     ctx: &Ctx,
+    diagnostics: &impl Diagnostics,
     fun_ssts: &SstMap,
     params: &Pars,
     expr: &Expr,
 ) -> Result<Exp, VirErr> {
-    Ok(expr_to_decls_exp(ctx, fun_ssts, false, params, expr)?.1)
+    Ok(expr_to_decls_exp(ctx, diagnostics, fun_ssts, false, params, expr)?.1)
 }
 
 pub(crate) fn expr_to_exp_as_spec(
     ctx: &Ctx,
+    diagnostics: &impl Diagnostics,
     fun_ssts: &SstMap,
     params: &Pars,
     expr: &Expr,
 ) -> Result<Exp, VirErr> {
-    Ok(expr_to_decls_exp(ctx, fun_ssts, true, params, expr)?.1)
+    Ok(expr_to_decls_exp(ctx, diagnostics, fun_ssts, true, params, expr)?.1)
 }
 
 /// Convert an expr to (Vec<Stm>, Exp).
@@ -600,21 +618,33 @@ fn check_unit_or_never(exp: &ReturnValue) -> Result<(), VirErr> {
     }
 }
 
-/// the bool return value: if true, skip generating the postconditions later
-pub(crate) fn expr_to_one_stm_dest(
+/// Convert the expression to a Stm, and assert the post-conditions for
+/// the final returned expression.
+pub(crate) fn expr_to_one_stm_with_post(
     ctx: &Ctx,
     state: &mut State,
     expr: &Expr,
-    dest: &Option<UniqueIdent>,
-) -> Result<(Stm, bool), VirErr> {
+) -> Result<Stm, VirErr> {
     let (mut stms, exp) = expr_to_stm_opt(ctx, state, expr)?;
-    let skip_ensures = match exp.to_value() {
-        Some(e) => {
-            // Assign to `dest` to use in the postconditions later on.
-            if let Some(dest) = dest {
-                stms.push(init_var(&expr.span, &dest, &e));
-            }
-            false
+
+    // secondary label (indicating which post-condition failed) is added later
+    // in ast_to_sst when the post condition is expanded
+    let base_error = error_with_label(
+        crate::def::POSTCONDITION_FAILURE.to_string(),
+        &expr.span,
+        "at the end of the function body".to_string(),
+    );
+
+    match exp.to_value() {
+        Some(exp) => {
+            // Emit the postcondition for the common case where the function body
+            // terminates with an expression to be returned (or an implicit
+            // return value of 'unit').
+
+            stms.push(Spanned::new(
+                expr.span.clone(),
+                StmX::AssertPostConditions(base_error, Some(exp)),
+            ));
         }
         None => {
             // Program execution never gets to this point, so we don't need to check
@@ -632,10 +662,9 @@ pub(crate) fn expr_to_one_stm_dest(
             // Anyway, the point is, we don't need to check the postconditions again
             // in that case, or in any other case where we never reach the end of the
             // function.
-            true
         }
     };
-    Ok((stms_to_one_stm(&expr.span, stms), skip_ensures))
+    Ok(stms_to_one_stm(&expr.span, stms))
 }
 
 fn is_small_exp(exp: &Exp) -> bool {
@@ -668,7 +697,7 @@ fn stm_call(
     let fun = get_function(ctx, span, &name)?;
     let mut stms: Vec<Stm> = Vec::new();
     if ctx.expand_flag && crate::split_expression::need_split_expression(ctx, span) {
-        let error = air::errors::error(crate::def::SPLIT_PRE_FAILURE.to_string(), span);
+        let error = air::messages::error(crate::def::SPLIT_PRE_FAILURE.to_string(), span);
         let call = StmX::Call {
             fun: name.clone(),
             mode: fun.x.mode,
@@ -966,7 +995,7 @@ fn expr_to_stm_opt(
                 let unary = UnaryOpr::HasType(expr.typ.clone());
                 let has_type = ExpX::UnaryOpr(unary, exp.clone());
                 let has_type = SpannedTyped::new(&expr.span, &Arc::new(TypX::Bool), has_type);
-                let error = air::errors::error(
+                let error = air::messages::error(
                     "recommendation not met: value may be out of range of the target type (use `#[verifier(truncate)]` on the cast to silence this warning)",
                     &expr.span,
                 );
@@ -1060,7 +1089,7 @@ fn expr_to_stm_opt(
                                         (ne, "possible division by zero")
                                     }
                                 };
-                                let error = air::errors::error(msg, &expr.span);
+                                let error = air::messages::error(msg, &expr.span);
                                 let assert = StmX::Assert(Some(error), assert_exp);
                                 let assert = Spanned::new(expr.span.clone(), assert);
                                 stms1.push(assert);
@@ -1307,7 +1336,7 @@ fn expr_to_stm_opt(
                             let assert = Spanned::new(
                                 r.span.clone(),
                                 StmX::Assert(
-                                    Some(air::errors::error(
+                                    Some(air::messages::error(
                                         "requires not satisfied".to_string(),
                                         &r.span.clone(),
                                     )),
@@ -1379,7 +1408,7 @@ fn expr_to_stm_opt(
                         let assert = Spanned::new(
                             r.span.clone(),
                             StmX::Assert(
-                                Some(air::errors::error(
+                                Some(air::messages::error(
                                     "requires not satisfied".to_string(),
                                     &r.span.clone(),
                                 )),
@@ -1414,6 +1443,7 @@ fn expr_to_stm_opt(
             // of any ensures, triggers, etc., that it might provide
             let interp_expr = eval_expr(
                 &state.finalize_exp(ctx, &state.fun_ssts, &expr)?,
+                state.diagnostics,
                 &mut state.fun_ssts,
                 ctx.global.rlimit,
                 ctx.global.arch.min_bits(),
@@ -1529,46 +1559,28 @@ fn expr_to_stm_opt(
             return Ok((stms0, ReturnValue::ImplicitUnit(expr.span.clone())));
         }
         ExprX::Return(e1) => {
-            // Note: there are currently a few inconsistencies between this and the
-            // emitted final post-condition in sst_to_air.
-            //  - We don't apply the trait_typ_substs here (TODO this is a bug)
-            //  - We don't apply the bit_vector context here
-            // (We could consider moving _all_ the postcondition handling to this file,
-            // so that inconsistencies become more clear.)
+            let (mut stms, ret_exp) = match e1 {
+                None => (vec![], lowered_unit_value(&expr.span)),
+                Some(e) => {
+                    let (ret_stms, exp) = expr_to_stm_opt(ctx, state, e)?;
+                    let exp = unwrap_or_return_never!(exp, ret_stms);
 
-            if let Some((ret_dest, ens_recommends, enss)) = state.ret_post.clone() {
-                let mut stms: Vec<Stm> = Vec::new();
-                match (ret_dest, e1) {
-                    (None, None) => {}
-                    (None, Some(e)) => return err_str(&e.span, "return value not allowed here"),
-                    (_, None) => panic!("internal error: return value expected"),
-                    (Some(dest), Some(e1)) => {
-                        let (mut ret_stms, exp) = expr_to_stm_opt(ctx, state, e1)?;
-                        let exp = unwrap_or_return_never!(exp, ret_stms);
-                        stms.append(&mut ret_stms);
-                        stms.push(init_var(&expr.span, &dest, &exp));
-                    }
+                    (ret_stms, exp)
                 }
-                if ctx.checking_recommends() {
-                    stms.extend(ens_recommends);
-                }
-                for ens in enss.iter() {
-                    let error = error_with_label(
-                        crate::def::POSTCONDITION_FAILURE.to_string(),
-                        &expr.span,
-                        "at this exit".to_string(),
-                    )
-                    .secondary_label(&ens.span, crate::def::THIS_POST_FAILED.to_string());
-                    stms.push(Spanned::new(
-                        expr.span.clone(),
-                        StmX::Assert(Some(error), ens.clone()),
-                    ));
-                }
-                stms.push(assume_false(&expr.span));
-                Ok((stms, ReturnValue::Never))
-            } else {
-                err_str(&expr.span, "return expression not allowed here")
-            }
+            };
+
+            let base_error = error_with_label(
+                crate::def::POSTCONDITION_FAILURE.to_string(),
+                &expr.span,
+                "at this exit".to_string(),
+            );
+
+            stms.push(Spanned::new(
+                expr.span.clone(),
+                StmX::AssertPostConditions(base_error, Some(ret_exp)),
+            ));
+            stms.push(assume_false(&expr.span));
+            Ok((stms, ReturnValue::Never))
         }
         ExprX::Ghost { .. } => {
             panic!("internal error: ExprX::Ghost should have been simplified by ast_simplify")
