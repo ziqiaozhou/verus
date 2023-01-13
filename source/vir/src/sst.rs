@@ -29,7 +29,7 @@ pub type Bnd = Arc<Spanned<BndX>>;
 pub enum BndX {
     Let(Binders<Exp>),
     Quant(Quant, Binders<Typ>, Trigs),
-    Lambda(Binders<Typ>),
+    Lambda(Binders<Typ>, Trigs),
     Choose(Binders<Typ>, Trigs, Exp),
 }
 
@@ -120,7 +120,6 @@ pub enum StmX {
         requires: Exps,
         ensures: Exps,
     },
-    // Assert that the post condition holds with the given return value
     Assume(Exp),
     Assign {
         lhs: Dest,
@@ -129,6 +128,7 @@ pub enum StmX {
     Fuel(Fun, u32),
     RevealString(Arc<String>),
     DeadEnd(Stm),
+    // Assert that the postcondition holds with the given return value
     Return {
         base_error: Message,
         ret_exp: Option<Exp>,
@@ -154,6 +154,7 @@ pub enum StmX {
     },
     OpenInvariant(Exp, UniqueIdent, Typ, Stm, InvAtomicity),
     Block(Stms),
+    ClosureInner(Stm),
     AssertQuery {
         mode: AssertQueryMode,
         typ_inv_vars: Arc<Vec<(UniqueIdent, Typ)>>,

@@ -69,6 +69,9 @@ fn check_well_founded_typ(
             // the height of Foo<List> is unrelated to the height of List)
             check_well_founded(datatypes, datatypes_well_founded, path)
         }
+        TypX::AnonymousClosure(..) => {
+            unimplemented!();
+        }
     }
 }
 
@@ -109,6 +112,9 @@ fn check_positive_uses(
             }
             check_positive_uses(global, local, polarity, tr)?;
             Ok(())
+        }
+        TypX::AnonymousClosure(..) => {
+            unimplemented!();
         }
         TypX::Tuple(ts) => {
             for t in ts.iter() {
@@ -196,26 +202,15 @@ pub(crate) fn check_recursive_types(krate: &Krate) -> Result<(), VirErr> {
             assert!(self_name == &crate::def::trait_self_type_param());
         }
         for (_name, bound) in typ_params {
-            match (&**bound, &function.x.kind) {
-                (GenericBoundX::Traits(ts), _) if ts.len() == 0 => {}
-                (GenericBoundX::Traits(_), FunctionKind::Static)
-                    if function.x.attrs.broadcast_forall =>
-                {
+            match &**bound {
+                GenericBoundX::Traits(ts) if function.x.attrs.broadcast_forall && ts.len() != 0 => {
                     // See the todo!() in func_to_air.rs
                     /*return err_str(
                         &function.span,
                         "not yet supported: bounds on broadcast_forall function type parameters",
                     );*/
                 }
-                (_, FunctionKind::Static) => {}
-                _ => {
-                    // REVIEW: when we support bounds on method type parameters,
-                    // we'll need the appropriate termination checking.
-                    return err_str(
-                        &function.span,
-                        "not yet supported: bounds on method type parameters",
-                    );
-                }
+                GenericBoundX::Traits(..) => {}
             }
         }
     }
