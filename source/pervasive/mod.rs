@@ -5,6 +5,7 @@ pub mod seq;
 pub mod seq_lib;
 pub mod set;
 pub mod set_lib;
+#[cfg(not(feature = "no_global_allocator"))] 
 pub mod slice;
 pub mod cell;
 #[cfg(not(feature = "non_std"))]
