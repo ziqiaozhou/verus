@@ -41,6 +41,8 @@
     - [Example: binary search](binary_search.md)
     - [spec closures]() <!--- Chris --->
     - [broadcast_forall]() <!--- Chris --->
+- [Runtime `exec` Features]()
+    - [Exec closures]()
 - [SMT solving, automation, and where automation fails]() <!--- Chris --->
     - [What's decidable, what's undecidable, what's fast, what's slow]() <!--- Chris --->
     - [integers: nonlinear arithmetic and bit vectors]() <!--- Chris and Chanhee --->
@@ -74,7 +76,7 @@
 - [Macros]()
 - [Tools and command-line options]()
     - [Proof Debugger]() <!--- Chanhee --->
-    - [IDE Support]() <!--- Chanhee --->
+    - [IDE Support](ide_support.md)
     - [Syntax Highlighting]()
 
 - [Verification and Rust]()

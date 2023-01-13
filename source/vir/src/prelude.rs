@@ -59,6 +59,8 @@ pub(crate) fn prelude_nodes(config: PreludeConfig) -> Vec<Node> {
     let check_decrease_int =
         str_to_node(&suffix_global_id(&fun_to_air_ident(&check_decrease_int())));
     let height = str_to_node(&suffix_global_id(&fun_to_air_ident(&height())));
+    let closure_req = str_to_node(&suffix_global_id(&fun_to_air_ident(&closure_req())));
+    let closure_ens = str_to_node(&suffix_global_id(&fun_to_air_ident(&closure_ens())));
     #[allow(non_snake_case)]
     let Poly = str_to_node(POLY);
     let box_int = str_to_node(BOX_INT);
@@ -502,22 +504,49 @@ pub(crate) fn prelude_nodes(config: PreludeConfig) -> Vec<Node> {
         (declare-fun [uint_shr] (Int Poly Poly) Int)
         (declare-fun [uint_shl] (Int Poly Poly) Int)
         (declare-fun [uint_not] (Int Poly) Int)
+
+        // closure-related
+
+        // Each takes 2 type params:
+        //
+        //  - Closure type (e.g., anonymous closure type)
+        //  - Closure Param type (as tuple type)
+        //
+        // And 2-3 value params:
+        //
+        //  - the closure
+        //  - param value (as tuple)
+        //  - ret value (for closure_ens only)
+
+        (declare-fun [closure_req] (Type Type Poly Poly) Bool)
+        (declare-fun [closure_ens] (Type Type Poly Poly Poly) Bool)
     )
 }
 
-pub(crate) fn datatype_height_axiom(typ_name1: &Path, typ_name2: &Path, field: &Ident) -> Node {
+pub(crate) fn datatype_height_axiom(
+    typ_name1: &Path,
+    typ_name2: Option<&Path>,
+    field: &Ident,
+) -> Node {
     let height = str_to_node(&suffix_global_id(&fun_to_air_ident(&height())));
     let field = str_to_node(field.as_str());
     let typ1 = str_to_node(path_to_air_ident(typ_name1).as_str());
     let box_t1 = str_to_node(prefix_box(typ_name1).as_str());
-    let box_t2 = str_to_node(prefix_box(typ_name2).as_str());
+    let field_of_x = match typ_name2 {
+        Some(typ2) => {
+            let box_t2 = str_to_node(prefix_box(typ2).as_str());
+            node!(([box_t2] ([field] x)))
+        }
+        // for a field with generic type, [field]'s return type is already "Poly"
+        None => node!(([field] x)),
+    };
     node!(
         (axiom (forall ((x [typ1])) (!
             (<
-                ([height] ([box_t2] ([field] x)))
+                ([height] [field_of_x])
                 ([height] ([box_t1] x))
             )
-            :pattern (([height] ([box_t2] ([field] x))))
+            :pattern (([height] [field_of_x]))
             :qid prelude_datatype_height
             :skolemid skolem_prelude_datatype_height
         )))

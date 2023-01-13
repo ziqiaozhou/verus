@@ -11,8 +11,8 @@ use crate::context::Context;
 use crate::def::{get_variant_fn_name, is_variant_fn_name};
 use crate::rust_to_vir_adts::{check_item_enum, check_item_struct};
 use crate::rust_to_vir_base::{
-    check_generics_bounds, def_id_to_vir_path, fn_item_hir_id_to_self_def_id, hack_get_def_name,
-    mid_ty_to_vir, mk_visibility, typ_path_and_ident_to_vir_path,
+    check_generic_bound, check_generics_bounds, def_id_to_vir_path, fn_item_hir_id_to_self_def_id,
+    hack_get_def_name, mid_ty_to_vir, mk_visibility, typ_path_and_ident_to_vir_path,
 };
 use crate::rust_to_vir_func::{check_foreign_item_fn, check_item_fn};
 use crate::util::{err_span_str, spanned_new, unsupported_err_span};
@@ -20,15 +20,14 @@ use crate::{err_unless, unsupported_err, unsupported_err_unless};
 
 use rustc_ast::IsAuto;
 use rustc_hir::{
-    AssocItemKind, ForeignItem, ForeignItemId, ForeignItemKind, ImplItemKind, ImplicitSelfKind,
-    Item, ItemId, ItemKind, OwnerNode, QPath, TraitFn, TraitItem, TraitItemKind, TraitRef, TyKind,
-    Unsafety,
+    AssocItemKind, ForeignItem, ForeignItemId, ForeignItemKind, ImplItemKind, Item, ItemId,
+    ItemKind, OwnerNode, QPath, TraitFn, TraitItem, TraitItemKind, TraitRef, Unsafety,
 };
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use vir::ast::Typ;
-use vir::ast::{Fun, FunX, FunctionKind, Krate, KrateX, Mode, Path, TypX, VirErr};
+use vir::ast::{Fun, FunX, FunctionKind, GenericBoundX, Krate, KrateX, Mode, Path, TypX, VirErr};
 use vir::ast_util::path_as_rust_name;
 
 fn check_item<'tcx>(
@@ -191,172 +190,146 @@ fn check_item<'tcx>(
                 }
             }
 
-            match impll.self_ty.kind {
-                TyKind::Path(QPath::Resolved(
-                    None,
-                    rustc_hir::Path { res: rustc_hir::def::Res::Def(_, self_def_id), .. },
-                )) => {
-                    let self_ty = ctxt.tcx.type_of(item.def_id.to_def_id());
-                    let self_typ = mid_ty_to_vir(ctxt.tcx, self_ty, false);
+            let self_ty = ctxt.tcx.type_of(item.def_id.to_def_id());
+            let self_typ = mid_ty_to_vir(ctxt.tcx, self_ty, false);
 
-                    let datatype_typ_args = match &*self_typ {
-                        TypX::Datatype(_, typ_args) => typ_args.clone(),
-                        TypX::StrSlice => Arc::new(vec![Arc::new(TypX::StrSlice)]),
-                        _ => panic!("expected datatype or StrSlice"),
-                    };
+            let (self_path, datatype_typ_args) = match &*self_typ {
+                TypX::Datatype(p, typ_args) => (p.clone(), typ_args.clone()),
+                TypX::StrSlice => {
+                    let path = vir::def::strslice_defn_path();
+                    let typ_args = Arc::new(vec![Arc::new(TypX::StrSlice)]);
+                    (path, typ_args)
+                }
+                _ => {
+                    return err_span_str(
+                        item.span.clone(),
+                        "Verus does not yet support trait implementations for this type",
+                    );
+                }
+            };
 
-                    let self_path = def_id_to_vir_path(ctxt.tcx, *self_def_id);
+            let trait_path_typ_args = impll.of_trait.as_ref().map(|TraitRef { path, .. }| {
+                let trait_ref =
+                    ctxt.tcx.impl_trait_ref(item.def_id.to_def_id()).expect("impl_trait_ref");
+                // If we have `impl X for Z<A, B, C>` then the list of types is [X, A, B, C].
+                // So to get the type args, we strip off the first element.
+                let types: Vec<Typ> = trait_ref
+                    .substs
+                    .types()
+                    .skip(1)
+                    .map(|ty| mid_ty_to_vir(ctxt.tcx, ty, false))
+                    .collect();
+                let path = def_id_to_vir_path(ctxt.tcx, path.res.def_id());
+                (path, Arc::new(types))
+            });
 
-                    let trait_path_typ_args =
-                        impll.of_trait.as_ref().map(|TraitRef { path, .. }| {
-                            let trait_ref = ctxt
-                                .tcx
-                                .impl_trait_ref(item.def_id.to_def_id())
-                                .expect("impl_trait_ref");
-                            // If we have `impl X for Z<A, B, C>` then the list of types is [X, A, B, C].
-                            // So to get the type args, we strip off the first element.
-                            let types: Vec<Typ> = trait_ref
-                                .substs
-                                .types()
-                                .skip(1)
-                                .map(|ty| mid_ty_to_vir(ctxt.tcx, ty, false))
-                                .collect();
-                            let path = def_id_to_vir_path(ctxt.tcx, path.res.def_id());
-                            (path, Arc::new(types))
-                        });
-
-                    for impl_item_ref in impll.items {
-                        match impl_item_ref.kind {
-                            AssocItemKind::Fn { has_self } => {
-                                let impl_item = ctxt.tcx.hir().impl_item(impl_item_ref.id);
-                                let mut impl_item_visibility =
-                                    mk_visibility(&Some(module_path.clone()), &impl_item.vis, true);
-                                match &impl_item.kind {
-                                    ImplItemKind::Fn(sig, body_id) => {
-                                        let fn_attrs = ctxt.tcx.hir().attrs(impl_item.hir_id());
-                                        let fn_vattrs = get_verifier_attrs(fn_attrs)?;
-                                        if fn_vattrs.is_variant.is_some()
-                                            || fn_vattrs.get_variant.is_some()
-                                        {
-                                            let find_variant = |variant_name: &str| {
-                                                fn_item_hir_id_to_self_def_id(
-                                                    ctxt.tcx,
-                                                    impl_item.hir_id(),
-                                                )
-                                                .map(|self_def_id| ctxt.tcx.adt_def(self_def_id))
-                                                .and_then(|adt| {
-                                                    adt.variants
-                                                        .iter()
-                                                        .find(|v| v.ident.as_str() == variant_name)
+            for impl_item_ref in impll.items {
+                match impl_item_ref.kind {
+                    AssocItemKind::Fn { has_self: true | false } => {
+                        let impl_item = ctxt.tcx.hir().impl_item(impl_item_ref.id);
+                        let mut impl_item_visibility =
+                            mk_visibility(&Some(module_path.clone()), &impl_item.vis, true);
+                        match &impl_item.kind {
+                            ImplItemKind::Fn(sig, body_id) => {
+                                let fn_attrs = ctxt.tcx.hir().attrs(impl_item.hir_id());
+                                let fn_vattrs = get_verifier_attrs(fn_attrs)?;
+                                if fn_vattrs.is_variant.is_some() || fn_vattrs.get_variant.is_some()
+                                {
+                                    let find_variant = |variant_name: &str| {
+                                        fn_item_hir_id_to_self_def_id(ctxt.tcx, impl_item.hir_id())
+                                            .map(|self_def_id| ctxt.tcx.adt_def(self_def_id))
+                                            .and_then(|adt| {
+                                                adt.variants
+                                                    .iter()
+                                                    .find(|v| v.ident.as_str() == variant_name)
+                                            })
+                                    };
+                                    let valid = if let Some(variant_name) = fn_vattrs.is_variant {
+                                        find_variant(&variant_name).is_some()
+                                            && impl_item.ident.as_str()
+                                                == is_variant_fn_name(&variant_name)
+                                    } else if let Some((variant_name, field_name)) =
+                                        fn_vattrs.get_variant
+                                    {
+                                        let field_name_str = match field_name {
+                                            GetVariantField::Unnamed(i) => format!("{}", i),
+                                            GetVariantField::Named(n) => n,
+                                        };
+                                        find_variant(&variant_name)
+                                            .and_then(|variant| {
+                                                variant.fields.iter().find(|f| {
+                                                    f.ident.as_str() == field_name_str.as_str()
                                                 })
-                                            };
-                                            let valid = if let Some(variant_name) =
-                                                fn_vattrs.is_variant
-                                            {
-                                                find_variant(&variant_name).is_some()
-                                                    && impl_item.ident.as_str()
-                                                        == is_variant_fn_name(&variant_name)
-                                            } else if let Some((variant_name, field_name)) =
-                                                fn_vattrs.get_variant
-                                            {
-                                                let field_name_str = match field_name {
-                                                    GetVariantField::Unnamed(i) => format!("{}", i),
-                                                    GetVariantField::Named(n) => n,
-                                                };
-                                                find_variant(&variant_name)
-                                                    .and_then(|variant| {
-                                                        variant.fields.iter().find(|f| {
-                                                            f.ident.as_str()
-                                                                == field_name_str.as_str()
-                                                        })
-                                                    })
-                                                    .is_some()
-                                                    && impl_item.ident.as_str()
-                                                        == get_variant_fn_name(
-                                                            &variant_name,
-                                                            &field_name_str,
-                                                        )
-                                            } else {
-                                                unreachable!()
-                                            };
-                                            if !valid
-                                                || get_mode(Mode::Exec, fn_attrs) != Mode::Spec
-                                            {
-                                                return err_span_str(
-                                                    sig.span,
-                                                    "invalid is_variant function, do not use #[verifier(is_variant)] directly, use the #[is_variant] macro instead",
-                                                );
-                                            }
-                                        } else {
-                                            let kind = if let Some((trait_path, trait_typ_args)) =
-                                                trait_path_typ_args.clone()
-                                            {
-                                                unsupported_err_unless!(
-                                                    has_self,
-                                                    sig.span,
-                                                    "method without self"
-                                                );
-                                                impl_item_visibility = mk_visibility(
-                                                    &Some(module_path.clone()),
-                                                    &impl_item.vis,
-                                                    false,
-                                                );
-                                                let ident = impl_item_ref.ident.to_string();
-                                                let ident = Arc::new(ident);
-                                                let path = typ_path_and_ident_to_vir_path(
-                                                    &trait_path,
-                                                    ident,
-                                                );
-                                                let fun = FunX { path, trait_path: None };
-                                                let method = Arc::new(fun);
-                                                let datatype = self_path.clone();
-                                                let datatype_typ_args = datatype_typ_args.clone();
-                                                FunctionKind::TraitMethodImpl {
-                                                    method,
-                                                    trait_path,
-                                                    trait_typ_args,
-                                                    datatype,
-                                                    datatype_typ_args,
-                                                }
-                                            } else {
-                                                FunctionKind::Static
-                                            };
-                                            check_item_fn(
-                                                ctxt,
-                                                vir,
-                                                impl_item.def_id.to_def_id(),
-                                                kind,
-                                                impl_item_visibility,
-                                                fn_attrs,
-                                                sig,
-                                                trait_path_typ_args.clone().map(|(p, _)| p),
-                                                Some((&impll.generics, impl_def_id)),
-                                                &impl_item.generics,
-                                                body_id,
-                                            )?;
-                                        }
+                                            })
+                                            .is_some()
+                                            && impl_item.ident.as_str()
+                                                == get_variant_fn_name(
+                                                    &variant_name,
+                                                    &field_name_str,
+                                                )
+                                    } else {
+                                        unreachable!()
+                                    };
+                                    if !valid || get_mode(Mode::Exec, fn_attrs) != Mode::Spec {
+                                        return err_span_str(
+                                            sig.span,
+                                            "invalid is_variant function, do not use #[verifier(is_variant)] directly, use the #[is_variant] macro instead",
+                                        );
                                     }
-                                    _ => unsupported_err!(
-                                        item.span,
-                                        "unsupported item in impl",
-                                        impl_item_ref
-                                    ),
+                                } else {
+                                    let kind = if let Some((trait_path, trait_typ_args)) =
+                                        trait_path_typ_args.clone()
+                                    {
+                                        impl_item_visibility = mk_visibility(
+                                            &Some(module_path.clone()),
+                                            &impl_item.vis,
+                                            false,
+                                        );
+                                        let ident = impl_item_ref.ident.to_string();
+                                        let ident = Arc::new(ident);
+                                        let path =
+                                            typ_path_and_ident_to_vir_path(&trait_path, ident);
+                                        let fun = FunX { path, trait_path: None };
+                                        let method = Arc::new(fun);
+                                        let datatype = self_path.clone();
+                                        let datatype_typ_args = datatype_typ_args.clone();
+                                        FunctionKind::TraitMethodImpl {
+                                            method,
+                                            trait_path,
+                                            trait_typ_args,
+                                            datatype,
+                                            datatype_typ_args,
+                                        }
+                                    } else {
+                                        FunctionKind::Static
+                                    };
+                                    check_item_fn(
+                                        ctxt,
+                                        vir,
+                                        impl_item.def_id.to_def_id(),
+                                        kind,
+                                        impl_item_visibility,
+                                        fn_attrs,
+                                        sig,
+                                        trait_path_typ_args.clone().map(|(p, _)| p),
+                                        Some((&impll.generics, impl_def_id)),
+                                        &impl_item.generics,
+                                        body_id,
+                                    )?;
                                 }
-                            }
-                            AssocItemKind::Type => {
-                                let _impl_item = ctxt.tcx.hir().impl_item(impl_item_ref.id);
-                                // the type system handles this for Trait impls
                             }
                             _ => unsupported_err!(
                                 item.span,
-                                "unsupported item ref in impl",
+                                "unsupported item in impl",
                                 impl_item_ref
                             ),
                         }
                     }
-                }
-                _ => {
-                    unsupported_err!(item.span, "unsupported impl of non-path type", item);
+                    AssocItemKind::Type => {
+                        let _impl_item = ctxt.tcx.hir().impl_item(impl_item_ref.id);
+                        // the type system handles this for Trait impls
+                    }
+                    _ => unsupported_err!(item.span, "unsupported item ref in impl", impl_item_ref),
                 }
             }
         }
@@ -389,8 +362,20 @@ fn check_item<'tcx>(
             )?;
         }
         ItemKind::Macro(_macro_def) => {}
-        ItemKind::Trait(IsAuto::No, Unsafety::Normal, trait_generics, _bounds, trait_items) => {
+        ItemKind::Trait(IsAuto::No, Unsafety::Normal, trait_generics, bounds, trait_items) => {
             let trait_def_id = item.def_id.to_def_id();
+            for bound in bounds.iter() {
+                if let Some(r) = bound.trait_ref() {
+                    if let Some(id) = r.trait_def_id() {
+                        // allow marker types
+                        match &*check_generic_bound(ctxt.tcx, id, &vec![])? {
+                            GenericBoundX::Traits(bnds) if bnds.len() == 0 => continue,
+                            _ => {}
+                        }
+                    }
+                }
+                unsupported_err!(item.span, "trait generic bounds");
+            }
             let generics_bnds =
                 check_generics_bounds(ctxt.tcx, trait_generics, false, trait_def_id)?;
             let trait_path = def_id_to_vir_path(ctxt.tcx, trait_def_id);
@@ -415,9 +400,6 @@ fn check_item<'tcx>(
                             }
                             TraitFn::Provided(body_id) => body_id,
                         };
-                        if let ImplicitSelfKind::None = sig.decl.implicit_self {
-                            unsupported_err!(*span, "trait function must have a self argument")
-                        }
                         let attrs = ctxt.tcx.hir().attrs(trait_item.hir_id());
                         let fun = check_item_fn(
                             ctxt,
@@ -514,8 +496,9 @@ impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for VisitMod<'tcx> {
     }
 }
 
-pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>) -> Result<Krate, VirErr> {
+pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>, no_span: &air::ast::Span) -> Result<Krate, VirErr> {
     let mut vir: KrateX = Default::default();
+    vir::builtins::krate_add_builtins(no_span, &mut vir);
 
     // Map each item to the module that contains it, or None if the module is external
     let mut item_to_module: HashMap<ItemId, Option<Path>> = HashMap::new();

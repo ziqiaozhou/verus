@@ -250,7 +250,7 @@ fn terminates(
                     ),
                     t_e1,
                 ))),
-                BndX::Lambda(_) => {
+                BndX::Lambda(_, _) => {
                     disallow_recursion_exp(ctxt, e1)?;
                     Ok(bool_exp(ExpX::Const(Constant::Bool(true))))
                 }
@@ -474,16 +474,15 @@ pub(crate) fn expand_call_graph(
     if let FunctionKind::TraitMethodImpl { trait_path, datatype, .. } = function.x.kind.clone() {
         let t_node = Node::Trait(trait_path.clone());
         let dt_node = Node::DatatypeTraitBound { datatype, trait_path };
-        call_graph.add_edge(t_node, dt_node.clone());
+        call_graph.add_edge(dt_node.clone(), t_node);
         call_graph.add_edge(dt_node, f_node.clone());
     }
 
     // Add f --> T for any function f<A: T> with type parameter A: T
     for (_, tbound) in function.x.typ_bounds.iter() {
-        if let GenericBoundX::Traits(traits) = &**tbound {
-            for tr in traits {
-                call_graph.add_edge(Node::Trait(tr.clone()), f_node.clone());
-            }
+        let GenericBoundX::Traits(traits) = &**tbound;
+        for tr in traits {
+            call_graph.add_edge(f_node.clone(), Node::Trait(tr.clone()));
         }
     }
 
@@ -525,11 +524,8 @@ pub(crate) fn expand_call_graph(
                                 // because we (conceptually) get f2 from the dictionary passed for A: T.
                                 let bound = function.x.typ_bounds.iter().find(|(q, _)| q == p);
                                 let bound = bound.expect("missing type parameter");
-                                if let GenericBoundX::Traits(ts) = &*bound.1 {
-                                    assert!(ts.iter().any(|t| t == trait_path2));
-                                } else {
-                                    panic!("wrong type bound on type parameter");
-                                }
+                                let GenericBoundX::Traits(ts) = &*bound.1;
+                                assert!(ts.iter().any(|t| t == trait_path2));
                                 None
                             }
                             TypX::Datatype(datatype, _) => {
@@ -576,13 +572,16 @@ pub(crate) fn expand_call_graph(
                                 }
                             }
                         }
-                        GenericBoundX::FnSpec(..) => {}
                     }
                 }
 
                 if let FunctionKind::TraitMethodDecl { trait_path } = &function.x.kind {
                     // T --> f2
-                    call_graph.add_edge(Node::Trait(trait_path.clone()), Node::Fun(x.clone()))
+                    call_graph.add_edge(Node::Trait(trait_path.clone()), Node::Fun(x.clone()));
+                    if let Some(callee) = callee {
+                        call_graph
+                            .add_edge(Node::Trait(trait_path.clone()), Node::Fun(callee.clone()));
+                    }
                 }
 
                 // f1 --> f2

@@ -89,6 +89,9 @@ pub(crate) fn typ_to_air(ctx: &Ctx, typ: &Typ) -> air::ast::Typ {
         TypX::Bool => bool_typ(),
         TypX::Tuple(_) => panic!("internal error: Tuple should have been removed by ast_simplify"),
         TypX::Lambda(..) => Arc::new(air::ast::TypX::Lambda),
+        TypX::AnonymousClosure(..) => {
+            panic!("internal error: AnonymousClosure should have been removed by ast_simplify")
+        }
         TypX::Datatype(path, _) => {
             if ctx.datatype_is_transparent[path] {
                 ident_typ(&path_to_air_ident(path))
@@ -143,6 +146,9 @@ pub fn typ_to_id(typ: &Typ) -> Expr {
         TypX::Bool => str_var(crate::def::TYPE_ID_BOOL),
         TypX::Tuple(_) => panic!("internal error: Tuple should have been removed by ast_simplify"),
         TypX::Lambda(typs, typ) => fun_id(typs, typ),
+        TypX::AnonymousClosure(..) => {
+            panic!("internal error: AnonymousClosure should have been removed by ast_simplify")
+        }
         TypX::Datatype(path, typs) => datatype_id(path, typs),
         TypX::Boxed(typ) => typ_to_id(typ),
         TypX::TypParam(x) => ident_var(&suffix_typ_param_id(x)),
@@ -231,6 +237,7 @@ fn try_box(ctx: &Ctx, expr: Expr, typ: &Typ) -> Option<Expr> {
         TypX::Int(_) => Some(str_ident(crate::def::BOX_INT)),
         TypX::Tuple(_) => None,
         TypX::Lambda(typs, _) => Some(prefix_box(&prefix_lambda_type(typs.len()))),
+        TypX::AnonymousClosure(..) => unimplemented!(),
         TypX::Datatype(path, _) => {
             if ctx.datatype_is_transparent[path] {
                 Some(prefix_box(&path))
@@ -271,6 +278,7 @@ fn try_unbox(ctx: &Ctx, expr: Expr, typ: &Typ) -> Option<Expr> {
         }
         TypX::Tuple(_) => None,
         TypX::Lambda(typs, _) => Some(prefix_unbox(&prefix_lambda_type(typs.len()))),
+        TypX::AnonymousClosure(..) => unimplemented!(),
         TypX::Boxed(_) => None,
         TypX::TypParam(_) => None,
         TypX::TypeId => None,
@@ -281,18 +289,38 @@ fn try_unbox(ctx: &Ctx, expr: Expr, typ: &Typ) -> Option<Expr> {
     f_name.map(|f_name| ident_apply(&f_name, &vec![expr]))
 }
 
-fn call_inv(ctx: &Ctx, outer: Expr, inner: Expr, typ: &Typ, atomicity: InvAtomicity) -> Expr {
+fn get_inv_typ_args(typ: &Typ) -> Typs {
+    match &**typ {
+        TypX::Datatype(_, typs) => typs.clone(),
+        TypX::Boxed(typ) => get_inv_typ_args(typ),
+        _ => {
+            panic!("get_inv_typ_args failed, expected some Invariant type");
+        }
+    }
+}
+
+fn call_inv(
+    ctx: &Ctx,
+    outer: Expr,
+    inner: Expr,
+    typ_args: &Typs,
+    typ: &Typ,
+    atomicity: InvAtomicity,
+) -> Expr {
     let inv_fn_ident = suffix_global_id(&fun_to_air_ident(&fn_inv_name(atomicity)));
-    let typ_expr = typ_to_id(typ);
     let boxed_inner = try_box(ctx, inner.clone(), typ).unwrap_or(inner);
-    let args = vec![typ_expr, outer, boxed_inner];
+
+    let mut args: Vec<Expr> = typ_args.iter().map(|t| typ_to_id(t)).collect();
+    args.push(outer);
+    args.push(boxed_inner);
     ident_apply(&inv_fn_ident, &args)
 }
 
-fn call_namespace(arg: Expr, typ: &Typ, atomicity: InvAtomicity) -> Expr {
+fn call_namespace(arg: Expr, typ_args: &Typs, atomicity: InvAtomicity) -> Expr {
     let inv_fn_ident = suffix_global_id(&fun_to_air_ident(&fn_namespace_name(atomicity)));
-    let typ_expr = typ_to_id(typ);
-    let args = vec![typ_expr, arg];
+
+    let mut args: Vec<Expr> = typ_args.iter().map(|t| typ_to_id(t)).collect();
+    args.push(arg);
     ident_apply(&inv_fn_ident, &args)
 }
 
@@ -458,8 +486,9 @@ fn new_user_qid(ctx: &Ctx, exp: &Exp) -> Qid {
         ExpX::Bind(bnd, _) => match &bnd.x {
             BndX::Quant(_, _, trigs) => trigs,
             BndX::Choose(_, trigs, _) => trigs,
+            BndX::Lambda(_, trigs) => trigs,
             _ => panic!(
-                "internal error: user quantifier expressions should only be Quant or Choose; found {:?}",
+                "internal error: user quantifier expressions should only be Quant, Choose, or Lambda; found {:?}",
                 bnd.x
             ),
         },
@@ -953,13 +982,17 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                 let qid = new_user_qid(ctx, &exp);
                 air::ast_util::mk_quantifier(quant.quant, &binders, &triggers, qid, &expr)
             }
-            (BndX::Lambda(binders), false) => {
+            (BndX::Lambda(binders, trigs), false) => {
                 let expr = exp_to_expr(ctx, e, expr_ctxt)?;
                 let binders = vec_map(&*binders, |b| {
                     let name = suffix_local_expr_id(&b.name);
                     Arc::new(BinderX { name, a: typ_to_air(ctx, &b.a) })
                 });
-                let lambda = air::ast_util::mk_lambda(&binders, &expr);
+                let triggers = vec_map_result(&*trigs, |trig| {
+                    vec_map_result(trig, |x| exp_to_expr(ctx, x, expr_ctxt)).map(|v| Arc::new(v))
+                })?;
+                let qid = (triggers.len() > 0).then(|| ()).and_then(|_| new_user_qid(ctx, &exp));
+                let lambda = air::ast_util::mk_lambda(&binders, &triggers, qid, &expr);
                 str_apply(crate::def::MK_FUN, &vec![lambda])
             }
             (BndX::Choose(binders, trigs, cond), false) => {
@@ -1045,6 +1078,7 @@ struct LoopInfo {
 
 struct State {
     local_shared: Vec<Decl>, // shared between all queries for a single function
+    may_be_used_in_old: HashSet<UniqueIdent>, // vars that might have a 'PRE' snapshot, needed for while loop generation
     local_bv_shared: Vec<Decl>, // used in bv mode, fixed width uint variables have corresponding bv types
     commands: Vec<CommandsWithContext>,
     snapshot_count: u32, // Used to ensure unique Idents for each snapshot
@@ -1631,6 +1665,16 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
             stmts.push(Arc::new(StmtX::Assume(air::ast_util::mk_false())));
             stmts
         }
+        StmX::ClosureInner(s) => {
+            // Right now there is no way to specify an invariant mask on a closure function
+            // All closure funcs are assumed to have mask set 'full'
+            let mut mask = MaskSet::full();
+            std::mem::swap(&mut state.mask, &mut mask);
+            let stmts = stm_to_stmts(ctx, state, s)?;
+            std::mem::swap(&mut state.mask, &mut mask);
+
+            vec![Arc::new(StmtX::DeadEnd(one_stmt(stmts)))]
+        }
         StmX::If(cond, lhs, rhs) => {
             let pos_cond = exp_to_expr(ctx, &cond, expr_ctxt)?;
             let neg_cond = Arc::new(ExprX::Unary(air::ast::UnaryOp::Not, pos_cond.clone()));
@@ -1693,22 +1737,6 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
             };
 
             let mut air_body: Vec<Stmt> = Vec::new();
-            let cond_stmts = cond_stm.map(|s| stm_to_stmts(ctx, state, s)).transpose()?;
-            if let Some(cond_stmts) = &cond_stmts {
-                air_body.append(&mut cond_stmts.clone());
-            }
-            if let Some(pos_assume) = pos_assume {
-                air_body.push(pos_assume);
-            }
-            let loop_info = LoopInfo {
-                label: label.clone(),
-                some_cond: cond.is_some(),
-                invs_entry: invs_entry.clone(),
-                invs_exit: invs_exit.clone(),
-            };
-            state.loop_infos.push(loop_info);
-            air_body.append(&mut stm_to_stmts(ctx, state, body)?);
-            state.loop_infos.pop();
 
             /*
             Generate a separate SMT query for the loop body.
@@ -1734,9 +1762,46 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                     local.push(Arc::new(DeclX::Axiom(expr)));
                 }
             }
-            for (_, inv) in invs_entry.iter() {
-                local.push(Arc::new(DeclX::Axiom(inv.clone())));
+
+            // For any mutable param `x` to the function, we might refer to either
+            // *x or *old(x) within the loop body or invariants.
+            // Thus, we need to create a 'pre' snapshot and havoc all these variables
+            // so that we can refer to either version of the variable within the body.
+
+            air_body.push(Arc::new(StmtX::Snapshot(snapshot_ident(SNAPSHOT_PRE))));
+            for (x, typ) in typ_inv_vars.iter() {
+                if state.may_be_used_in_old.contains(x) {
+                    air_body.push(Arc::new(StmtX::Havoc(suffix_local_unique_id(x))));
+                    let typ_inv = typ_invariant(ctx, typ, &ident_var(&suffix_local_unique_id(x)));
+                    if let Some(expr) = typ_inv {
+                        air_body.push(Arc::new(StmtX::Assume(expr)));
+                    }
+                }
             }
+
+            // Assume invariants for the beginning of the loop body.
+            // (These need to go after the above Havoc statements.)
+            for (_, inv) in invs_entry.iter() {
+                air_body.push(Arc::new(StmtX::Assume(inv.clone())));
+            }
+
+            let cond_stmts = cond_stm.map(|s| stm_to_stmts(ctx, state, s)).transpose()?;
+            if let Some(cond_stmts) = &cond_stmts {
+                air_body.append(&mut cond_stmts.clone());
+            }
+            if let Some(pos_assume) = pos_assume {
+                air_body.push(pos_assume);
+            }
+            let loop_info = LoopInfo {
+                label: label.clone(),
+                some_cond: cond.is_some(),
+                invs_entry: invs_entry.clone(),
+                invs_exit: invs_exit.clone(),
+            };
+            state.loop_infos.push(loop_info);
+            air_body.append(&mut stm_to_stmts(ctx, state, body)?);
+            state.loop_infos.pop();
+
             if !ctx.checking_recommends() {
                 for (span, inv) in invs_entry.iter() {
                     let error = error(crate::def::INV_FAIL_LOOP_END, span);
@@ -1817,7 +1882,8 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
             let inv_expr = exp_to_expr(ctx, inv_exp, &ExprCtxt::new())?;
 
             // Assert that the namespace of the inv we are opening is in the mask set
-            let namespace_expr = call_namespace(inv_expr.clone(), typ, *atomicity);
+            let typ_args = get_inv_typ_args(&inv_exp.typ);
+            let namespace_expr = call_namespace(inv_expr.clone(), &typ_args, *atomicity);
             if !ctx.checking_recommends() {
                 state.mask.assert_contains(&inv_exp.span, &namespace_expr, &mut stmts);
             }
@@ -1829,7 +1895,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
             if let Some(ty_inv) = ty_inv_opt {
                 stmts.push(Arc::new(StmtX::Assume(ty_inv)));
             }
-            let main_inv = call_inv(ctx, inv_expr, inner_expr, typ, *atomicity);
+            let main_inv = call_inv(ctx, inv_expr, inner_expr, &typ_args, &typ, *atomicity);
             stmts.push(Arc::new(StmtX::Assume(main_inv.clone())));
 
             // process the body
@@ -2055,8 +2121,16 @@ pub(crate) fn body_stm_to_air(
 
     let mask = mask_set_from_spec(mask_spec, mode);
 
+    let mut may_be_used_in_old = HashSet::<UniqueIdent>::new();
+    for param in params.iter() {
+        if param.x.is_mut {
+            may_be_used_in_old.insert(unique_local(&param.x.name));
+        }
+    }
+
     let mut state = State {
         local_shared,
+        may_be_used_in_old,
         local_bv_shared,
         commands: Vec::new(),
         snapshot_count: 0,
