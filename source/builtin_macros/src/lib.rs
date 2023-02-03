@@ -23,6 +23,8 @@ pub fn fndecl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 #[proc_macro]
 pub fn verus(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    syntax::rewrite_items(input, true, true)
+    /*
     let c = syntax::rewrite_items(input, true, true);
     use std::io::Write;
     unsafe {
@@ -30,7 +32,7 @@ pub fn verus(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         writeln!(&mut file, "{}", c).unwrap();
         COUNT = COUNT + 1;
     }
-    c
+    c*/
 }
 
 static mut COUNT: i32 = 0;
