@@ -78,9 +78,13 @@ fn check_trigger_expr(
                 | ExpX::Loc(..)
                 | ExpX::VarLoc(..) => Ok(()),
                 ExpX::Call(_, typs, _) => {
-                    for typ in typs.iter() {
+                    for (i, typ) in typs.iter().enumerate() {
                         let ft = |free_vars: &mut HashSet<Ident>, t: &Typ| match &**t {
                             TypX::TypParam(x) => {
+                                free_vars.insert(crate::def::suffix_typ_param_id(x));
+                                Ok(t.clone())
+                            }
+                            TypX::ConstParam(x) => {
                                 free_vars.insert(crate::def::suffix_typ_param_id(x));
                                 Ok(t.clone())
                             }
@@ -97,6 +101,7 @@ fn check_trigger_expr(
                             "let variables in triggers not supported, use #![trigger ...] instead",
                         );
                     }
+
                     free_vars.insert(x.clone());
                     Ok(())
                 }

@@ -152,7 +152,17 @@ fn enclose(
 fn simplify_var(ctxt: &mut Context, state: &mut State, x: &Ident) -> (Typ, Option<Term>) {
     let typ = match ctxt.typing.get(x) {
         Some(DeclaredX::Var { typ, .. }) => typ.clone(),
-        _ => panic!("internal error: missing variable {}", x),
+        _ => {
+            if x.to_string().starts_with("TYPE%%%Const") {
+                let ident = Arc::new("Type".to_string());
+                let typ = Arc::new(TypX::Named(ident));
+                let var = DeclaredX::Var{typ: typ.clone(), mutable: false };
+                //ctxt.typing.insert(x, Arc::new(var));
+                typ.clone()
+            } else {
+                panic!("internal error: missing variable {}", x)
+            }
+        }
     };
     let term = if let Some(state) = state.closure_states.last() {
         let (depth, index) =

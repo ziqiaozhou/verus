@@ -135,7 +135,7 @@ fn datatypes_invs(
                     match &*field.a.0 {
                         // Should be kept in sync with vir::sst_to_air::typ_invariant
                         TypX::Int(IntRange::Int) => {}
-                        TypX::Int(_) | TypX::TypParam(_) => {
+                        TypX::Int(_) | TypX::TypParam(_) | TypX::ConstParam(_) => {
                             roots.insert(container_path.clone());
                         }
                         TypX::Lambda(..) => {

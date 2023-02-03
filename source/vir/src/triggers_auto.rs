@@ -272,6 +272,11 @@ fn gather_terms(ctxt: &mut Ctxt, ctx: &Ctx, exp: &Exp, depth: u64) -> (bool, Ter
                         all_terms.push(Arc::new(TermX::Var(x)));
                         Ok(t.clone())
                     }
+                    TypX::ConstParam(x) => {
+                        let x = crate::def::unique_bound(&crate::def::suffix_typ_param_id(x));
+                        all_terms.push(Arc::new(TermX::Var(x)));
+                        Ok(t.clone())
+                    }
                     _ => Ok(t.clone()),
                 };
                 crate::ast_visitor::map_typ_visitor_env(typ, &mut all_terms, &ft).unwrap();

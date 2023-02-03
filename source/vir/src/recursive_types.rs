@@ -46,6 +46,7 @@ fn check_well_founded_typ(
         TypX::Bool
         | TypX::Int(_)
         | TypX::TypParam(_)
+        | TypX::ConstParam(_)
         | TypX::Lambda(..)
         | TypX::StrSlice
         | TypX::Char => Ok(true),
@@ -151,6 +152,20 @@ fn check_positive_uses(
         }
         TypX::Boxed(t) => check_positive_uses(global, local, polarity, t),
         TypX::TypParam(x) => {
+            let strictly_positive = local.tparams[x];
+            match (strictly_positive, polarity) {
+                (false, _) => Ok(()),
+                (true, Some(true)) => Ok(()),
+                (true, _) => err_string(
+                    &local.span,
+                    format!(
+                        "Type parameter {} must be declared #[verifier(maybe_negative)] to be used in a non-positive position",
+                        x
+                    ),
+                ),
+            }
+        }
+        TypX::ConstParam(x) => {
             let strictly_positive = local.tparams[x];
             match (strictly_positive, polarity) {
                 (false, _) => Ok(()),

@@ -98,6 +98,7 @@ pub enum TypX {
     Boxed(Typ),
     /// Type parameter (inherently SMT-boxed, and cannot be unboxed)
     TypParam(Ident),
+    ConstParam(Ident),
     /// Type of type identifiers
     TypeId,
     /// AIR type, used internally during translation

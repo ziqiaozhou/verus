@@ -18,9 +18,9 @@ use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::symbol::{kw, Ident};
 use rustc_span::{Span, Symbol};
 use rustc_trait_selection::infer::InferCtxtExt;
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use std::sync::Arc;
-use vir::ast::{GenericBoundX, IntRange, Path, PathX, Typ, TypBounds, TypX, Typs, VirErr};
+use vir::ast::{GenericBoundX, DatatypeX, DatatypeTransparency, Mode, IntRange, Path, PathX, Typ, TypBounds, TypX, Typs, VirErr};
 use vir::ast_util::types_equal;
 use vir::def::unique_local_name;
 
@@ -117,6 +117,7 @@ pub(crate) fn fn_item_hir_id_to_self_path<'tcx>(tcx: TyCtxt<'tcx>, hir_id: HirId
                 let vir_ty = mid_ty_to_vir_ghost(tcx, self_ty, false).0;
                 match &*vir_ty {
                     TypX::Datatype(p, _typ_args) => Some(p.clone()),
+                    TypX::Int(_) => {None}
                     _ => panic!("impl type is not given by a path"),
                 }
             }
@@ -257,6 +258,61 @@ pub(crate) fn mid_ty_simplify<'tcx>(
     }
 }
 
+
+pub static mut const_params: Vec<(u64, DatatypeX)> = vec!{}; 
+
+pub(crate) fn mid_ct_to_vir<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ct: &rustc_middle::ty::Const<'tcx>,
+    allow_mut_ref: bool,
+) -> Typ {
+    //mid_ty_to_vir(tcx, ct.ty, allow_mut_ref)
+    match ct.val {
+        rustc_middle::ty::ConstKind::Param(param) => {
+            Arc::new(TypX::ConstParam(Arc::new(param.name.to_string())))
+        }
+        rustc_middle::ty::ConstKind::Value(_) => {
+            let t = mid_ty_to_vir(tcx, ct.ty, allow_mut_ref);
+            match *t {
+                TypX::Int(range) => {
+                    let val = ct.try_eval_usize(tcx, rustc_middle::ty::ParamEnv::empty()).unwrap();
+                    let path = Arc::new(
+                        PathX { krate: None, segments: Arc::new(vec![Arc::new(
+                        format!("%%ConstParam{:?}.{}", range, val))])
+                        });
+                    let mod_path = Arc::new(
+                            PathX { krate: None, segments: Arc::new(vec![])});
+                    let variant_name = Arc::new(format!("%%ConstParam{:?}.{}", range, val));
+                    unsafe {
+                    const_params.push(
+                        (val,
+                        DatatypeX {
+                            path: path.clone(),
+                            visibility: vir::ast::Visibility{
+                                owning_module: Some(mod_path),
+                                is_private: false,
+                            },
+                            transparency: DatatypeTransparency::Always,
+                            typ_params: Arc::new(vec!{}),
+                            variants: Arc::new(vec![air::ast_util::ident_binder(&variant_name, &Arc::new(vec![]))]),
+                            mode: Mode::Exec,
+                        })
+                    );
+                }
+                    Arc::new(TypX::Datatype(path.clone(), Arc::new(vec![])))
+                },
+                _ => {
+                    panic!("Only const int is supported as const generic type! {:?} {:?}", ct, t); 
+                }
+            }
+        }
+        _ => {
+            panic!("Only a limited const param is supported! {:?}", ct);
+        }
+    }
+}
+
+
 // TODO review and cosolidate type translation, e.g. with `ty_to_vir`, if possible
 
 // returns VIR Typ and whether Ghost/Tracked was erased from around the outside of the VIR Typ
@@ -312,6 +368,9 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                     .filter_map(|arg| match arg.unpack() {
                         rustc_middle::ty::subst::GenericArgKind::Type(t) => {
                             Some(mid_ty_to_vir_ghost(tcx, t, allow_mut_ref))
+                        }
+                        rustc_middle::ty::subst::GenericArgKind::Const(ct) => {
+                            Some((mid_ct_to_vir(tcx, ct, allow_mut_ref), false))
                         }
                         rustc_middle::ty::subst::GenericArgKind::Lifetime(_) => None,
                         _ => panic!("unexpected type argument"),
@@ -520,11 +579,20 @@ pub(crate) fn check_generic_bound<'tcx>(
 fn generic_param_def_to_vir_name(gen: &rustc_middle::ty::GenericParamDef) -> String {
     let is_synthetic = match gen.kind {
         GenericParamDefKind::Type { synthetic, .. } => synthetic,
-        _ => panic!("expected GenericParamDefKind::Type"),
+        GenericParamDefKind::Const { has_default } => { false },
+        _ => panic!("expected GenericParamDefKind::Type or Const"),
+    };
+
+    let is_const = match gen.kind {
+        GenericParamDefKind::Type { synthetic, .. } =>{ false},
+        GenericParamDefKind::Const { has_default } => { true },
+        _ => panic!("expected GenericParamDefKind::Type or Const"),
     };
 
     if is_synthetic {
         vir::def::PREFIX_IMPL_TYPE_PARAM.to_string() + &gen.index.to_string()
+    } else if is_const {
+        gen.name.as_str().to_string()
     } else {
         gen.name.as_str().to_string()
     }
@@ -561,7 +629,7 @@ pub(crate) fn check_generics_bounds<'tcx>(
                 mid_params.push(param);
             }
             GenericParamDefKind::Const { .. } => {
-                return err_span_str(*span, "Verus does not yet support const generics");
+                mid_params.push(param);
             }
         }
     }
@@ -572,7 +640,7 @@ pub(crate) fn check_generics_bounds<'tcx>(
             match &p.kind {
                 GenericParamKind::Lifetime { kind: _ } => false, // ignore
                 GenericParamKind::Type { default: _, synthetic: _ } => true,
-                GenericParamKind::Const { ty: _, default: _ } => false, // error above
+                GenericParamKind::Const { ty: _, default: _ } => true, // error above
             }
         })
         .collect();
@@ -715,6 +783,7 @@ pub(crate) fn check_generics_bounds<'tcx>(
     for (idx, mid_param) in mid_params.iter().skip(skip_n).enumerate() {
         match mid_param.kind {
             GenericParamDefKind::Type { .. } => {}
+            GenericParamDefKind::Const { .. } => {}
             _ => {
                 continue;
             }
@@ -737,7 +806,14 @@ pub(crate) fn check_generics_bounds<'tcx>(
 
         unsupported_err_unless!(!pure_wrt_drop, *span, "generic pure_wrt_drop");
 
-        if let GenericParamKind::Type { .. } = kind {
+        if let GenericParamKind::Type { .. } = kind  {
+            if check_that_external_body_datatype_declares_positivity && !neg && !pos {
+                return err_span_str(
+                    *span,
+                    "in external_body datatype, each type parameter must be either #[verifier(maybe_negative)] or #[verifier(strictly_positive)] (maybe_negative is always safe to use)",
+                );
+            }
+        } else if let GenericParamKind::Const { .. } = kind {
             if check_that_external_body_datatype_declares_positivity && !neg && !pos {
                 return err_span_str(
                     *span,
@@ -755,6 +831,22 @@ pub(crate) fn check_generics_bounds<'tcx>(
                 object_lifetime_default: _,
             } => {
                 // trait/function bounds
+                let ident = Arc::new(generic_param_def_to_vir_name(mid_param));
+
+                let mut trait_bounds: Vec<Path> = Vec::new();
+                for vir_bound in typ_param_bounds.remove(&*ident).unwrap().into_iter() {
+                    match &*vir_bound {
+                        GenericBoundX::Traits(ts) => {
+                            trait_bounds.extend(ts.clone());
+                        }
+                    }
+                }
+                let bound = Arc::new(GenericBoundX::Traits(trait_bounds));
+                typ_params.push((ident, bound, strictly_positive));
+            }
+            GenericParamDefKind::Const {
+                has_default: _,
+            } => {
                 let ident = Arc::new(generic_param_def_to_vir_name(mid_param));
 
                 let mut trait_bounds: Vec<Path> = Vec::new();

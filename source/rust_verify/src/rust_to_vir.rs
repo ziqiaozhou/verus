@@ -27,7 +27,7 @@ use rustc_hir::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use vir::ast::Typ;
-use vir::ast::{Fun, FunX, FunctionKind, GenericBoundX, Krate, KrateX, Mode, Path, TypX, VirErr};
+use vir::ast::{Fun, FunX, DatatypeX, FunctionKind, GenericBoundX, Krate, KrateX, Mode, Path, TypX, VirErr};
 use vir::ast_util::path_as_rust_name;
 
 fn check_item<'tcx>(
@@ -195,6 +195,18 @@ fn check_item<'tcx>(
 
             let (self_path, datatype_typ_args) = match &*self_typ {
                 TypX::Datatype(p, typ_args) => (p.clone(), typ_args.clone()),
+                TypX::Int(range) => {
+                    let typ_args = Arc::new(vec![Arc::new(TypX::Int(*range))]);
+                    match range {
+                        vir::ast::IntRange::U(val) => {
+                            (vir::def::basic_path(format!("UINT{}", val).as_str()), typ_args.clone())
+                        }
+                        _ => {return err_span_str(
+                            item.span.clone(),
+                            "Verus does not yet support trait implementations for this type",
+                        )}
+                    }
+                }
                 TypX::StrSlice => {
                     let path = vir::def::strslice_defn_path();
                     let typ_args = Arc::new(vec![Arc::new(TypX::StrSlice)]);
@@ -589,5 +601,14 @@ pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>, no_span: &air::ast::Span) -> Res
             }
         }
     }
+    unsafe {
+        let mut kmap = HashMap::<u64, &DatatypeX>::new();
+        for (k, datatype)  in &crate::rust_to_vir_base::const_params{
+            kmap.insert(*k, datatype);
+        }
+    for (k, datatype) in kmap {
+        vir.datatypes.push(spanned_new(crate::rust_to_vir_adts::myspan[0], datatype.clone()));
+    }
+}
     Ok(Arc::new(vir))
 }

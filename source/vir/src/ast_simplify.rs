@@ -428,7 +428,7 @@ fn simplify_one_typ(local: &LocalCtxt, state: &mut State, typ: &Typ) -> Result<T
             if !local.bounds.contains_key(x) {
                 return err_string(
                     &local.span,
-                    format!("type parameter {} used before being declared", x),
+                    format!("type parameter {} used before being declared in {:?}", x, local.bounds),
                 );
             }
             match &*local.bounds[x] {

@@ -1040,7 +1040,11 @@ fn check_function(typing: &mut Typing, function: &Function) -> Result<(), VirErr
     typing.vars.push_scope(true);
 
     if let FunctionKind::TraitMethodImpl { method, trait_path, datatype, .. } = &function.x.kind {
-        let datatype_mode = typing.datatypes[datatype].x.mode;
+        let datatype_mode = if !typing.datatypes.get(datatype).is_some() {
+            Mode::Exec
+        } else {
+            typing.datatypes[datatype].x.mode
+        };
         let self_mode = function.x.params[0].x.mode;
         let our_trait = typing.traits.contains(trait_path);
         if self_mode != function.x.mode {
