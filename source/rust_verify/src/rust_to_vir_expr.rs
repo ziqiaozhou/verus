@@ -7,7 +7,7 @@ use crate::erase::ResolvedCall;
 use crate::rust_to_vir_base::{
     def_id_to_vir_path, def_to_path_ident, get_function_def, get_range, hack_get_def_name,
     is_smt_arith, is_smt_equality, is_type_std_rc_or_arc, local_to_var, mid_ty_simplify,
-    mid_ty_to_vir, mid_ty_to_vir_ghost, mid_ct_to_vir, mk_range, typ_of_node, typ_of_node_expect_mut_ref,
+    mid_ty_to_vir, mid_ty_to_vir_ghost, mk_range, typ_of_node, typ_of_node_expect_mut_ref,
     typ_path_and_ident_to_vir_path,
 };
 use crate::util::{
@@ -1494,10 +1494,6 @@ fn fn_call_to_vir<'tcx>(
                             if let TypX::TypParam(x) = &*mid_ty_to_vir(tcx, ty, false) {
                                 fn_params.push(x.clone());
                             }
-                        } else if let GenericArgKind::Const(ct) = s.unpack() {
-                            if let TypX::ConstParam(x) = &*mid_ct_to_vir(tcx, ct, false) {
-                                fn_params.push(x.clone());
-                            }
                         }
                     }
                 }
@@ -1510,10 +1506,8 @@ fn fn_call_to_vir<'tcx>(
                 GenericArgKind::Type(ty) => {
                     typ_args.push(mid_ty_to_vir(tcx, ty, false));
                 }
-                GenericArgKind::Const(ct) => {
-                    typ_args.push(mid_ct_to_vir(tcx, ct, false));
-                }
                 GenericArgKind::Lifetime(_) => {}
+                _ => unsupported_err!(expr.span, format!("const type arguments"), expr),
             }
         }
         let target = CallTarget::Static(name, Arc::new(typ_args));
@@ -2332,8 +2326,7 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
                     DefKind::Const => {
                         let path = def_id_to_vir_path(tcx, id);
                         let fun = FunX { path, trait_path: None };
-                        let ret = mk_expr(ExprX::ConstVar(Arc::new(fun)));
-                        Ok(ret)
+                        Ok(mk_expr(ExprX::ConstVar(Arc::new(fun))))
                     }
                     DefKind::Fn => {
                         let name = hack_get_def_name(tcx, id); // TODO: proper handling of paths
@@ -2347,11 +2340,6 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
                         expr.span,
                         modifier,
                     ),
-                    DefKind::ConstParam => {
-                        let path = def_id_to_vir_path(tcx, id);
-                        let fun = FunX { path, trait_path: None };
-                        Ok(mk_expr(ExprX::ConstVar(Arc::new(fun))))
-                    }
                     _ => {
                         unsupported_err!(expr.span, format!("Path {:?} kind {:?}", id, def_kind))
                     }
@@ -2699,9 +2687,6 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
                             match typ_arg.unpack() {
                                 GenericArgKind::Type(ty) => {
                                     typ_args.push(mid_ty_to_vir(tcx, ty, false));
-                                }
-                                GenericArgKind::Const(ct) => {
-                                    typ_args.push(mid_ct_to_vir(tcx, ct, false));
                                 }
                                 GenericArgKind::Lifetime(_) => {}
                                 _ => unsupported_err!(

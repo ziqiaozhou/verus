@@ -24,14 +24,12 @@ pub fn fndecl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 #[proc_macro]
 pub fn verus(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let c = syntax::rewrite_items(input, true);
-    /*
     use std::io::Write;
     unsafe {
         let mut file = std::fs::File::create(".verus-gen/verus-".to_owned()+ &COUNT.to_string()+ ".rs").expect("create failed");
         writeln!(&mut file, "{}", c).unwrap();
         COUNT = COUNT + 1;
     }
-    */
     c
 }
 

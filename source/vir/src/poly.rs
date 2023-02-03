@@ -132,7 +132,7 @@ pub(crate) fn monotyp_to_typ(monotyp: &MonoTyp) -> Typ {
 
 pub(crate) fn typ_is_poly(ctx: &Ctx, typ: &Typ) -> bool {
     match &**typ {
-        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char | TypX::ConstParam(_) => false,
+        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char => false,
         TypX::AnonymousClosure(..) => {
             panic!("internal error: AnonymousClosure should be removed by ast_simplify")
         }
@@ -152,7 +152,7 @@ pub(crate) fn typ_is_poly(ctx: &Ctx, typ: &Typ) -> bool {
 
 fn coerce_typ_to_native(ctx: &Ctx, typ: &Typ) -> Typ {
     match &**typ {
-        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char | TypX::ConstParam(_)=> typ.clone(),
+        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char => typ.clone(),
         TypX::AnonymousClosure(..) => {
             panic!("internal error: AnonymousClosure should be removed by ast_simplify")
         }
@@ -176,7 +176,7 @@ fn coerce_typ_to_native(ctx: &Ctx, typ: &Typ) -> Typ {
 
 pub(crate) fn coerce_typ_to_poly(_ctx: &Ctx, typ: &Typ) -> Typ {
     match &**typ {
-        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char | TypX::ConstParam(_) => {
+        TypX::Bool | TypX::Int(_) | TypX::Lambda(..) | TypX::StrSlice | TypX::Char => {
             Arc::new(TypX::Boxed(typ.clone()))
         }
         TypX::AnonymousClosure(..) => {
@@ -184,7 +184,7 @@ pub(crate) fn coerce_typ_to_poly(_ctx: &Ctx, typ: &Typ) -> Typ {
         }
         TypX::Tuple(_) => panic!("internal error: Tuple should be removed by ast_simplify"),
         TypX::Datatype(..) => Arc::new(TypX::Boxed(typ.clone())),
-        TypX::Boxed(_) | TypX::TypParam(_)  => typ.clone(),
+        TypX::Boxed(_) | TypX::TypParam(_) => typ.clone(),
         TypX::TypeId => panic!("internal error: TypeId created too soon"),
         TypX::Air(_) => panic!("internal error: Air type created too soon"),
     }
@@ -212,7 +212,6 @@ pub(crate) fn coerce_expr_to_native(ctx: &Ctx, expr: &Expr) -> Expr {
             }
         }
         TypX::TypParam(_) => expr.clone(),
-        TypX::ConstParam(_) => expr.clone(),
         TypX::TypeId => panic!("internal error: TypeId created too soon"),
         TypX::Air(_) => panic!("internal error: Air type created too soon"),
     }
@@ -240,7 +239,7 @@ fn coerce_expr_to_poly(ctx: &Ctx, expr: &Expr) -> Expr {
             panic!("internal error: AnonymousClosure should be removed by ast_simplify")
         }
         TypX::Tuple(_) => panic!("internal error: Tuple should be removed by ast_simplify"),
-        TypX::Boxed(_) | TypX::TypParam(_) | TypX::ConstParam(_) => expr.clone(),
+        TypX::Boxed(_) | TypX::TypParam(_) => expr.clone(),
         TypX::TypeId => panic!("internal error: TypeId created too soon"),
         TypX::Air(_) => panic!("internal error: Air type created too soon"),
     }

@@ -1353,9 +1353,6 @@ fn mk_ctxt(erasure_hints: &ErasureHints, known_spans: &HashSet<Span>, keep_proof
         functions_by_span.insert(span.span(), None).map(|v| v.map(|_| panic!("{:?}", span)));
     }
     for d in &erasure_hints.vir_crate.datatypes {
-        if d.x.path.segments[0].starts_with("%%ConstParam") {
-            continue;
-        }
         datatypes.insert(d.x.path.clone(), d.clone()).map(|_| panic!("{:?}", &d.x.path));
     }
     for (span, call) in &erasure_hints.resolved_calls {

@@ -104,7 +104,6 @@ pub(crate) fn typ_to_air(ctx: &Ctx, typ: &Typ) -> air::ast::Typ {
         }
         TypX::Boxed(_) => str_typ(POLY),
         TypX::TypParam(_) => str_typ(POLY),
-        TypX::ConstParam(_) => int_typ(),
         TypX::TypeId => str_typ(crate::def::TYPE),
         TypX::Air(t) => t.clone(),
         TypX::StrSlice => str_typ(crate::def::STRSLICE),
@@ -153,7 +152,6 @@ pub fn typ_to_id(typ: &Typ) -> Expr {
         TypX::Datatype(path, typs) => datatype_id(path, typs),
         TypX::Boxed(typ) => typ_to_id(typ),
         TypX::TypParam(x) => ident_var(&suffix_typ_param_id(x)),
-        TypX::ConstParam(x) => ident_var(&suffix_typ_param_id(x)),
         TypX::TypeId => panic!("internal error: typ_to_id of TypeId"),
         TypX::Air(_) => panic!("internal error: typ_to_id of Air"),
         TypX::StrSlice => str_var(crate::def::TYPE_ID_STRSLICE),
@@ -254,7 +252,6 @@ fn try_box(ctx: &Ctx, expr: Expr, typ: &Typ) -> Option<Expr> {
         }
         TypX::Boxed(_) => None,
         TypX::TypParam(_) => None,
-        TypX::ConstParam(_) => None,
         TypX::TypeId => None,
         TypX::Air(_) => None,
         TypX::StrSlice => Some(str_ident(crate::def::BOX_STRSLICE)),
@@ -284,7 +281,6 @@ fn try_unbox(ctx: &Ctx, expr: Expr, typ: &Typ) -> Option<Expr> {
         TypX::AnonymousClosure(..) => unimplemented!(),
         TypX::Boxed(_) => None,
         TypX::TypParam(_) => None,
-        TypX::ConstParam(_) => None,
         TypX::TypeId => None,
         TypX::Air(_) => None,
         TypX::StrSlice => Some(str_ident(crate::def::UNBOX_STRSLICE)),

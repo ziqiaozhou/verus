@@ -192,17 +192,7 @@ fn check_expr(typing: &mut Typing, expr: &Expr) -> Result<Typ, TypeError> {
         ExprX::Const(Constant::BitVec(_, width)) => Ok(Arc::new(TypX::BitVec(*width))),
         ExprX::Var(x) => match typing.get(x) {
             Some(DeclaredX::Var { typ, .. }) => Ok(typ.clone()),
-            _ => {
-                if x.to_string().starts_with("TYPE%%%Const") {
-                    let ident = Arc::new("Type".to_string());
-                    let typ = Arc::new(TypX::Named(ident));
-                    let var = DeclaredX::Var{typ: typ.clone(), mutable: false };
-                    //typing.insert(x, Arc::new(var))?;
-                    Ok(typ.clone())
-                } else {
-                    Err(format!("use of undeclared variable {}", x))
-                }
-            },
+            _ => Err(format!("use of undeclared variable {}", x)),
         },
         ExprX::Old(snap, x) => match (typing.snapshots.contains(snap), typing.get(x)) {
             (false, _) => Err(format!("use of undeclared snapshot {}", snap)),

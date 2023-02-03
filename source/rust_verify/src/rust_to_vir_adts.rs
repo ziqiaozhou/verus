@@ -80,8 +80,6 @@ fn check_variant_data<'tcx>(
     (ident_binder(name, &vir_fields), one_field_private)
 }
 
-pub static mut myspan: Vec<Span> = vec!{};
-
 pub fn check_item_struct<'tcx>(
     ctxt: &Context<'tcx>,
     vir: &mut KrateX,
@@ -129,9 +127,6 @@ pub fn check_item_struct<'tcx>(
     let mode = get_mode(Mode::Exec, attrs);
     let datatype = DatatypeX { path, visibility, transparency, typ_params, variants, mode };
     vir.datatypes.push(spanned_new(span, datatype));
-    unsafe {
-        myspan.push(span);
-    }
     Ok(())
 }
 

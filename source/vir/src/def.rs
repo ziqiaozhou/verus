@@ -642,16 +642,6 @@ pub fn strslice_defn_path() -> Path {
     })
 }
 
-pub fn basic_path(name: &str) -> Path {
-    Arc::new(PathX {
-        krate: None,
-        segments: Arc::new(vec![
-            Arc::new(name.to_string()),
-        ]),
-    })
-}
-
-
 pub fn pervasive_assert_path() -> Path {
     Arc::new(PathX {
         krate: None,

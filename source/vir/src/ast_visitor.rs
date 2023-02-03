@@ -41,7 +41,6 @@ where
                 | TypX::Char
                 | TypX::Int(_)
                 | TypX::TypParam(_)
-                | TypX::ConstParam(_)
                 | TypX::TypeId
                 | TypX::Air(_) => (),
                 TypX::Tuple(ts) => {
@@ -85,7 +84,6 @@ where
         | TypX::Char
         | TypX::Int(_)
         | TypX::TypParam(_)
-        | TypX::ConstParam(_)
         | TypX::TypeId
         | TypX::Air(_) => ft(env, typ),
         TypX::Tuple(ts) => {
