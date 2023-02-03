@@ -41,6 +41,7 @@ pub mod vec;
 
 // Re-exports all pervasive types, traits, and functions that are commonly used or replace
 // regular `core` or `std` definitions.
+#[cfg(not(feature = "non_std"))]
 pub mod prelude;
 
 #[allow(unused_imports)]
