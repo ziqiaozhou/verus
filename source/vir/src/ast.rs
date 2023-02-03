@@ -100,13 +100,13 @@ pub enum TypX {
     TypParam(Ident),
     /// Type of type identifiers
     TypeId,
+    /// Const integer type argument (e.g. for array sizes)
+    ConstInt(BigInt),
     /// AIR type, used internally during translation
     Air(air::ast::Typ),
-
     /// StrSlice type. Currently the pervasive StrSlice struct is "seen" as this type
     /// despite the fact that it is in fact a datatype
     StrSlice,
-
     /// UTF-8 character type
     Char,
 }
@@ -133,6 +133,13 @@ pub enum ModeCoercion {
     /// All other cases are treated uniformly by the mode checker based on their op/from/to-mode.
     /// (This includes Ghost::borrow, Tracked::get, etc.)
     Other,
+}
+
+/// Primitive 0-argument operations
+#[derive(Clone, Debug, Hash, ToDebugSNode)]
+pub enum NullaryOpr {
+    /// convert a const generic into an expression, as in fn f<const N: usize>() -> usize { N }
+    ConstGeneric(Typ),
 }
 
 /// Primitive unary operations
@@ -168,6 +175,14 @@ pub struct FieldOpr {
     pub field: Ident,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ToDebugSNode)]
+pub enum IntegerTypeBoundKind {
+    UnsignedMax,
+    SignedMin,
+    SignedMax,
+    ArchWordBits,
+}
+
 /// More complex unary operations (requires Clone rather than Copy)
 /// (Below, "boxed" refers to boxing types in the SMT encoding, not the Rust Box type)
 #[derive(Clone, Debug, Hash, ToDebugSNode)]
@@ -185,6 +200,16 @@ pub enum UnaryOpr {
     TupleField { tuple_arity: usize, field: usize },
     /// Read field from variant of datatype
     Field(FieldOpr),
+    /// Bounded integer bounds. The argument is the arch word bits (16, 32, etc.)
+    /// So e.g., IntegerTypeBound(SignedMax) applied to 8 would give 127
+    /// The 'ArchWordBits' gives the word size in bits (ignore the argument).
+    /// This can return any integer type, but that integer type needs to be large enough
+    /// to hold the result.
+    /// Mode is the minimum allowed mode (e.g., Spec for spec-only, Exec if allowed in exec).
+    IntegerTypeBound(IntegerTypeBoundKind, Mode),
+    /// Height of a data structure for the purpose of decreases-checking.
+    /// Maps to the built-in intrinsic.
+    Height,
 }
 
 /// Arithmetic operation that might fail (overflow or divide by zero)
@@ -331,13 +356,17 @@ pub enum PatternX {
     /// _
     Wildcard,
     /// x or mut x
-    Var { name: Ident, mutable: bool },
+    Var {
+        name: Ident,
+        mutable: bool,
+    },
     /// Note: ast_simplify replaces this with Constructor
     Tuple(Patterns),
     /// Match constructor of datatype Path, variant Ident
     /// For tuple-style variants, the patterns appear in order and are named "0", "1", etc.
     /// For struct-style variants, the patterns may appear in any order.
     Constructor(Path, Ident, Binders<Pattern>),
+    Or(Pattern, Pattern),
 }
 
 /// Arms of match expressions
@@ -455,6 +484,8 @@ pub enum ExprX {
     /// For tuple-style variants, the field initializers appear in order and are named "_0", "_1", etc.
     /// For struct-style variants, the field initializers may appear in any order.
     Ctor(Path, Ident, Binders<Expr>, Option<Expr>),
+    /// Primitive 0-argument operation
+    NullaryOpr(NullaryOpr),
     /// Primitive unary operation
     Unary(UnaryOp, Expr),
     /// Special unary operator

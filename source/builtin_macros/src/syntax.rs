@@ -47,8 +47,12 @@ enum InsideArith {
 struct Visitor {
     // TODO: this should always be true
     use_spec_traits: bool,
+    // TODO: this should always be true
+    verus_macro_attr: bool,
     // inside_ghost > 0 means we're currently visiting ghost code
     inside_ghost: u32,
+    // inside_type > 0 means we're currently visiting a type
+    inside_type: u32,
     // Widen means we're a direct subexpression in an arithmetic expression that will widen the result.
     // (e.g. "x" or "3" in x + 3 or in x < (3), but not in f(x) + g(3)).
     // When we see a constant in inside_arith, we preemptively give it type "int" rather than
@@ -123,7 +127,9 @@ impl Visitor {
             false
         };
 
-        attrs.push(mk_verifier_attr(sig.fn_token.span, "verus_macro"));
+        if self.verus_macro_attr {
+            attrs.push(mk_verifier_attr(sig.fn_token.span, "verus_macro"));
+        }
 
         for arg in &mut sig.inputs {
             match (arg.tracked, &mut arg.kind) {
@@ -900,7 +906,7 @@ impl VisitMut for Visitor {
             Expr::Closure(..) if self.inside_ghost > 0 => true,
             _ => false,
         };
-        if do_replace {
+        if do_replace && self.inside_type == 0 {
             match take_expr(expr) {
                 Expr::Lit(ExprLit { lit: Lit::Int(lit), attrs }) => {
                     let span = lit.span();
@@ -977,51 +983,65 @@ impl VisitMut for Visitor {
                                 quote_verbatim!(span, attrs => ! ::builtin::spec_eq(#left, #right));
                         }
                         BinOp::Le(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_le(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_le(#right));
                         }
                         BinOp::Lt(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_lt(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_lt(#right));
                         }
                         BinOp::Ge(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_ge(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_ge(#right));
                         }
                         BinOp::Gt(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_gt(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_gt(#right));
                         }
                         BinOp::Add(..) if !self.inside_bitvector => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_add(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_add(#right));
                         }
                         BinOp::Sub(..) if !self.inside_bitvector => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_sub(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_sub(#right));
                         }
                         BinOp::Mul(..) if !self.inside_bitvector => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_mul(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_mul(#right));
                         }
                         BinOp::Add(..) | BinOp::Sub(..) | BinOp::Mul(..) => {
                             *expr = quote_verbatim!(span, attrs => compile_error!("Inside bit-vector assertion, use `add` `sub` `mul` for fixed-bit operators, instead of `+` `-` `*`. (see the functions builtin::add(left, right), builtin::sub(left, right), and builtin::mul(left, right))"));
                         }
                         BinOp::Div(..) => {
+                            let left = quote_spanned! { left.span() => (#left) };
                             *expr =
-                                quote_verbatim!(span, attrs => (#left).spec_euclidean_div(#right));
+                                quote_verbatim!(span, attrs => #left.spec_euclidean_div(#right));
                         }
                         BinOp::Rem(..) => {
+                            let left = quote_spanned! { left.span() => (#left) };
                             *expr =
-                                quote_verbatim!(span, attrs => (#left).spec_euclidean_mod(#right));
+                                quote_verbatim!(span, attrs => #left.spec_euclidean_mod(#right));
                         }
                         BinOp::BitAnd(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_bitand(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_bitand(#right));
                         }
                         BinOp::BitOr(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_bitor(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_bitor(#right));
                         }
                         BinOp::BitXor(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_bitxor(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_bitxor(#right));
                         }
                         BinOp::Shl(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_shl(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_shl(#right));
                         }
                         BinOp::Shr(..) => {
-                            *expr = quote_verbatim!(span, attrs => (#left).spec_shr(#right));
+                            let left = quote_spanned! { left.span() => (#left) };
+                            *expr = quote_verbatim!(span, attrs => #left.spec_shr(#right));
                         }
                         _ => panic!("binary"),
                     }
@@ -1129,10 +1149,10 @@ impl VisitMut for Visitor {
                         }
                         (Some(_), Some((_, id)), _, _) => {
                             let span = id.span();
-                            *expr = quote_verbatim!(span, attrs => compile_error!("unsupported kind of assert-by"));
+                            *expr = quote_verbatim!(span, attrs => compile_error!("unknown prover name for assert-by (supported provers: 'compute_only', 'compute', 'bit_vector', and 'nonlinear_arith')"));
                         }
-                        _ => {
-                            *expr = quote_verbatim!(span, attrs => compile_error!("unsupported kind of assert-by"));
+                        (Some(_), None, Some(_), _) => {
+                            *expr = quote_verbatim!(span, attrs => compile_error!("assert-by has 'requires' clause but no prover specified (supported provers: 'compute_only', 'compute', 'bit_vector', and 'nonlinear_arith')"));
                         }
                     }
                 }
@@ -1326,7 +1346,9 @@ impl VisitMut for Visitor {
     }
 
     fn visit_type_mut(&mut self, ty: &mut Type) {
+        self.inside_type += 1;
         syn_verus::visit_mut::visit_type_mut(self, ty);
+        self.inside_type -= 1;
 
         let span = ty.span();
         let tmp_ty = take_type(ty);
@@ -1380,6 +1402,19 @@ impl VisitMut for Visitor {
                 *ty = tmp_ty;
             }
         }
+    }
+
+    fn visit_path_mut(&mut self, path: &mut Path) {
+        // generic type arguments can appear inside paths
+        self.inside_type += 1;
+        syn_verus::visit_mut::visit_path_mut(self, path);
+        self.inside_type -= 1;
+    }
+
+    fn visit_generic_method_argument_mut(&mut self, arg: &mut syn_verus::GenericMethodArgument) {
+        self.inside_type += 1;
+        syn_verus::visit_mut::visit_generic_method_argument_mut(self, arg);
+        self.inside_type -= 1;
     }
 }
 
@@ -1516,6 +1551,7 @@ impl quote::ToTokens for MacroInvoke {
 pub(crate) fn rewrite_items(
     stream: proc_macro::TokenStream,
     use_spec_traits: bool,
+    verus_macro_attr: bool,
 ) -> proc_macro::TokenStream {
     use quote::ToTokens;
     let stream = rejoin_tokens(stream);
@@ -1524,10 +1560,12 @@ pub(crate) fn rewrite_items(
     let mut visitor = Visitor {
         use_spec_traits,
         inside_ghost: 0,
+        inside_type: 0,
         inside_arith: InsideArith::None,
         assign_to: false,
         rustdoc: env_rustdoc(),
         inside_bitvector: false,
+        verus_macro_attr,
     };
     for mut item in items.items {
         visitor.visit_item_mut(&mut item);
@@ -1548,7 +1586,9 @@ pub(crate) fn rewrite_expr(
     let mut new_stream = TokenStream::new();
     let mut visitor = Visitor {
         use_spec_traits: true,
+        verus_macro_attr: true,
         inside_ghost: if inside_ghost { 1 } else { 0 },
+        inside_type: 0,
         inside_arith: InsideArith::None,
         assign_to: false,
         rustdoc: env_rustdoc(),
@@ -1624,7 +1664,9 @@ pub(crate) fn proof_macro_exprs(
     let mut new_stream = TokenStream::new();
     let mut visitor = Visitor {
         use_spec_traits: true,
+        verus_macro_attr: true,
         inside_ghost: if inside_ghost { 1 } else { 0 },
+        inside_type: 0,
         inside_arith: InsideArith::None,
         assign_to: false,
         rustdoc: env_rustdoc(),

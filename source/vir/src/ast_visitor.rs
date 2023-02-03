@@ -42,6 +42,7 @@ where
                 | TypX::Int(_)
                 | TypX::TypParam(_)
                 | TypX::TypeId
+                | TypX::ConstInt(_)
                 | TypX::Air(_) => (),
                 TypX::Tuple(ts) => {
                     for t in ts.iter() {
@@ -85,6 +86,7 @@ where
         | TypX::Int(_)
         | TypX::TypParam(_)
         | TypX::TypeId
+        | TypX::ConstInt(_)
         | TypX::Air(_) => ft(env, typ),
         TypX::Tuple(ts) => {
             let ts = vec_map_result(&**ts, |t| map_typ_visitor_env(t, env, ft))?;
@@ -139,6 +141,11 @@ where
             })?;
             PatternX::Constructor(path.clone(), variant.clone(), Arc::new(binders))
         }
+        PatternX::Or(pat1, pat2) => {
+            let p1 = map_pattern_visitor_env(pat1, env, ft)?;
+            let p2 = map_pattern_visitor_env(pat2, env, ft)?;
+            PatternX::Or(p1, p2)
+        }
     };
     Ok(SpannedTyped::new(&pattern.span, &map_typ_visitor_env(&pattern.typ, env, ft)?, patternx))
 }
@@ -158,6 +165,10 @@ fn insert_pattern_vars(map: &mut VisitorScopeMap, pattern: &Pattern) {
             for binder in binders.iter() {
                 insert_pattern_vars(map, &binder.a);
             }
+        }
+        PatternX::Or(pat1, _) => {
+            insert_pattern_vars(map, pat1);
+            // pat2 should bind an identical set of variables
         }
     }
 }
@@ -226,6 +237,7 @@ where
                         expr_visitor_control_flow!(expr_visitor_dfs(&binder.a, map, mf));
                     }
                 }
+                ExprX::NullaryOpr(_op) => (),
                 ExprX::Unary(_op, e1) => {
                     expr_visitor_control_flow!(expr_visitor_dfs(e1, map, mf));
                 }
@@ -573,6 +585,10 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             ExprX::Ctor(path.clone(), ident.clone(), Arc::new(mapped_binders), update)
         }
+        ExprX::NullaryOpr(crate::ast::NullaryOpr::ConstGeneric(t)) => {
+            let t = map_typ_visitor_env(t, env, ft)?;
+            ExprX::NullaryOpr(crate::ast::NullaryOpr::ConstGeneric(t))
+        }
         ExprX::Unary(op, e1) => {
             let expr1 = map_expr_visitor_env(e1, map, env, fe, fs, ft)?;
             ExprX::Unary(*op, expr1)
@@ -585,6 +601,8 @@ where
                 UnaryOpr::IsVariant { .. } => op.clone(),
                 UnaryOpr::TupleField { .. } => op.clone(),
                 UnaryOpr::Field { .. } => op.clone(),
+                UnaryOpr::IntegerTypeBound(_kind, _) => op.clone(),
+                UnaryOpr::Height => op.clone(),
             };
             let expr1 = map_expr_visitor_env(e1, map, env, fe, fs, ft)?;
             ExprX::UnaryOpr(op.clone(), expr1)

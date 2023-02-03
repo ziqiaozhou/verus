@@ -104,6 +104,7 @@ fn subst_exp_rec(
         | ExpX::Call(..)
         | ExpX::CallLambda(..)
         | ExpX::Ctor(..)
+        | ExpX::NullaryOpr(..)
         | ExpX::Unary(..)
         | ExpX::UnaryOpr(..)
         | ExpX::Binary(..)
@@ -260,6 +261,9 @@ impl ExpX {
                 let args = exps.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
                 (format!("{}({})", fun.path.segments.last().unwrap(), args), 90)
             }
+            NullaryOpr(crate::ast::NullaryOpr::ConstGeneric(_)) => {
+                ("const_generic".to_string(), 99)
+            }
             Unary(op, exp) => match op {
                 UnaryOp::Not | UnaryOp::BitNot => (format!("!{}", exp.x.to_string_prec(99)), 90),
                 UnaryOp::Clip { .. } => (format!("clip({})", exp), 99),
@@ -275,7 +279,11 @@ impl ExpX {
                 match op {
                     Box(_) => (format!("box({})", exp), 99),
                     Unbox(_) => (format!("unbox({})", exp), 99),
+                    Height => (format!("height({})", exp), 99),
                     HasType(t) => (format!("{}.has_type({:?})", exp, t), 99),
+                    IntegerTypeBound(kind, mode) => {
+                        (format!("{:?}.{:?}({:?})", kind, mode, exp), 99)
+                    }
                     IsVariant { datatype: _, variant } => {
                         (format!("{}.is_type({})", exp, variant), 99)
                     }

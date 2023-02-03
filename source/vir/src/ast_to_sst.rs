@@ -661,19 +661,6 @@ pub(crate) fn stms_to_one_stm_opt(span: &Span, stms: Vec<Stm>) -> Option<Stm> {
     if stms.len() == 0 { None } else { Some(stms_to_one_stm(span, stms)) }
 }
 
-fn check_unit_or_never(exp: &ReturnValue) -> Result<(), VirErr> {
-    match exp {
-        ReturnValue::ImplicitUnit(_) => Ok(()),
-        ReturnValue::Never => Ok(()),
-        ReturnValue::Some(exp) => match &exp.x {
-            ExpX::Var(x) if crate::def::is_temp_var(&x.name) => Ok(()),
-            // REVIEW: we could lift this restriction by putting exp into a dummy VIR node:
-            // (we can't just drop it; the erasure depends on information from VIR)
-            _ => err_str(&exp.span, "expressions with no effect are not supported"),
-        },
-    }
-}
-
 /// Convert the expression to a Stm, and assert the post-conditions for
 /// the final returned expression.
 pub(crate) fn expr_to_one_stm_with_post(
@@ -1051,6 +1038,9 @@ fn expr_to_stm_opt(
             }
             let ctor = ExpX::Ctor(p.clone(), i.clone(), Arc::new(args));
             Ok((stms, ReturnValue::Some(mk_exp(ctor))))
+        }
+        ExprX::NullaryOpr(op) => {
+            Ok((vec![], ReturnValue::Some(mk_exp(ExpX::NullaryOpr(op.clone())))))
         }
         ExprX::Unary(op, exprr) => {
             let (mut stms, exp) = expr_to_stm_opt(ctx, state, exprr)?;
@@ -1542,7 +1532,7 @@ fn expr_to_stm_opt(
                 state.diagnostics,
                 &mut state.fun_ssts,
                 ctx.global.rlimit,
-                ctx.global.arch.min_bits(),
+                ctx.global.arch,
                 *mode,
                 &mut ctx.global.interpreter_log.borrow_mut(),
             )?;
@@ -1599,8 +1589,7 @@ fn expr_to_stm_opt(
                 None
             };
 
-            let (mut stms1, e1) = expr_to_stm_opt(ctx, state, body)?;
-            check_unit_or_never(&e1)?;
+            let (mut stms1, _e1) = expr_to_stm_opt(ctx, state, body)?;
             let mut check_recommends: Vec<Stm> = Vec::new();
             let mut invs1: Vec<crate::sst::LoopInv> = Vec::new();
             for inv in invs.iter() {
@@ -1673,8 +1662,6 @@ fn expr_to_stm_opt(
             );
             let (body_stms, body_e) = expr_to_stm_opt(ctx, state, body)?;
             state.pop_scope();
-
-            check_unit_or_never(&body_e)?;
 
             let body_stm = stms_to_one_stm(&expr.span, body_stms);
             stms0.push(Spanned::new(
@@ -1752,7 +1739,6 @@ fn expr_to_stm_opt(
                         is_pure_exp = false;
                     }
                 }
-                check_unit_or_never(&e0)?;
                 stms.append(&mut stms0);
                 match e0 {
                     ReturnValue::Never => {

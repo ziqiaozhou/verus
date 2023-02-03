@@ -64,7 +64,7 @@ impl<V> Multiset<V> {
     /// occurs more in `m2` then the resulting multiplicity bottoms out at 0.
     /// (See [`axiom_multiset_sub`] for the precise definition.)
     ///
-    /// Note in particular that `self === self.sub(m).add(m)` only holds if
+    /// Note in particular that `self == self.sub(m).add(m)` only holds if
     /// `m` is included in `self`.
 
     pub spec fn sub(self, m2: Self) -> Self;
@@ -122,13 +122,13 @@ pub proof fn axiom_multiset_empty<V>(v: V)
 #[verifier(external_body)]
 #[verifier(broadcast_forall)]
 pub proof fn axiom_multiset_singleton<V>(v: V)
-    ensures Multiset::singleton(v).count(v) == 1,
+    ensures (#[trigger] Multiset::singleton(v)).count(v) == 1,
 { }
 
 #[verifier(external_body)]
 #[verifier(broadcast_forall)]
 pub proof fn axiom_multiset_singleton_different<V>(v: V, w: V)
-    ensures v !== w ==> Multiset::singleton(v).count(w) == 0,
+    ensures v != w ==> Multiset::singleton(v).count(w) == 0,
 { }
 
 // Specification of `add`

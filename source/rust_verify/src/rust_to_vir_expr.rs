@@ -24,6 +24,7 @@ use rustc_hir::{
     Node, Pat, PatKind, QPath, Stmt, StmtKind, UnOp,
 };
 
+use crate::rust_intrinsics_to_vir::int_intrinsic_constant_to_vir;
 use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{PredicateKind, TyCtxt, TyKind};
 use rustc_span::def_id::DefId;
@@ -33,9 +34,9 @@ use rustc_span::Span;
 use std::sync::Arc;
 use vir::ast::{
     ArithOp, ArmX, AssertQueryMode, BinaryOp, BitwiseOp, CallTarget, ComputeMode, Constant, ExprX,
-    FieldOpr, FunX, HeaderExpr, HeaderExprX, Ident, InequalityOp, IntRange, InvAtomicity, Mode,
-    ModeCoercion, MultiOp, PatternX, Quant, SpannedTyped, StmtX, Stmts, Typ, TypX, UnaryOp,
-    UnaryOpr, VarAt, VirErr,
+    FieldOpr, FunX, HeaderExpr, HeaderExprX, Ident, InequalityOp, IntRange, IntegerTypeBoundKind,
+    InvAtomicity, Mode, ModeCoercion, MultiOp, PatternX, Quant, SpannedTyped, StmtX, Stmts, Typ,
+    TypX, UnaryOp, UnaryOpr, VarAt, VirErr,
 };
 use vir::ast_util::types_equal;
 use vir::ast_util::{const_int_from_string, ident_binder, path_as_rust_name};
@@ -566,6 +567,12 @@ fn fn_call_to_vir<'tcx>(
     let is_tracked_split_tuple = f_name.starts_with("builtin::tracked_split_tuple");
     let is_new_strlit = tcx.is_diagnostic_item(Symbol::intern("pervasive::string::new_strlit"), f);
 
+    let is_signed_min = f_name == "builtin::signed_min";
+    let is_signed_max = f_name == "builtin::signed_max";
+    let is_unsigned_max = f_name == "builtin::unsigned_max";
+    let is_arch_word_bits = f_name == "builtin::arch_word_bits";
+    let is_height = f_name == "builtin::height";
+
     let is_reveal_strlit = tcx.is_diagnostic_item(Symbol::intern("builtin::reveal_strlit"), f);
     let is_strslice_len = tcx.is_diagnostic_item(Symbol::intern("builtin::strslice_len"), f);
     let is_strslice_get_char =
@@ -702,7 +709,12 @@ fn fn_call_to_vir<'tcx>(
             || is_old
             || is_spec_ghost_tracked
             || is_closure_to_fn_spec
-            || is_get_variant.is_some(),
+            || is_get_variant.is_some()
+            || is_signed_max
+            || is_signed_min
+            || is_unsigned_max
+            || is_arch_word_bits
+            || is_height,
         is_implies
             || is_ignored_fn
             || is_tracked_get
@@ -1026,6 +1038,39 @@ fn fn_call_to_vir<'tcx>(
         }));
     }
 
+    if is_signed_min || is_signed_max || is_unsigned_max {
+        assert!(args.len() == 1);
+        let arg = expr_to_vir(bctx, &args[0], ExprModifier::REGULAR)?;
+
+        let kind = if is_signed_min {
+            IntegerTypeBoundKind::SignedMin
+        } else if is_signed_max {
+            IntegerTypeBoundKind::SignedMax
+        } else {
+            IntegerTypeBoundKind::UnsignedMax
+        };
+
+        return Ok(mk_expr(ExprX::UnaryOpr(UnaryOpr::IntegerTypeBound(kind, Mode::Spec), arg)));
+    }
+    if is_arch_word_bits {
+        assert!(args.len() == 0);
+        let arg = spanned_typed_new(
+            expr.span,
+            &Arc::new(TypX::Int(IntRange::Int)),
+            ExprX::Const(vir::ast_util::const_int_from_u128(0)),
+        );
+
+        let kind = IntegerTypeBoundKind::ArchWordBits;
+
+        return Ok(mk_expr(ExprX::UnaryOpr(UnaryOpr::IntegerTypeBound(kind, Mode::Spec), arg)));
+    }
+
+    if is_height {
+        assert!(args.len() == 1);
+        let arg = expr_to_vir(bctx, &args[0], ExprModifier::REGULAR)?;
+        return Ok(mk_expr(ExprX::UnaryOpr(UnaryOpr::Height, arg)));
+    }
+
     if is_ignored_fn {
         unsupported_err_unless!(len == 1, expr.span, "expected 1 argument", &args);
         let arg = expr_to_vir(bctx, &args[0], ExprModifier::REGULAR)?;
@@ -1215,7 +1260,9 @@ fn fn_call_to_vir<'tcx>(
     let is_smt_binary = if is_equal {
         true
     } else if is_spec_eq {
-        if is_smt_equality(bctx, expr.span, &args[0].hir_id, &args[1].hir_id) {
+        let t1 = typ_of_node(bctx, &args[0].hir_id, true);
+        let t2 = typ_of_node(bctx, &args[1].hir_id, true);
+        if types_equal(&t1, &t2) || is_smt_arith(bctx, &args[0].hir_id, &args[1].hir_id) {
             true
         } else {
             return err_span_str(expr.span, "types must be compatible to use == or !=");
@@ -1507,7 +1554,9 @@ fn fn_call_to_vir<'tcx>(
                     typ_args.push(mid_ty_to_vir(tcx, ty, false));
                 }
                 GenericArgKind::Lifetime(_) => {}
-                _ => unsupported_err!(expr.span, format!("const type arguments"), expr),
+                GenericArgKind::Const(cnst) => {
+                    typ_args.push(crate::rust_to_vir_base::mid_ty_const_to_vir(tcx, cnst));
+                }
             }
         }
         let target = CallTarget::Static(name, Arc::new(typ_args));
@@ -1677,6 +1726,30 @@ pub(crate) fn pattern_to_vir<'tcx>(
                 binders.push(binder);
             }
             PatternX::Constructor(vir_path, variant_name, Arc::new(binders))
+        }
+        PatKind::Box(pat) => {
+            return pattern_to_vir(bctx, pat);
+        }
+        PatKind::Or(pats) => {
+            assert!(pats.len() >= 2);
+
+            let mut patterns: Vec<vir::ast::Pattern> = Vec::new();
+            for pat in pats.iter() {
+                patterns.push(pattern_to_vir(bctx, pat)?);
+            }
+
+            // Arrange it like Or(a, Or(b, Or(c, d)))
+            // Also, make sure to preserve the order.
+
+            let mut pat_iter = patterns.into_iter().rev();
+            let plast = pat_iter.next().unwrap();
+            let plast2 = pat_iter.next().unwrap();
+            let mut pat_or = PatternX::Or(plast2, plast);
+            while let Some(p) = pat_iter.next() {
+                let pat_typ = typ_of_node(bctx, &pat.hir_id, false);
+                pat_or = PatternX::Or(p, spanned_typed_new(pat.span, &pat_typ, pat_or));
+            }
+            pat_or
         }
         _ => return unsupported_err!(pat.span, "complex pattern", pat),
     };
@@ -2340,6 +2413,34 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
                         expr.span,
                         modifier,
                     ),
+                    DefKind::ConstParam => {
+                        let gparam = if let Some(local_id) = id.as_local() {
+                            let hir_id = tcx.hir().local_def_id_to_hir_id(local_id);
+                            match tcx.hir().get(hir_id) {
+                                Node::GenericParam(rustc_hir::GenericParam {
+                                    name,
+                                    kind: rustc_hir::GenericParamKind::Const { .. },
+                                    ..
+                                }) => Some(name),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        match *expr_typ() {
+                            TypX::Int(_) => {}
+                            _ => {
+                                unsupported_err!(expr.span, format!("non-int ConstParam {:?}", id))
+                            }
+                        }
+                        if let Some(name) = gparam {
+                            let typ = Arc::new(TypX::TypParam(Arc::new(name.ident().to_string())));
+                            let opr = vir::ast::NullaryOpr::ConstGeneric(typ);
+                            Ok(mk_expr(ExprX::NullaryOpr(opr)))
+                        } else {
+                            unsupported_err!(expr.span, format!("ConstParam {:?}", id))
+                        }
+                    }
                     _ => {
                         unsupported_err!(expr.span, format!("Path {:?} kind {:?}", id, def_kind))
                     }
@@ -2347,6 +2448,25 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
             }
             res => unsupported_err!(expr.span, format!("Path {:?}", res)),
         },
+        ExprKind::Path(qpath @ QPath::TypeRelative(_ty, _path_seg)) => {
+            let def = bctx.types.qpath_res(&qpath, expr.hir_id);
+            match def {
+                rustc_hir::def::Res::Def(_, def_id) => {
+                    let f_name = bctx.ctxt.tcx.def_path_str(def_id);
+                    if let Some(vir_expr) =
+                        int_intrinsic_constant_to_vir(expr.span, &expr_typ(), &f_name)
+                    {
+                        let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+                        erasure_info
+                            .resolved_calls
+                            .push((expr.span.data(), ResolvedCall::CompilableOperator));
+                        return Ok(vir_expr);
+                    }
+                }
+                _ => {}
+            }
+            unsupported_err!(expr.span, format!("expression"), expr)
+        }
         ExprKind::Assign(lhs, rhs, _) => {
             fn init_not_mut<'tcx>(bctx: &BodyCtxt<'tcx>, lhs: &Expr) -> Result<bool, VirErr> {
                 Ok(match lhs.kind {

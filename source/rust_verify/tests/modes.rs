@@ -51,7 +51,7 @@ test_verify_one_file! {
         fn test(i: bool, #[spec] j: bool) {
             let s = S { i, j };
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -64,7 +64,7 @@ test_verify_one_file! {
         fn test(i: bool, j: Ghost<bool>) {
             let s = S { i: ghost(i), j: j@ };
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -76,7 +76,7 @@ test_verify_one_file! {
         fn test(i: bool, #[spec] j: bool) {
             let s = S { j, i };
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -89,7 +89,7 @@ test_verify_one_file! {
             let s = S { i, j };
             let ii = s.i;
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -102,7 +102,7 @@ test_verify_one_file! {
             #[spec] let s = S { i, j };
             let jj = s.j;
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -114,7 +114,7 @@ test_verify_one_file! {
         fn test(s: Ghost<S>) -> bool {
             s@.j
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -126,7 +126,7 @@ test_verify_one_file! {
         fn test(s: &Ghost<S>) -> bool {
             s@.j
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -138,7 +138,7 @@ test_verify_one_file! {
         fn test(s: Ghost<&S>) -> bool {
             s@.j
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -155,7 +155,7 @@ test_verify_one_file! {
         fn test(s: Ghost<S>) -> bool {
             s@.get_j()
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot call function with mode spec")
 }
 
 test_verify_one_file! {
@@ -172,7 +172,7 @@ test_verify_one_file! {
         fn test(s: &Ghost<S>) -> bool {
             s@.get_j()
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot call function with mode spec")
 }
 
 test_verify_one_file! {
@@ -189,7 +189,7 @@ test_verify_one_file! {
         fn test(s: Ghost<&S>) -> bool {
             s@.get_j()
         }
-    } => Err(err) => assert_vir_error(err)
+    } => Err(err) => assert_vir_error_msg(err, "cannot call function with mode spec")
 }
 
 test_verify_one_file! {
@@ -210,7 +210,7 @@ test_verify_one_file! {
         fn test(i: bool, #[spec] j: bool) {
             let s = (i, j);
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -219,7 +219,7 @@ test_verify_one_file! {
             #[spec] let s = (i, j);
             let ii = s.0;
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -228,7 +228,7 @@ test_verify_one_file! {
             #[spec] let s = (i, j);
             let jj = s.0;
         }
-    } => Err(_) => ()
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -240,12 +240,12 @@ test_verify_one_file! {
         fn set_exec() {
             let a: Set<u64> = Set { dummy: 3 }; // FAILS
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
     #[test] spec_enum_not_exec verus_code! {
-        ghost struct E {
+        ghost enum E {
             A,
             B,
         }
@@ -253,7 +253,7 @@ test_verify_one_file! {
         fn set_exec() {
             let e: E = E::A; // FAILS
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -273,7 +273,7 @@ test_verify_one_file! {
             }
             a
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "cannot assign to exec variable from proof mode")
 }
 
 test_verify_one_file! {
@@ -340,7 +340,7 @@ test_verify_one_file! {
             let x = ret_spec();
             assert(x == 3);
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -348,7 +348,7 @@ test_verify_one_file! {
         fn f() {
             requires({while false {}; true});
         }
-    } => Err(TestErr { has_vir_error: true, .. })
+    } => Err(err) => assert_vir_error_msg(err, "expected pure mathematical expression")
 }
 
 test_verify_one_file! {
@@ -359,7 +359,7 @@ test_verify_one_file! {
             x = 23;
             x
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "delayed assignment to non-mut let not allowed for spec variables")
 }
 
 test_verify_one_file! {
@@ -379,7 +379,7 @@ test_verify_one_file! {
             x = 3;
             assert(false); // FAILS
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "delayed assignment to non-mut let not allowed for spec variables")
 }
 
 const FIELD_UPDATE: &str = code_str! {
@@ -397,7 +397,7 @@ test_verify_one_file! {
             #[spec] let b = true;
             s.b = b;
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode exec")
 }
 
 test_verify_one_file! {
@@ -412,7 +412,7 @@ test_verify_one_file! {
             let mut s = S { a: 5, b: false };
             muts_exec(&mut s.a);
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode exec, &mut argument has mode spec")
 }
 
 const PROOF_FN_COMMON: &str = code_str! {
@@ -442,7 +442,7 @@ test_verify_one_file! {
             }
             assert(e);
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode proof, &mut argument has mode exec")
 }
 
 test_verify_one_file! {
@@ -460,7 +460,7 @@ test_verify_one_file! {
             }
             assert(e);
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode spec, &mut argument has mode proof")
 }
 
 test_verify_one_file! {
@@ -475,7 +475,7 @@ test_verify_one_file! {
             let mut e = e;
             f(&mut e.g); // fails, exec <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode exec, &mut argument has mode spec")
 }
 
 test_verify_one_file! {
@@ -490,7 +490,7 @@ test_verify_one_file! {
             let mut g = g;
             f(&mut g.e); // fails, tracked <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode proof, &mut argument has mode spec")
 }
 
 test_verify_one_file! {
@@ -507,7 +507,7 @@ test_verify_one_file! {
                 f(&mut e.e); // fails, exec <- ghost out assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode spec, &mut argument has mode proof")
 }
 
 test_verify_one_file! {
@@ -524,7 +524,7 @@ test_verify_one_file! {
                 f(&mut e.t); // fails, tracked <- ghost out assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode spec, &mut argument has mode proof")
 }
 
 test_verify_one_file! {
@@ -541,7 +541,7 @@ test_verify_one_file! {
             lemma(node);
             lemma(node);
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "error[E0382]: use of moved value: `node`")
 }
 
 test_verify_one_file! {
@@ -578,7 +578,7 @@ test_verify_one_file! {
                 self.lemma();
             }
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "cannot find value `other_node`")
 }
 
 test_verify_one_file! {
@@ -596,7 +596,7 @@ test_verify_one_file! {
                 self.lemma(t);
             }
         }
-    } => Err(_)
+    } => Err(err) => assert_error_msg(err, "test currently ignored")
 }
 
 test_verify_one_file! {
@@ -608,7 +608,7 @@ test_verify_one_file! {
             }
             b
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot assign to exec variable from proof mode")
 }
 
 test_verify_one_file! {
@@ -633,7 +633,7 @@ test_verify_one_file! {
                 let tracked t: bool = g@; // fails: tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
 }
 
 test_verify_one_file! {
@@ -644,7 +644,7 @@ test_verify_one_file! {
             let g: Ghost<bool> = ghost(true);
             let e: bool = g@; // fails: exec <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -657,7 +657,7 @@ test_verify_one_file! {
                 e = true; // fails: exec assign from proof mode
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot assign to exec variable from proof mode")
 }
 
 test_verify_one_file! {
@@ -671,7 +671,7 @@ test_verify_one_file! {
                 t@ = g@; // fails: tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
 }
 
 test_verify_one_file! {
@@ -684,7 +684,7 @@ test_verify_one_file! {
         fn g(g: Ghost<bool>) {
             f(g@); // fails, exec <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -697,7 +697,7 @@ test_verify_one_file! {
         fn g(t: Tracked<bool>) {
             f(t@); // fails, exec <- tracked assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -712,7 +712,7 @@ test_verify_one_file! {
                 f(g@); // fails, tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
 }
 
 test_verify_one_file! {
@@ -726,7 +726,7 @@ test_verify_one_file! {
             let mut g = g;
             f(g.borrow_mut()); // fails, exec <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode proof")
 }
 
 test_verify_one_file! {
@@ -740,7 +740,7 @@ test_verify_one_file! {
             let mut t = t;
             f(t.borrow_mut()); // fails, exec <- tracked assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode proof")
 }
 
 test_verify_one_file! {
@@ -756,7 +756,7 @@ test_verify_one_file! {
                 f(g.borrow_mut()); // fails, tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode proof, &mut argument has mode spec")
 }
 
 test_verify_one_file! {
@@ -772,7 +772,7 @@ test_verify_one_file! {
                 f(t.borrow_mut()); // fails, tracked <- ghost out assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expected mode spec, &mut argument has mode proof")
 }
 
 test_verify_one_file! {
@@ -786,7 +786,7 @@ test_verify_one_file! {
                 let tracked t: bool = g@.e; // fails: tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
 }
 
 test_verify_one_file! {
@@ -798,7 +798,7 @@ test_verify_one_file! {
         fn f(g: Ghost<S>) {
             let e: bool = g@.e; // fails: exec <- ghost assign
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode spec")
 }
 
 test_verify_one_file! {
@@ -814,7 +814,7 @@ test_verify_one_file! {
                 t@.e = g@; // fails: tracked <- ghost assign
             }
         }
-    } => Err(e) => assert_vir_error(e)
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
 }
 
 const TRACKED_TYP_PARAMS_COMMON: &str = verus_code_str! {
@@ -920,6 +920,73 @@ test_verify_one_file! {
                 t
             });
             tracked t
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_or_pattern_mode_inconsistent verus_code! {
+        enum Foo {
+            Bar(#[spec] u64),
+            Qux(#[proof] u64),
+        }
+
+        proof fn blah(foo: Foo) {
+            #[proof] let (Foo::Bar(x) | Foo::Qux(x)) = foo;
+        }
+    } => Err(err) => assert_vir_error_msg(err, "variable `x` has different modes across alternatives")
+}
+
+test_verify_one_file! {
+    #[test] test_or_pattern_mode_inconsistent2 verus_code! {
+        enum Foo {
+            Bar(#[spec] u64, #[proof] u64),
+        }
+
+        proof fn blah(foo: Foo) {
+            #[proof] let (Foo::Bar(x, y) | Foo::Bar(y, x)) = foo;
+        }
+    } => Err(err) => assert_vir_error_msg(err, "variable `x` has different modes across alternatives")
+}
+
+test_verify_one_file! {
+    #[test] test_struct_pattern_fields_out_of_order_fail_issue_348 verus_code! {
+        struct Foo {
+            #[spec] a: u64,
+            #[proof] b: u64,
+        }
+
+        proof fn some_call(#[proof] y: u64) { }
+
+        proof fn t() {
+            #[proof] let foo = Foo { a: 5, b: 6 };
+            #[proof] let Foo { b, a } = foo;
+
+            // Variable 'a' has the mode of field 'a' (that is, spec)
+            // some_call requires 'proof'
+            // So this should fail
+            some_call(a);
+        }
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
+}
+
+test_verify_one_file! {
+    #[test] test_struct_pattern_fields_out_of_order_success_issue_348 verus_code! {
+        struct X { }
+
+        struct Foo {
+            #[spec] a: u64,
+            #[proof] b: X,
+        }
+
+        proof fn some_call(#[proof] y: X) { }
+
+        proof fn t(#[proof] x: X) {
+            #[proof] let foo = Foo { a: 5, b: x };
+            #[proof] let Foo { b, a } = foo;
+
+            // This should succeed, 'b' has mode 'proof'
+            some_call(b);
         }
     } => Ok(())
 }

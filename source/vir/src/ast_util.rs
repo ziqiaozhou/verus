@@ -4,6 +4,7 @@ use crate::ast::{
     SpannedTyped, TriggerAnnotation, Typ, TypX, Typs, UnaryOp, Variant, Variants, VirErr,
     Visibility,
 };
+use crate::prelude::ArchWordBits;
 use crate::sst::{Par, Pars};
 use crate::util::vec_map;
 use air::ast::{Binder, BinderX, Binders, Span};
@@ -49,11 +50,15 @@ pub fn types_equal(typ1: &Typ, typ2: &Typ) -> bool {
         (TypX::Bool, TypX::Bool) => true,
         (TypX::Int(range1), TypX::Int(range2)) => range1 == range2,
         (TypX::Tuple(typs1), TypX::Tuple(typs2)) => n_types_equal(typs1, typs2),
+        (TypX::Lambda(typs1, rtyp1), TypX::Lambda(typs2, rtyp2)) => {
+            n_types_equal(typs1, typs2) && types_equal(rtyp1, rtyp2)
+        }
         (TypX::Datatype(p1, typs1), TypX::Datatype(p2, typs2)) => {
             p1 == p2 && n_types_equal(typs1, typs2)
         }
         (TypX::Boxed(t1), TypX::Boxed(t2)) => types_equal(t1, t2),
         (TypX::TypParam(x1), TypX::TypParam(x2)) => x1 == x2,
+        (TypX::ConstInt(c1), TypX::ConstInt(c2)) => c1 == c2,
         (TypX::StrSlice, TypX::StrSlice) => true,
         (TypX::Char, TypX::Char) => true,
         _ => false,
@@ -93,15 +98,48 @@ pub fn generic_bounds_equal(b1: &GenericBound, b2: &GenericBound) -> bool {
 pub fn allowed_bitvector_type(typ: &Typ) -> bool {
     match &**typ {
         TypX::Bool => true,
-        TypX::Int(IntRange::U(_)) | TypX::Int(IntRange::I(_)) => true,
+        TypX::Int(IntRange::U(_) | IntRange::I(_) | IntRange::USize | IntRange::ISize) => true,
         TypX::Boxed(typ) => allowed_bitvector_type(typ),
         _ => false,
     }
 }
 
-pub fn bitwidth_from_type(et: &Typ) -> Option<u32> {
+#[derive(PartialEq, Eq, Debug)]
+pub enum IntegerTypeBitwidth {
+    Width(u32),
+    ArchWordSize,
+}
+
+impl fmt::Display for IntegerTypeBitwidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IntegerTypeBitwidth::Width(w) => write!(f, "{}-bit", w),
+            IntegerTypeBitwidth::ArchWordSize => write!(f, "architecture-dependent"),
+        }
+    }
+}
+
+impl IntegerTypeBitwidth {
+    pub fn to_exact(&self, arch: &ArchWordBits) -> Option<u32> {
+        match (self, arch) {
+            (IntegerTypeBitwidth::Width(w), _) => Some(*w),
+            (IntegerTypeBitwidth::ArchWordSize, ArchWordBits::Exactly(w)) => Some(*w),
+            (IntegerTypeBitwidth::ArchWordSize, _) => None,
+        }
+    }
+}
+
+pub fn bitwidth_from_int_range(int_range: &IntRange) -> Option<IntegerTypeBitwidth> {
+    match int_range {
+        IntRange::U(size) | IntRange::I(size) => Some(IntegerTypeBitwidth::Width(*size)),
+        IntRange::USize | IntRange::ISize => Some(IntegerTypeBitwidth::ArchWordSize),
+        IntRange::Int | IntRange::Nat => None,
+    }
+}
+
+pub fn bitwidth_from_type(et: &Typ) -> Option<IntegerTypeBitwidth> {
     match &**et {
-        TypX::Int(IntRange::U(size)) | TypX::Int(IntRange::I(size)) => Some(*size),
+        TypX::Int(int_range) => bitwidth_from_int_range(int_range),
         TypX::Boxed(in_et) => bitwidth_from_type(&*in_et),
         _ => None,
     }
@@ -227,12 +265,24 @@ pub fn const_int_from_u128(u: u128) -> Constant {
     Constant::Int(BigInt::from(u))
 }
 
+pub fn const_int_from_i128(i: i128) -> Constant {
+    Constant::Int(BigInt::from(i))
+}
+
 pub fn const_int_from_string(s: String) -> Constant {
     Constant::Int(BigInt::from_str(&s).unwrap())
 }
 
 pub fn conjoin(span: &Span, exprs: &Vec<Expr>) -> Expr {
     chain_binary(span, BinaryOp::And, &mk_bool(span, true), exprs)
+}
+
+pub fn disjoin(span: &Span, exprs: &Vec<Expr>) -> Expr {
+    chain_binary(span, BinaryOp::Or, &mk_bool(span, false), exprs)
+}
+
+pub fn if_then_else(span: &Span, cond: &Expr, thn: &Expr, els: &Expr) -> Expr {
+    SpannedTyped::new(span, &thn.typ, ExprX::If(cond.clone(), thn.clone(), Some(els.clone())))
 }
 
 pub fn param_to_binder(param: &Param) -> Binder<Typ> {

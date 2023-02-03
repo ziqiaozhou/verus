@@ -49,6 +49,7 @@ use crate::attributes::{get_mode, get_verifier_attrs};
 use crate::rust_to_vir_expr::attrs_is_invariant_block;
 use crate::unsupported;
 use crate::util::{from_raw_span, vec_map};
+use crate::verifier::DiagnosticOutputBuffer;
 
 use rustc_ast::ast::{
     AngleBracketedArg, AngleBracketedArgs, Arm, AssocItem, AssocItemKind, BinOpKind, Block, Crate,
@@ -348,7 +349,11 @@ fn erase_pat(ctxt: &Ctxt, mctxt: &mut MCtxt, pat: &Pat) -> Pat {
             let pats = vec_map(pats, |p| P(erase_pat(ctxt, mctxt, p)));
             PatKind::Tuple(pats)
         }
-        PatKind::Paren(pat) => PatKind::Paren(P(erase_pat(ctxt, mctxt, pat))),
+        PatKind::Paren(p) => PatKind::Paren(P(erase_pat(ctxt, mctxt, p))),
+        PatKind::Or(pats) => {
+            let pats = vec_map(pats, |p| P(erase_pat(ctxt, mctxt, p)));
+            PatKind::Or(pats)
+        }
         _ => panic!("internal error: unsupported pattern"),
     };
     let Pat { id, span, .. } = *pat; // for asymptotic efficiency, don't call pat.clone()
@@ -908,7 +913,12 @@ fn erase_stmt(
 
     let kind = match &stmt.kind {
         StmtKind::Local(local) => {
-            let mode1 = *mctxt.find_span(&ctxt.var_modes, local.pat.span);
+            let mut inner_pat = &local.pat;
+            while let PatKind::Paren(p) = &inner_pat.kind {
+                inner_pat = p;
+            }
+
+            let mode1 = *mctxt.find_span(&ctxt.var_modes, inner_pat.span);
             let Local { id, span, ref ty, ref kind, ref attrs, ref tokens, .. } = **local;
             if keep_mode(ctxt, mode1) {
                 let kind = match kind {
@@ -1097,7 +1107,7 @@ fn erase_fn(
 
     for param in params.iter() {
         match param.kind {
-            GenericParamKind::Lifetime => {
+            GenericParamKind::Lifetime | GenericParamKind::Const { .. } => {
                 new_params.push(param.clone());
             }
             GenericParamKind::Type { .. } => {
@@ -1109,7 +1119,6 @@ fn erase_fn(
                     GenericBoundX::Traits(_) => new_params.push(param.clone()),
                 }
             }
-            _ => {}
         }
     }
     let generics =
@@ -1399,6 +1408,7 @@ pub struct CompilerCallbacks {
     pub erasure_hints: ErasureHints,
     pub lifetimes_only: bool,
     pub print: bool,
+    pub test_capture_output: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     pub time_erasure: Arc<Mutex<Duration>>,
 }
 
@@ -1450,6 +1460,15 @@ impl rustc_lint::FormalVerifierRewrite for CompilerCallbacks {
 }
 
 impl rustc_driver::Callbacks for CompilerCallbacks {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        if let Some(target) = &self.test_capture_output {
+            config.diagnostic_output =
+                rustc_session::DiagnosticOutput::Raw(Box::new(DiagnosticOutputBuffer {
+                    output: target.clone(),
+                }));
+        }
+    }
+
     fn after_parsing<'tcx>(
         &mut self,
         compiler: &Compiler,

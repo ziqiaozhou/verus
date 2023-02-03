@@ -66,6 +66,7 @@ where
                         expr_visitor_control_flow!(exp_visitor_dfs(&binder.a, map, f));
                     }
                 }
+                ExpX::NullaryOpr(_) => (),
                 ExpX::Unary(_op, e1) => {
                     expr_visitor_control_flow!(exp_visitor_dfs(e1, map, f));
                 }
@@ -294,6 +295,7 @@ where
             let exp = exp_new(ExpX::Ctor(path.clone(), ident.clone(), Arc::new(mapped_binders?)));
             f(&exp, map)
         }
+        ExpX::NullaryOpr(_) => f(exp, map),
         ExpX::Unary(op, e1) => {
             let expr1 = map_exp_visitor_bind(e1, map, f)?;
             let exp = exp_new(ExpX::Unary(*op, expr1));
@@ -477,6 +479,10 @@ where
             }
             ok_exp(ExpX::Ctor(path.clone(), ident.clone(), Arc::new(binders)))
         }
+        ExpX::NullaryOpr(crate::ast::NullaryOpr::ConstGeneric(t)) => {
+            let t = ft(env, t)?;
+            ok_exp(ExpX::NullaryOpr(crate::ast::NullaryOpr::ConstGeneric(t)))
+        }
         ExpX::Unary(op, e1) => ok_exp(ExpX::Unary(*op, fe(env, e1)?)),
         ExpX::UnaryOpr(op, e1) => {
             let op = match op {
@@ -486,6 +492,8 @@ where
                 UnaryOpr::IsVariant { .. } => op.clone(),
                 UnaryOpr::TupleField { .. } => op.clone(),
                 UnaryOpr::Field { .. } => op.clone(),
+                UnaryOpr::IntegerTypeBound(_, _) => op.clone(),
+                UnaryOpr::Height => op.clone(),
             };
             ok_exp(ExpX::UnaryOpr(op.clone(), fe(env, e1)?))
         }

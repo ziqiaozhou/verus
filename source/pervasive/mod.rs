@@ -1,3 +1,14 @@
+//! The "standard library" for [Verus](https://github.com/verus-lang/verus).
+//! Contains various utilities and datatypes for proofs,
+//! as well as runtime functionality with specifications.
+//! For an introduction to Verus, see [the tutorial](https://verus-lang.github.io/verus/guide/).
+//!
+//! **Note about using the library:** A current limitation of Verus is that it does not
+//! support multi-crate projects. Therefore, this library needs to be embedded as a
+//! a _module_ in every user crate.
+//! See [this page](https://verus-lang.github.io/verus/guide/pervasive.html) for more details.
+//! We expect these hacks to go away once Verus has proper multi-crate support.
+
 pub mod map;
 pub mod option;
 pub mod result;
@@ -28,8 +39,14 @@ pub mod string;
 #[cfg(not(feature = "no_global_allocator"))] 
 pub mod vec;
 
+// Re-exports all pervasive types, traits, and functions that are commonly used or replace
+// regular `core` or `std` definitions.
+pub mod prelude;
+
 #[allow(unused_imports)]
 use builtin::*;
+#[allow(unused_imports)]
+use builtin_macros::*;
 
 #[cfg(feature = "non_std")]
 macro_rules! println {
@@ -37,23 +54,23 @@ macro_rules! println {
     };
 }
 
-#[proof]
-pub fn assume(b: bool) {
-    ensures(b);
-
+verus! {
+pub proof fn assume(b: bool)
+    ensures b
+{
     admit();
 }
 
-#[proof]
 #[verifier(custom_req_err("assertion failure"))]
-pub fn assert(b: bool) {
-    requires(b);
-    ensures(b);
+pub proof fn assert(b: bool)
+    requires b
+    ensures b
+{
 }
 
-#[proof]
-pub fn affirm(b: bool) {
-    requires(b);
+pub proof fn affirm(b: bool)
+    requires b
+{
 }
 
 // Non-statically-determined function calls are translated *internally* (at the VIR level)
@@ -65,11 +82,11 @@ pub fn affirm(b: bool) {
 #[verifier(custom_req_err("Call to non-static function fails to satisfy `callee.requires(args)`"))]
 #[doc(hidden)]
 #[verifier(external_body)]
-fn exec_nonstatic_call<Args, Output, F>(f: F, args: Args) -> Output
+fn exec_nonstatic_call<Args, Output, F>(f: F, args: Args) -> (output: Output)
     where F: FnOnce<Args, Output=Output>
+    requires f.requires(args)
+    ensures f.ensures(args, output)
 {
-    requires(f.requires(args));
-    ensures(|output: Output| f.ensures(args, output));
     unimplemented!();
 }
 
@@ -92,24 +109,22 @@ fn exec_nonstatic_call<Args, Output, F>(f: F, args: Args) -> Output
 ///     }
 /// }
 /// ```
-#[spec] pub fn spec_affirm(b: bool) -> bool {
-    recommends(b);
+pub closed spec fn spec_affirm(b: bool) -> bool
+    recommends b
+{
     b
 }
 
 /// In spec, all types are inhabited
-#[spec]
 #[verifier(external_body)]
 #[allow(dead_code)]
-pub fn arbitrary<A>() -> A {
+pub closed spec fn arbitrary<A>() -> A {
     unimplemented!()
 }
 
-#[proof]
-#[verifier(returns(proof))]
 #[verifier(external_body)]
 #[allow(dead_code)]
-pub fn proof_from_false<A>() -> A {
+pub proof fn proof_from_false<A>() -> (tracked a: A) {
     requires(false);
 
     unimplemented!()
@@ -117,9 +132,9 @@ pub fn proof_from_false<A>() -> A {
 
 #[verifier(external_body)]
 #[allow(dead_code)]
-pub fn unreached<A>() -> A {
-    requires(false);
-
+pub fn unreached<A>() -> A
+    requires false
+{
     panic!("unreached_external")
 }
 
@@ -127,6 +142,8 @@ pub fn unreached<A>() -> A {
 pub fn print_u64(i: u64) {
     println!("{}", i);
 }
+
+} // verus!
 
 /// Allows you to prove a boolean predicate by assuming its negation and proving
 /// a contradiction.
