@@ -3,6 +3,7 @@
 #![no_std]
 #![feature(unboxed_closures)]
 #![feature(fn_traits)]
+#![feature(const_fn_trait_bound)]
 
 use core::marker::PhantomData;
 
@@ -19,13 +20,13 @@ pub fn no_method_body() -> ! {
 
 // Can only appear at beginning of function body
 #[proof]
-pub fn requires<A>(_a: A) {
+pub const fn requires<A>(_a: A) {
     unimplemented!();
 }
 
 // Can only appear at beginning of function body
 #[proof]
-pub fn ensures<A>(_a: A) {
+pub const fn ensures<A>(_a: A) {
     unimplemented!();
 }
 
@@ -259,7 +260,7 @@ impl<A> Ghost<A> {
     #[doc(hidden)]
     #[verifier(external)]
     #[inline(always)]
-    pub fn assume_new() -> Self {
+    pub const fn assume_new() -> Self {
         Ghost { phantom: PhantomData }
     }
 
@@ -635,7 +636,7 @@ pub fn mul<IntegerType: Integer>(_left: IntegerType, _right: IntegerType) -> Int
 
 // represent "expr as typ", including converting to and from int and nat
 #[spec]
-pub fn spec_cast_integer<From: Integer, To: Integer>(_from: From) -> To {
+pub const fn spec_cast_integer<From: Integer, To: Integer>(_from: From) -> To {
     unimplemented!()
 }
 
