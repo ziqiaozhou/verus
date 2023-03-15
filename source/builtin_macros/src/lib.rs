@@ -35,7 +35,13 @@ pub fn verus(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     c*/
 }
 
-static mut COUNT: i32 = 0;
+#[proc_macro_attribute]
+pub fn verus_fn(_attribute: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    // Parse the input tokens into a syntax tree.
+    let c = syntax::rewrite_fn_item(item, true, true);
+    c
+}
+
 #[proc_macro]
 pub fn verus_old_todo_replace_this(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     syntax::rewrite_items(input, false, true)

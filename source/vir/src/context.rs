@@ -187,6 +187,9 @@ impl GlobalCtx {
         for function in krate.functions.iter() {
             if let FunctionKind::TraitMethodImpl { method, datatype, .. } = &function.x.kind {
                 let key = (method.clone(), datatype.clone());
+                if method_map.contains_key(&key) {
+                    println!("no key {:?}", key);
+                }
                 assert!(!method_map.contains_key(&key));
                 method_map.insert(key, function.x.name.clone());
             }

@@ -45,6 +45,7 @@ enum InsideArith {
 }
 
 struct Visitor {
+    verus_fn: bool,
     // TODO: this should always be true
     use_spec_traits: bool,
     // TODO: this should always be true
@@ -118,7 +119,18 @@ impl Visitor {
         is_trait: bool,
     ) -> Vec<Stmt> {
         let mut stmts: Vec<Stmt> = Vec::new();
-
+        let mut default_inside_ghost: u32 = 0;
+        if self.verus_fn {
+            for attr in attrs.iter() {
+                let ident = get_ident_from_path(&attr.path);
+                let ident = ident.first().unwrap();
+                if ident == "spec" {
+                    default_inside_ghost = 1;
+                } else if ident == "proof" {
+                    default_inside_ghost = 1;
+                }
+            } 
+        }
         let inside_bitvector = if attrs.len() == 1 {
             let attr = attrs.first().unwrap();
             let arg = get_arg_from_verifier_attr(&attr);
@@ -198,7 +210,7 @@ impl Visitor {
         };
 
         let (inside_ghost, mode_attrs): (u32, Vec<Attribute>) = match &sig.mode {
-            FnMode::Default => (0, vec![]),
+            FnMode::Default => (default_inside_ghost, vec![]),
             FnMode::Spec(token) => (1, vec![mk_empty_attr(token.spec_token.span, "spec")]),
             FnMode::SpecChecked(token) => (
                 1,
@@ -876,7 +888,9 @@ impl VisitMut for Visitor {
         let do_replace = match &expr {
             Expr::Lit(ExprLit { lit: Lit::Int(..), .. }) if use_spec_traits => true,
             Expr::Cast(..) if use_spec_traits => true,
-            Expr::Index(..) if use_spec_traits => true,
+            Expr::Index(..) if use_spec_traits => {
+                true
+            },
             Expr::Unary(ExprUnary { op: UnOp::Forall(..), .. }) => true,
             Expr::Unary(ExprUnary { op: UnOp::Exists(..), .. }) => true,
             Expr::Unary(ExprUnary { op: UnOp::Choose(..), .. }) => true,
@@ -1051,7 +1065,7 @@ impl VisitMut for Visitor {
                     let view_call = quote_spanned!(at_token.span => .view());
                     let span = view.span();
                     let base = view.expr;
-                    *expr = Expr::Verbatim(quote_spanned!(span => (#base#view_call)));
+                    *expr = Expr::Verbatim(quote_spanned!(span => #base#view_call));
                 }
                 Expr::View(view) => {
                     assert!(self.assign_to);
@@ -1548,6 +1562,32 @@ impl quote::ToTokens for MacroInvoke {
     }
 }
 
+pub(crate) fn rewrite_fn_item(
+    stream: proc_macro::TokenStream,
+    use_spec_traits: bool,
+    verus_macro_attr: bool,
+) -> proc_macro::TokenStream {
+    use quote::ToTokens;
+    let mut item: ItemFn = parse_macro_input!(stream as syn_verus::ItemFn);
+    let mut new_stream = TokenStream::new();
+    let mut visitor = Visitor {
+        verus_fn: true,
+        use_spec_traits,
+        inside_ghost: 1,
+        inside_type: 0,
+        inside_arith: InsideArith::None,
+        assign_to: false,
+        rustdoc: env_rustdoc(),
+        inside_bitvector: false,
+        verus_macro_attr,
+    };
+    visitor.visit_item_fn_mut(&mut item);
+    visitor.inside_arith = InsideArith::None;
+    item.to_tokens(&mut new_stream);
+    proc_macro::TokenStream::from(new_stream)
+}
+
+
 pub(crate) fn rewrite_items(
     stream: proc_macro::TokenStream,
     use_spec_traits: bool,
@@ -1558,6 +1598,7 @@ pub(crate) fn rewrite_items(
     let items: Items = parse_macro_input!(stream as Items);
     let mut new_stream = TokenStream::new();
     let mut visitor = Visitor {
+        verus_fn: false,
         use_spec_traits,
         inside_ghost: 0,
         inside_type: 0,
@@ -1585,6 +1626,7 @@ pub(crate) fn rewrite_expr(
     let mut expr: Expr = parse_macro_input!(stream as Expr);
     let mut new_stream = TokenStream::new();
     let mut visitor = Visitor {
+        verus_fn: false,
         use_spec_traits: true,
         verus_macro_attr: true,
         inside_ghost: if inside_ghost { 1 } else { 0 },
@@ -1663,6 +1705,7 @@ pub(crate) fn proof_macro_exprs(
     let mut invoke: MacroInvoke = parse_macro_input!(stream as MacroInvoke);
     let mut new_stream = TokenStream::new();
     let mut visitor = Visitor {
+        verus_fn: false,
         use_spec_traits: true,
         verus_macro_attr: true,
         inside_ghost: if inside_ghost { 1 } else { 0 },
