@@ -513,7 +513,7 @@ fn mk_typ_args<'tcx>(
                 typ_args.push(erase_ty(ctxt, state, ty));
             }
             GenericArgKind::Lifetime(_) => {}
-            _ => panic!("typ_arg"),
+            _ => panic!("typ_arg: {} ", typ_arg),
         }
     }
     typ_args

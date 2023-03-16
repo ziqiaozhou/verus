@@ -17,8 +17,17 @@ use vstd::{*, vec::*, seq::*, modes::*};
 fn main() {
 }
 
+pub const MAX_SIZE:usize = 15usize;
 verus! {
+    #[verifier(external_body)]
+    #[repr(C, packed)]
+    pub struct Array<#[verifier(maybe_negative)] T, #[verifier(maybe_negative)] const N: usize> {
+        pub array: [T; N],
+    }
 
+    pub open spec fn test(arr: Array<u64, MAX_SIZE>) -> Array<u64, MAX_SIZE> {
+        arr
+    }
 /// functions may be declared exec (default), proof, or spec, which contain
 /// exec code, proof code, and spec code, respectively.
 ///   - exec code: compiled, may have requires/ensures
