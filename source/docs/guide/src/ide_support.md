@@ -7,7 +7,7 @@ The steps below walk you through compiling a Verus-specific version of rust-anal
 
 #### 1. Compile custom rust-analyzer
 
-1. Clone the repository: `git clone https://github.com/verus-lang/rust-analyzer/tree/november-08-2022`  
+1. Clone the repository: `git clone https://github.com/verus-lang/rust-analyzer.git`  
 2. `cd rust-analyzer`
 3. Compile the rust-analyzer binary: `cargo xtask dist`
 4. Unzip the generated file (e.g. `gunzip ./dist/rust-analyzer-x86_64-apple-darwin.gz`)
@@ -38,6 +38,18 @@ For example:
     "--error-format=json",
 ],
 ```
+
+For VS Code running in WSL, the `rust-analyzer-server.path` and
+`rust-analyzer.checkOnSave.overrideCommand` settings described above
+have to be set in two different files. The `rust-analyzer-server.path`
+setting needs to be in `~/.vscode-server/data/Machine/settings.json`,
+which you can open in VS Code by pressing F1 and running the command
+`Preferences: Open Remote Settings (JSON)`.  The
+`rust-analyzer.checkOnSave.overrideCommand` setting needs to be in
+your local settings file, named something like
+`/C:/Users/lorch/AppData/Roaming/Code/User/settings.json`. You can
+open this file in VS Code by pressing F1 and running the command
+`Preferences: Open User Settings (JSON)`.
 
 
 #### 3. Other IDEs

@@ -45,6 +45,7 @@ fn check_trigger_expr(
             ExpX::Call(..)
             | ExpX::CallLambda(..)
             | ExpX::UnaryOpr(UnaryOpr::Field { .. }, _)
+            | ExpX::UnaryOpr(UnaryOpr::IsVariant { .. }, _)
             | ExpX::Unary(UnaryOp::Trigger(_), _) => {}
             // allow triggers for bitvector operators
             ExpX::Binary(BinaryOp::Bitwise(_), _, _) | ExpX::Unary(UnaryOp::BitNot, _) => {}
@@ -125,6 +126,7 @@ fn check_trigger_expr(
                     | UnaryOpr::TupleField { .. }
                     | UnaryOpr::Field { .. }
                     | UnaryOpr::Height
+                    | UnaryOpr::CustomErr(_)
                     | UnaryOpr::IntegerTypeBound(
                         IntegerTypeBoundKind::SignedMin | IntegerTypeBoundKind::ArchWordBits,
                         _,

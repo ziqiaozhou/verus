@@ -1937,6 +1937,7 @@ impl Hash for Local {
     {
         self.attrs.hash(state);
         self.tracked.hash(state);
+        self.ghost.hash(state);
         self.pat.hash(state);
         self.init.hash(state);
     }
@@ -2547,6 +2548,7 @@ impl Hash for Recommends {
         H: Hasher,
     {
         self.exprs.hash(state);
+        self.via.hash(state);
     }
 }
 #[cfg_attr(doc_cfg, doc(cfg(feature = "extra-traits")))]
@@ -2596,10 +2598,22 @@ impl Hash for Signature {
         self.inputs.hash(state);
         self.variadic.hash(state);
         self.output.hash(state);
+        self.prover.hash(state);
         self.requires.hash(state);
         self.recommends.hash(state);
         self.ensures.hash(state);
         self.decreases.hash(state);
+    }
+}
+#[cfg_attr(doc_cfg, doc(cfg(feature = "extra-traits")))]
+impl Hash for SignatureDecreases {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.decreases.hash(state);
+        self.when.hash(state);
+        self.via.hash(state);
     }
 }
 #[cfg_attr(doc_cfg, doc(cfg(feature = "extra-traits")))]

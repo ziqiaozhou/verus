@@ -4,13 +4,15 @@
 use builtin_macros::*;
 #[allow(unused_imports)]
 use builtin::*;
-#[allow(unused_imports)]
-use pervasive::option::*;
+
+#[cfg(not(vstd_todo))]
 mod pervasive;
+#[cfg(not(vstd_todo))]
 #[allow(unused_imports)]
-use crate::pervasive::modes::*;
-#[allow(unused_imports)]
-use crate::pervasive::{*, seq::*, vec::*};
+use crate::pervasive::{*, seq::*, vec::*, modes::*, option::*};
+
+#[cfg(vstd_todo)]
+use vstd::option::*;
 
 verus!{
 
@@ -310,6 +312,18 @@ proof fn test_rec() {
   reveal_with_fuel(is_even, 10);
   assert(is_even(1));
 //^^^^^^ ^^^^^^^^^^
+}
+
+spec fn are_equal(x: int, y: int, z: int, w: int) -> bool {
+    #[verifier(custom_err("integers fail to be equal"))]
+    (x == y)
+    &&
+    #[verifier(custom_err("this ain't right. probably."))]
+    (z <= w)
+}
+
+proof fn proof_test_are_equal(x: int, y: int, z: int, w: int) {
+    assert(are_equal(x, y, z, w));
 }
 
 

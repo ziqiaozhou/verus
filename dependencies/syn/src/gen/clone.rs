@@ -1500,6 +1500,7 @@ impl Clone for Local {
             attrs: self.attrs.clone(),
             let_token: self.let_token.clone(),
             tracked: self.tracked.clone(),
+            ghost: self.ghost.clone(),
             pat: self.pat.clone(),
             init: self.init.clone(),
             semi_token: self.semi_token.clone(),
@@ -1996,6 +1997,7 @@ impl Clone for Recommends {
         Recommends {
             token: self.token.clone(),
             exprs: self.exprs.clone(),
+            via: self.via.clone(),
         }
     }
 }
@@ -2038,10 +2040,21 @@ impl Clone for Signature {
             inputs: self.inputs.clone(),
             variadic: self.variadic.clone(),
             output: self.output.clone(),
+            prover: self.prover.clone(),
             requires: self.requires.clone(),
             recommends: self.recommends.clone(),
             ensures: self.ensures.clone(),
             decreases: self.decreases.clone(),
+        }
+    }
+}
+#[cfg_attr(doc_cfg, doc(cfg(feature = "clone-impls")))]
+impl Clone for SignatureDecreases {
+    fn clone(&self) -> Self {
+        SignatureDecreases {
+            decreases: self.decreases.clone(),
+            when: self.when.clone(),
+            via: self.via.clone(),
         }
     }
 }

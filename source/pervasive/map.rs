@@ -5,7 +5,11 @@ use builtin_macros::*;
 #[allow(unused_imports)]
 use crate::pervasive::*;
 #[allow(unused_imports)]
+#[cfg(not(vstd_build_todo))]
 use crate::pervasive::set::*;
+#[allow(unused_imports)]
+#[cfg(vstd_build_todo)]
+use crate::set::*;
 use core::marker;
 
 verus! {
@@ -105,6 +109,12 @@ impl<K, V> Map<K, V> {
     #[verifier(inline)]
     pub open spec fn contains_key(self, k: K) -> bool {
         self.dom().contains(k)
+    }
+
+    /// Returns true if the value `v` is in the map of `self`.
+
+    pub open spec fn contains_value(self, v: V) -> bool {
+        exists|i: K| #[trigger] self.dom().contains(i) && self[i] == v
     }
 
     /// Returns true if the key `k` is in the domain of `self`, and it maps to the value `v`.
@@ -209,6 +219,16 @@ impl<K, V> Map<K, V> {
     }
 
     #[verifier(external_body)]
+    pub proof fn tracked_borrow(tracked &self, key: K) -> (tracked v: &V)
+        requires
+            self.dom().contains(key),
+        ensures
+            *v === self.index(key),
+    {
+        unimplemented!();
+    }
+
+    #[verifier(external_body)]
     pub proof fn tracked_map_keys<J>(
         tracked old_map: Map<K, V>,
         key_map: Map<J, K>
@@ -294,11 +314,22 @@ pub proof fn axiom_map_ext_equal<K, V>(m1: Map<K, V>, m2: Map<K, V>)
 
 // Macros
 
+#[cfg(not(vstd_build_todo))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! map_internal {
     [$($key:expr => $value:expr),* $(,)?] => {
         $crate::pervasive::map::Map::empty()
+            $(.insert($key, $value))*
+    }
+}
+
+#[cfg(vstd_build_todo)]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! map_internal {
+    [$($key:expr => $value:expr),* $(,)?] => {
+        $crate::map::Map::empty()
             $(.insert($key, $value))*
     }
 }
@@ -310,10 +341,19 @@ macro_rules! map_internal {
 /// Note that this does _not_ require all keys to be distinct. In the case that two
 /// or more keys are equal, the resulting map uses the value of the rightmost entry.
 
+#[cfg(not(vstd_build_todo))]
 #[macro_export]
 macro_rules! map {
     [$($tail:tt)*] => {
         ::builtin_macros::verus_proof_macro_exprs!($crate::pervasive::map::map_internal!($($tail)*))
+    };
+}
+
+#[cfg(vstd_build_todo)]
+#[macro_export]
+macro_rules! map {
+    [$($tail:tt)*] => {
+        ::builtin_macros::verus_proof_macro_exprs!($crate::map::map_internal!($($tail)*))
     };
 }
 
@@ -342,7 +382,7 @@ pub use map;
 ///     ensures m.insert(k, v).remove(k) == m
 /// {
 ///     let m2 = m.insert(k, v).remove(k);
-///     assert_maps_equal!(m, m2);
+///     assert_maps_equal!(m == m2);
 ///     assert(m == m2);
 /// }
 /// ```
@@ -359,7 +399,7 @@ pub use map;
 ///         |key: u64| key < 32,
 ///         |key: u64| 5 | key);
 /// 
-///     assert_maps_equal!(m1, m2, key => {
+///     assert_maps_equal!(m1 == m2, key => {
 ///         // Show that the domains of m1 and m2 are the same by showing their predicates
 ///         // are equivalent.
 ///         assert_bit_vector((key & 31 == key) <==> (key < 32));
@@ -371,6 +411,7 @@ pub use map;
 /// }
 /// ```
 
+#[cfg(not(vstd_build_todo))]
 #[macro_export]
 macro_rules! assert_maps_equal {
     [$($tail:tt)*] => {
@@ -378,21 +419,69 @@ macro_rules! assert_maps_equal {
     };
 }
 
+#[cfg(vstd_build_todo)]
+#[macro_export]
+macro_rules! assert_maps_equal {
+    [$($tail:tt)*] => {
+        ::builtin_macros::verus_proof_macro_exprs!($crate::map::assert_maps_equal_internal!($($tail)*))
+    };
+}
+
+#[cfg(not(vstd_build_todo))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! assert_maps_equal_internal {
+    (::builtin::spec_eq($m1:expr, $m2:expr)) => {
+        assert_maps_equal_internal!($m1, $m2)
+    };
+    (::builtin::spec_eq($m1:expr, $m2:expr), $k:ident $( : $t:ty )? => $bblock:block) => {
+        assert_maps_equal_internal!($m1, $m2, $k $( : $t )? => $bblock)
+    };
     ($m1:expr, $m2:expr $(,)?) => {
         assert_maps_equal_internal!($m1, $m2, key => { })
     };
     ($m1:expr, $m2:expr, $k:ident $( : $t:ty )? => $bblock:block) => {
-        #[spec] let m1 = $crate::pervasive::map::check_argument_is_map($m1);
-        #[spec] let m2 = $crate::pervasive::map::check_argument_is_map($m2);
+        #[verifier::spec] let m1 = $crate::pervasive::map::check_argument_is_map($m1);
+        #[verifier::spec] let m2 = $crate::pervasive::map::check_argument_is_map($m2);
         ::builtin::assert_by(::builtin::equal(m1, m2), {
             ::builtin::assert_forall_by(|$k $( : $t )?| {
                 // TODO better error message here: show the individual conjunct that fails,
                 // and maybe give an error message in english as well
                 ::builtin::ensures([
-                    ::builtin::imply(#[trigger] m1.dom().contains($k), m2.dom().contains($k))
+                    ::builtin::imply(#[verifier(trigger)] m1.dom().contains($k), m2.dom().contains($k))
+                    && ::builtin::imply(m2.dom().contains($k), m1.dom().contains($k))
+                    && ::builtin::imply(m1.dom().contains($k) && m2.dom().contains($k),
+                        ::builtin::equal(m1.index($k), m2.index($k)))
+                ]);
+                { $bblock }
+            });
+            $crate::pervasive::assert(m1.ext_equal(m2));
+        });
+    }
+}
+
+#[cfg(vstd_build_todo)]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! assert_maps_equal_internal {
+    (::builtin::spec_eq($m1:expr, $m2:expr)) => {
+        assert_maps_equal_internal!($m1, $m2)
+    };
+    (::builtin::spec_eq($m1:expr, $m2:expr), $k:ident $( : $t:ty )? => $bblock:block) => {
+        assert_maps_equal_internal!($m1, $m2, $k $( : $t )? => $bblock)
+    };
+    ($m1:expr, $m2:expr $(,)?) => {
+        assert_maps_equal_internal!($m1, $m2, key => { })
+    };
+    ($m1:expr, $m2:expr, $k:ident $( : $t:ty )? => $bblock:block) => {
+        #[verifier::spec] let m1 = $crate::map::check_argument_is_map($m1);
+        #[verifier::spec] let m2 = $crate::map::check_argument_is_map($m2);
+        ::builtin::assert_by(::builtin::equal(m1, m2), {
+            ::builtin::assert_forall_by(|$k $( : $t )?| {
+                // TODO better error message here: show the individual conjunct that fails,
+                // and maybe give an error message in english as well
+                ::builtin::ensures([
+                    ::builtin::imply(#[verifier(trigger)] m1.dom().contains($k), m2.dom().contains($k))
                     && ::builtin::imply(m2.dom().contains($k), m1.dom().contains($k))
                     && ::builtin::imply(m1.dom().contains($k) && m2.dom().contains($k),
                         ::builtin::equal(m1.index($k), m2.index($k)))
@@ -410,7 +499,7 @@ pub use assert_maps_equal;
 
 impl<K, V> Map<K, V> {
     pub proof fn tracked_map_keys_in_place(
-        #[proof] &mut self,
+        #[verifier::proof] &mut self,
         key_map: Map<K, K>
     )
     requires
@@ -424,9 +513,9 @@ impl<K, V> Map<K, V> {
             self.dom().contains(j) &&
             #[trigger] self.index(j) == old(self).index(key_map.index(j)),
     {
-        #[proof] let mut tmp = Self::tracked_empty();
+        #[verifier::proof] let mut tmp = Self::tracked_empty();
         crate::pervasive::modes::tracked_swap(&mut tmp, self);
-        #[proof] let mut tmp = Self::tracked_map_keys(tmp, key_map);
+        #[verifier::proof] let mut tmp = Self::tracked_map_keys(tmp, key_map);
         crate::pervasive::modes::tracked_swap(&mut tmp, self);
     }
 }

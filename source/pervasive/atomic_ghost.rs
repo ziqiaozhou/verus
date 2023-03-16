@@ -23,8 +23,16 @@ macro_rules! declare_atomic_type {
         impl<K, G, Pred> InvariantPredicate<(K, int), ($perm_ty, G)> for $atomic_pred_ty<Pred>
             where Pred: AtomicInvariantPredicate<K, $value_ty, G>
         {
+            #[cfg(verus_macro_erase_ghost)]
             #[verifier(publish)]
             #[spec]
+            fn inv(k_loc: (K, int), perm_g: ($perm_ty, G)) -> bool {
+                panic!()
+            }
+
+            #[cfg(not(verus_macro_erase_ghost))]
+            #[verifier(publish)] /* vattr */
+            #[verifier::spec]
             fn inv(k_loc: (K, int), perm_g: ($perm_ty, G)) -> bool {
                 let (k, loc) = k_loc;
                 let (perm, g) = perm_g;
@@ -42,44 +50,59 @@ macro_rules! declare_atomic_type {
         ///
         /// See the [`atomic_with_ghost!`] documentation for usage information.
 
-        pub struct $at_ident<K, #[verifier(maybe_negative)] G, Pred>
+        pub struct $at_ident<K, G, Pred>
             //where Pred: AtomicInvariantPredicate<K, $value_ty, G>
         {
             #[doc(hidden)]
             pub patomic: $patomic_ty,
 
             #[doc(hidden)]
-            #[proof] pub atomic_inv: AtomicInvariant<(K, int), ($perm_ty, G), $atomic_pred_ty<Pred>>,
+            #[verifier::proof] pub atomic_inv: AtomicInvariant<(K, int), ($perm_ty, G), $atomic_pred_ty<Pred>>,
         }
 
         impl<K, G, Pred> $at_ident<K, G, Pred>
             where Pred: AtomicInvariantPredicate<K, $value_ty, G>
         {
-            #[spec] #[verifier(publish)]
+            #[cfg(not(verus_macro_erase_ghost))]
+            #[verifier::spec] #[verifier(publish)] /* vattr */
             pub fn well_formed(&self) -> bool {
                 self.atomic_inv.constant().1 == self.patomic.id()
             }
 
-            #[spec] #[verifier(publish)]
+            #[cfg(not(verus_macro_erase_ghost))]
+            #[verifier::spec] #[verifier(publish)] /* vattr */
             pub fn constant(&self) -> K {
                 self.atomic_inv.constant().0
             }
 
             #[inline(always)]
-            pub fn new(#[spec] k: K, u: $value_ty, #[proof] g: G) -> Self {
+            pub fn new(#[verifier::spec] k: K, u: $value_ty, #[verifier::proof] g: G) -> Self {
+                #[cfg(not(verus_macro_erase_ghost))]
                 requires(Pred::atomic_inv(k, u, g));
+                #[cfg(not(verus_macro_erase_ghost))]
                 ensures(|t: Self| t.well_formed() && equal(t.constant(), k));
 
                 let (patomic, Proof(perm)) = $patomic_ty::new(u);
-                #[proof] let pair = (perm, g);
-                #[proof] let atomic_inv = AtomicInvariant::new(
-                    (k, patomic.id()),
-                    pair,
-                    spec_literal_int("0"));
+                #[cfg(not(verus_macro_erase_ghost))]
+                {
+                    #[verifier::proof] let pair = (perm, g);
+                    #[verifier::proof] let atomic_inv = AtomicInvariant::new(
+                        (k, patomic.id()),
+                        pair,
+                        spec_literal_int("0"));
 
-                $at_ident {
-                    patomic,
-                    atomic_inv,
+                    $at_ident {
+                        patomic,
+                        atomic_inv,
+                    }
+                }
+                #[cfg(verus_macro_erase_ghost)]
+                {
+                    let atomic_inv = AtomicInvariant::assume_new();
+                    $at_ident {
+                        patomic,
+                        atomic_inv,
+                    }
                 }
             }
 
@@ -108,11 +131,13 @@ declare_atomic_type!(AtomicU64, PAtomicU64, PermissionU64, u64, AtomicPredU64);
 declare_atomic_type!(AtomicU32, PAtomicU32, PermissionU32, u32, AtomicPredU32);
 declare_atomic_type!(AtomicU16, PAtomicU16, PermissionU16, u16, AtomicPredU16);
 declare_atomic_type!(AtomicU8, PAtomicU8, PermissionU8, u8, AtomicPredU8);
+declare_atomic_type!(AtomicUsize, PAtomicUsize, PermissionUsize, usize, AtomicPredUsize);
 
 declare_atomic_type!(AtomicI64, PAtomicI64, PermissionI64, i64, AtomicPredI64);
 declare_atomic_type!(AtomicI32, PAtomicI32, PermissionI32, i32, AtomicPredI32);
 declare_atomic_type!(AtomicI16, PAtomicI16, PermissionI16, i16, AtomicPredI16);
 declare_atomic_type!(AtomicI8, PAtomicI8, PermissionI8, i8, AtomicPredI8);
+declare_atomic_type!(AtomicIsize, PAtomicIsize, PermissionIsize, isize, AtomicPredIsize);
 
 declare_atomic_type!(AtomicBool, PAtomicBool, PermissionBool, bool, AtomicPredBool);
 
@@ -230,270 +255,273 @@ declare_atomic_type!(AtomicBool, PAtomicBool, PermissionBool, bool, AtomicPredBo
 
 #[macro_export]
 macro_rules! atomic_with_ghost {
-    ($atomic:expr => $operation_name:ident ($($operands:tt)*);
-        update $prev:ident -> $next:ident;
-        returning $ret:ident;
-        ghost $g:ident => $b:block
-    ) => {
-        atomic_with_ghost_inner!($operation_name, $atomic, ($($operands)*), $prev, $next, $ret, $g, $b)
-    };
-    ($atomic:expr => $operation_name:ident ($($operands:tt)*);
-        update $prev:ident -> $next:ident;
-        ghost $g:ident => $b:block
-    ) => {
-        atomic_with_ghost_inner!($operation_name, $atomic, ($($operands)*), $prev, $next, _, $g, $b)
-    };
-    ($atomic:expr => $operation_name:ident ($($operands:tt)*);
-        returning $ret:ident;
-        ghost $g:ident => $b:block
-    ) => {
-        atomic_with_ghost_inner!($operation_name, $atomic, ($($operands)*), _, _, $ret, $g, $b)
-    };
-    ($atomic:expr => $operation_name:ident ($($operands:tt)*);
-        ghost $g:ident => $b:block
-    ) => {
-        atomic_with_ghost_inner!($operation_name, $atomic, ($($operands)*), _, _, _, $g, $b)
-    };
+    ($($tokens:tt)*) => {
+        // The helper is used to parse things using Verus syntax
+        // The helper then calls atomic_with_ghost_inner, below:
+        ::builtin_macros::atomic_with_ghost_helper!(
+            crate::pervasive::atomic_ghost::atomic_with_ghost_inner,
+            $($tokens)*)
+    }
 }
+
+pub use atomic_with_ghost;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_inner {
     (load, $e:expr, (), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_load!($e, $prev, $next, $ret, $g, $b)
+        crate::pervasive::atomic_ghost::atomic_with_ghost_load!($e, $prev, $next, $ret, $g, $b)
     };
     (store, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_store!($e, $operand, $prev, $next, $ret, $g, $b)
+        crate::pervasive::atomic_ghost::atomic_with_ghost_store!($e, $operand, $prev, $next, $ret, $g, $b)
     };
     (swap, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             swap, $e, $operand, $prev, $next, $ret, $g, $b)
     };
 
     (fetch_or, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_or, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_and, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_and, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_xor, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_xor, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_nand, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_nand, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_max, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_max, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_min, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_min, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_add_wrapping, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_add_wrapping, $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_sub_wrapping, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_1_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_1_operand!(
             fetch_sub_wrapping, $e, $operand, $prev, $next, $ret, $g, $b)
     };
 
     (fetch_add, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_fetch_add!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_fetch_add!(
             $e, $operand, $prev, $next, $ret, $g, $b)
     };
     (fetch_sub, $e:expr, ($operand:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_fetch_sub!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_fetch_sub!(
             $e, $operand, $prev, $next, $ret, $g, $b)
     };
 
     (compare_exchange, $e:expr, ($operand1:expr, $operand2:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_2_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_2_operand!(
             compare_exchange, $e, $operand1, $operand2, $prev, $next, $ret, $g, $b)
     };
     (compare_exchange_weak, $e:expr, ($operand1:expr, $operand2:expr), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_update_with_2_operand!(
+        crate::pervasive::atomic_ghost::atomic_with_ghost_update_with_2_operand!(
             compare_exchange_weak, $e, $operand1, $operand2, $prev, $next, $ret, $g, $b)
     };
     (no_op, $e:expr, (), $prev:pat, $next:pat, $ret:pat, $g:ident, $b:block) => {
-        atomic_with_ghost_no_op!($e, $prev, $next, $ret, $g, $b)
+        crate::pervasive::atomic_ghost::atomic_with_ghost_no_op!($e, $prev, $next, $ret, $g, $b)
     };
 }
+
+pub use atomic_with_ghost_inner;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_store {
     ($e:expr, $operand:expr, $prev:pat, $next:pat, $res:pat, $g:ident, $b:block) => {
-        {
-            let atomic = &$e;
+        ::builtin_macros::verus_exec_expr!{ {
+            let atomic = &($e);
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (mut perm, mut $g) = pair;
-                #[spec] let $prev = perm.view().value;
+                #[verifier::proof] let (mut perm, mut $g) = pair;
+                #[verifier::spec] let $prev = perm.view().value;
                 atomic.patomic.store(&mut perm, $operand);
-                #[spec] let $next = perm.view().value;
-                #[spec] let $res = ();
+                #[verifier::spec] let $next = perm.view().value;
+                #[verifier::spec] let $res = ();
 
-                { $b }
+                proof { $b }
 
                 pair = (perm, $g);
             });
-        }
+        } }
     }
 }
+pub use atomic_with_ghost_store;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_load {
     ($e:expr, $prev:pat, $next: pat, $res: pat, $g:ident, $b:block) => {
-        {
+        ::builtin_macros::verus_exec_expr!{ {
             let result;
-            let atomic = &$e;
+            let atomic = &($e);
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (perm, mut $g) = pair;
+                #[verifier::proof] let (perm, mut $g) = pair;
                 result = atomic.patomic.load(&perm);
-                #[spec] let $res = result;
-                #[spec] let $prev = result;
-                #[spec] let $next = result;
+                #[verifier::spec] let $res = result;
+                #[verifier::spec] let $prev = result;
+                #[verifier::spec] let $next = result;
 
-                { $b }
+                proof { $b }
 
                 pair = (perm, $g);
             });
             result
-        }
+        } }
     }
 }
+
+pub use atomic_with_ghost_load;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_no_op {
     ($e:expr, $prev:pat, $next: pat, $res: pat, $g:ident, $b:block) => {
-        {
-            let atomic = &$e;
+        ::builtin_macros::verus_exec_expr!{ {
+            let atomic = &($e);
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (perm, mut $g) = pair;
-                #[spec] let $res = result;
-                #[spec] let $prev = result;
-                #[spec] let $next = result;
+                #[verifier::proof] let (perm, mut $g) = pair;
+                #[verifier::spec] let $res = result;
+                #[verifier::spec] let $prev = result;
+                #[verifier::spec] let $next = result;
 
-                { $b }
+                proof { $b }
 
                 pair = (perm, $g);
             });
-        }
+        } }
     }
 }
+
+pub use atomic_with_ghost_no_op;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_update_with_1_operand {
     ($name:ident, $e:expr, $operand:expr, $prev:pat, $next:pat, $res: pat, $g:ident, $b:block) => {
-        {
+        ::builtin_macros::verus_exec_expr!{ {
             let result;
-            let atomic = &$e;
+            let atomic = &($e);
+            let operand = $operand;
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (mut perm, mut $g) = pair;
-                #[spec] let $prev = perm.view().value;
-                result = atomic.patomic.$name(&mut perm, $operand);
-                #[spec] let $res = result;
-                #[spec] let $next = perm.view().value;
+                #[verifier::proof] let (mut perm, mut $g) = pair;
+                #[verifier::spec] let $prev = perm.view().value;
+                result = atomic.patomic.$name(&mut perm, operand);
+                #[verifier::spec] let $res = result;
+                #[verifier::spec] let $next = perm.view().value;
 
-                { $b }
+                proof { $b }
 
                 pair = (perm, $g);
             });
             result
-        }
+        } }
     }
 }
+
+pub use atomic_with_ghost_update_with_1_operand;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_update_with_2_operand {
     ($name:ident, $e:expr, $operand1:expr, $operand2:expr, $prev:pat, $next:pat, $res: pat, $g:ident, $b:block) => {
-        {
+        ::builtin_macros::verus_exec_expr!{ {
             let result;
-            let atomic = &$e;
+            let atomic = &($e);
+            let operand1 = $operand1;
+            let operand2 = $operand2;
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (mut perm, mut $g) = pair;
-                #[spec] let $prev = perm.view().value;
-                result = atomic.patomic.$name(&mut perm, $operand1, $operand2);
-                #[spec] let $res = result;
-                #[spec] let $next = perm.view().value;
+                #[verifier::proof] let (mut perm, mut $g) = pair;
+                #[verifier::spec] let $prev = perm.view().value;
+                result = atomic.patomic.$name(&mut perm, operand1, operand2);
+                #[verifier::spec] let $res = result;
+                #[verifier::spec] let $next = perm.view().value;
 
-                { $b }
+                proof { $b }
 
                 pair = (perm, $g);
             });
             result
-        }
+        } }
     }
 }
+
+pub use atomic_with_ghost_update_with_2_operand;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_update_fetch_add {
     ($e:expr, $operand:expr, $prev:pat, $next:pat, $res: pat, $g:ident, $b:block) => {
-        {
+        (::builtin_macros::verus_exec_expr!( {
             let result;
-            let atomic = &$e;
+            let atomic = &($e);
+            let operand = $operand;
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (mut perm, mut $g) = pair;
-                #[spec] let $prev = ::builtin::spec_cast_integer::<_, int>(perm.view().value);
-                let op = $operand;
-                #[spec] let computed =
-                    ::builtin::spec_cast_integer::<_, int>(perm.view().value) +
-                    ::builtin::spec_cast_integer::<_, int>(op);
-                #[spec] let $res = computed;
-                #[spec] let $next = computed;
+                #[verifier::proof] let (mut perm, mut $g) = pair;
 
-                { $b }
+                proof {
+                    #[verifier::spec] let $prev = perm.view().value as int;
+                    #[verifier::spec] let $res = perm.view().value as int;
+                    #[verifier::spec] let $next = perm.view().value as int + (operand as int);
 
-                result = atomic.patomic.fetch_add(&mut perm, op);
+                    { $b }
+                }
+
+                result = atomic.patomic.fetch_add(&mut perm, operand);
 
                 pair = (perm, $g);
             });
             result
-        }
+        } ))
     }
 }
+
+pub use atomic_with_ghost_update_fetch_add;
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! atomic_with_ghost_update_fetch_sub {
     ($e:expr, $operand:expr, $prev:pat, $next:pat, $res: pat, $g:ident, $b:block) => {
-        {
+        ::builtin_macros::verus_exec_expr!{ {
             let result;
-            let atomic = &$e;
+            let atomic = &($e);
+            let operand = $operand;
             crate::open_atomic_invariant!(&atomic.atomic_inv => pair => {
                 #[allow(unused_mut)]
-                #[proof] let (mut perm, mut $g) = pair;
-                #[spec] let $prev = ::builtin::spec_cast_integer::<_, int>(perm.view().value);
-                let op = $operand;
-                #[spec] let computed =
-                    ::builtin::spec_cast_integer::<_, int>(perm.view().value) -
-                    ::builtin::spec_cast_integer::<_, int>(op);
-                #[spec] let $res = computed;
-                #[spec] let $next = computed;
+                #[verifier::proof] let (mut perm, mut $g) = pair;
 
-                { $b }
+                proof {
+                    #[verifier::spec] let $prev = perm.view().value as int;
+                    #[verifier::spec] let $res = perm.view().value as int;
+                    #[verifier::spec] let $next = perm.view().value as int - (operand as int);
 
-                result = atomic.patomic.fetch_sub(&mut perm, op);
+                    { $b }
+                }
+
+                result = atomic.patomic.fetch_sub(&mut perm, operand);
 
                 pair = (perm, $g);
             });
             result
-        }
+        } }
     }
 }
+
+pub use atomic_with_ghost_update_fetch_sub;

@@ -5,8 +5,7 @@ use crate::{unsupported, unsupported_err_unless};
 use rustc_ast::Mutability;
 use rustc_hir::definitions::DefPath;
 use rustc_hir::{
-    GenericParam, GenericParamKind, Generics, HirId, ItemKind, QPath, TraitFn, TraitItemKind, Ty,
-    Visibility, VisibilityKind,
+    GenericParam, GenericParamKind, Generics, HirId, QPath, Ty, Visibility, VisibilityKind,
 };
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::ty::GenericParamDefKind;
@@ -24,15 +23,46 @@ use vir::ast::{GenericBoundX, IntRange, Path, PathX, Typ, TypBounds, TypX, Typs,
 use vir::ast_util::types_equal;
 use vir::def::unique_local_name;
 
-pub(crate) fn def_path_to_vir_path<'tcx>(tcx: TyCtxt<'tcx>, def_path: DefPath) -> Path {
-    let krate = if def_path.krate == LOCAL_CRATE {
+// TODO: eventually, this should just always be true
+thread_local! {
+    pub(crate) static MULTI_CRATE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+}
+
+pub(crate) fn def_path_to_vir_path<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    self_path: &Option<Path>,
+    def_path: DefPath,
+) -> Option<Path> {
+    let multi_crate = MULTI_CRATE.with(|m| m.load(std::sync::atomic::Ordering::Relaxed));
+    let mut krate = if def_path.krate == LOCAL_CRATE && !multi_crate {
         None
     } else {
         Some(Arc::new(tcx.crate_name(def_path.krate).to_string()))
     };
-    let segments =
-        Arc::new(def_path.data.iter().map(|d| Arc::new(format!("{}", d))).collect::<Vec<_>>());
-    Arc::new(PathX { krate, segments })
+    let mut segments: Vec<vir::ast::Ident> = Vec::new();
+    let mut already_impl: bool = false;
+    for d in def_path.data.iter() {
+        use rustc_hir::definitions::DefPathData;
+        match &d.data {
+            DefPathData::ValueNs(symbol) | DefPathData::TypeNs(symbol) => {
+                segments.push(Arc::new(symbol.to_string()));
+            }
+            DefPathData::Ctor => {
+                segments.push(Arc::new(vir::def::RUST_DEF_CTOR.to_string()));
+            }
+            DefPathData::Impl if self_path.is_some() => {
+                if already_impl {
+                    panic!("more than one Impl in the name {:?}", &def_path);
+                }
+                already_impl = true;
+                krate = self_path.as_ref().unwrap().krate.clone();
+                segments = (*self_path.as_ref().unwrap().segments).clone();
+            }
+            _ => return None,
+        }
+    }
+    Some(Arc::new(PathX { krate, segments: Arc::new(segments) }))
 }
 
 fn get_function_def_impl_item_node<'tcx>(
@@ -49,6 +79,7 @@ fn get_function_def_impl_item_node<'tcx>(
     }
 }
 
+/*
 pub(crate) fn get_function_def<'tcx>(
     tcx: TyCtxt<'tcx>,
     hir_id: rustc_hir::HirId,
@@ -67,6 +98,7 @@ pub(crate) fn get_function_def<'tcx>(
         })
         .expect("function expected")
 }
+*/
 
 pub(crate) fn typ_path_and_ident_to_vir_path<'tcx>(path: &Path, ident: vir::ast::Ident) -> Path {
     let mut path = (**path).clone();
@@ -108,13 +140,13 @@ pub(crate) fn fn_item_hir_id_to_self_path<'tcx>(tcx: TyCtxt<'tcx>, hir_id: HirId
             rustc_hir::TyKind::Path(QPath::Resolved(
                 None,
                 rustc_hir::Path { res: rustc_hir::def::Res::Def(_, self_def_id), .. },
-            )) => Some(def_path_to_vir_path(tcx, tcx.def_path(*self_def_id))),
+            )) => def_path_to_vir_path(tcx, &None, tcx.def_path(*self_def_id)),
             _ => {
                 // To handle cases like [T] which are not syntactically datatypes
                 // but converted into VIR datatypes.
 
                 let self_ty = tcx.type_of(def_id.to_def_id());
-                let vir_ty = mid_ty_to_vir_ghost(tcx, self_ty, false).0;
+                let vir_ty = mid_ty_to_vir_ghost(tcx, self_ty, true, false).0;
                 match &*vir_ty {
                     TypX::Datatype(p, _typ_args) => Some(p.clone()),
                     _ => panic!("impl type is not given by a path"),
@@ -125,7 +157,11 @@ pub(crate) fn fn_item_hir_id_to_self_path<'tcx>(tcx: TyCtxt<'tcx>, hir_id: HirId
     }
 }
 
-pub(crate) fn def_id_to_vir_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Path {
+pub(crate) fn def_id_self_to_vir_path<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    self_path: &Option<Path>,
+    def_id: DefId,
+) -> Option<Path> {
     // The path that rustc gives a DefId might be given in terms of an 'impl' path
     // However, it makes for a better path name to use the path to the *type*.
     // So first, we check if the given DefId is the definition of a fn inside an impl.
@@ -134,13 +170,32 @@ pub(crate) fn def_id_to_vir_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Path
         let hir = tcx.hir().local_def_id_to_hir_id(local_id);
         if get_function_def_impl_item_node(tcx, hir).is_some() {
             if let Some(ty_path) = fn_item_hir_id_to_self_path(tcx, hir) {
-                return typ_path_and_ident_to_vir_path(&ty_path, def_to_path_ident(tcx, def_id));
+                return Some(typ_path_and_ident_to_vir_path(
+                    &ty_path,
+                    def_to_path_ident(tcx, def_id),
+                ));
             }
         }
     }
     // Otherwise build a path based on the segments rustc gives us
     // without doing anything fancy.
-    def_path_to_vir_path(tcx, tcx.def_path(def_id))
+    def_path_to_vir_path(tcx, self_path, tcx.def_path(def_id))
+}
+
+pub(crate) fn def_id_self_to_vir_path_expect<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    self_path: &Option<Path>,
+    def_id: DefId,
+) -> Path {
+    if let Some(path) = def_id_self_to_vir_path(tcx, self_path, def_id) {
+        path
+    } else {
+        panic!("unhandled name {:?}", def_id)
+    }
+}
+
+pub(crate) fn def_id_to_vir_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Path {
+    def_id_self_to_vir_path_expect(tcx, &None, def_id)
 }
 
 pub(crate) fn def_to_path_ident<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> vir::ast::Ident {
@@ -263,16 +318,17 @@ pub(crate) fn mid_ty_simplify<'tcx>(
 pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: rustc_middle::ty::Ty<'tcx>,
+    as_datatype: bool,
     allow_mut_ref: bool,
 ) -> (Typ, bool) {
     match ty.kind() {
         TyKind::Bool => (Arc::new(TypX::Bool), false),
         TyKind::Uint(_) | TyKind::Int(_) => (Arc::new(TypX::Int(mk_range(ty))), false),
         TyKind::Ref(_, tys, rustc_ast::Mutability::Not) => {
-            mid_ty_to_vir_ghost(tcx, tys, allow_mut_ref)
+            mid_ty_to_vir_ghost(tcx, tys, as_datatype, allow_mut_ref)
         }
         TyKind::Ref(_, tys, rustc_ast::Mutability::Mut) if allow_mut_ref => {
-            mid_ty_to_vir_ghost(tcx, tys, allow_mut_ref)
+            mid_ty_to_vir_ghost(tcx, tys, as_datatype, allow_mut_ref)
         }
         TyKind::Param(param) if param.name == kw::SelfUpper => {
             (Arc::new(TypX::TypParam(vir::def::trait_self_type_param())), false)
@@ -285,12 +341,14 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
             (Arc::new(TypX::Tuple(Arc::new(vec![]))), false)
         }
         TyKind::Tuple(_) => {
-            let typs: Vec<Typ> =
-                ty.tuple_fields().map(|t| mid_ty_to_vir_ghost(tcx, t, allow_mut_ref).0).collect();
+            let typs: Vec<Typ> = ty
+                .tuple_fields()
+                .map(|t| mid_ty_to_vir_ghost(tcx, t, as_datatype, allow_mut_ref).0)
+                .collect();
             (Arc::new(TypX::Tuple(Arc::new(typs))), false)
         }
         TyKind::Slice(ty) => {
-            let typ = mid_ty_to_vir_ghost(tcx, ty, allow_mut_ref).0;
+            let typ = mid_ty_to_vir_ghost(tcx, ty, as_datatype, allow_mut_ref).0;
             let typs = Arc::new(vec![typ]);
             (Arc::new(TypX::Datatype(vir::def::slice_type(), typs)), false)
         }
@@ -298,7 +356,7 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
             let s = ty.to_string();
             let is_strslice =
                 tcx.is_diagnostic_item(Symbol::intern("pervasive::string::StrSlice"), *did);
-            if is_strslice {
+            if is_strslice && !as_datatype {
                 return (Arc::new(TypX::StrSlice), false);
             }
             // TODO use lang items instead of string comparisons
@@ -311,7 +369,7 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                     .iter()
                     .filter_map(|arg| match arg.unpack() {
                         rustc_middle::ty::subst::GenericArgKind::Type(t) => {
-                            Some(mid_ty_to_vir_ghost(tcx, t, allow_mut_ref))
+                            Some(mid_ty_to_vir_ghost(tcx, t, as_datatype, allow_mut_ref))
                         }
                         rustc_middle::ty::subst::GenericArgKind::Lifetime(_) => None,
                         rustc_middle::ty::subst::GenericArgKind::Const(cnst) => {
@@ -356,7 +414,7 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                 .inputs()
                 .skip_binder()
                 .iter()
-                .map(|t| mid_ty_to_vir_ghost(tcx, t, allow_mut_ref).0)
+                .map(|t| mid_ty_to_vir_ghost(tcx, t, as_datatype, allow_mut_ref).0)
                 .collect();
             assert!(args.len() == 1);
             let args = match &*args[0] {
@@ -364,7 +422,8 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                 _ => panic!("expected tuple type"),
             };
 
-            let ret = mid_ty_to_vir_ghost(tcx, sig.output().skip_binder(), allow_mut_ref).0;
+            let ret =
+                mid_ty_to_vir_ghost(tcx, sig.output().skip_binder(), as_datatype, allow_mut_ref).0;
             let id = def.as_local().unwrap().local_def_index.index();
             (Arc::new(TypX::AnonymousClosure(args, ret, id)), false)
         }
@@ -375,12 +434,20 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
     }
 }
 
+pub(crate) fn mid_ty_to_vir_datatype<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: rustc_middle::ty::Ty<'tcx>,
+    allow_mut_ref: bool,
+) -> Typ {
+    mid_ty_to_vir_ghost(tcx, ty, true, allow_mut_ref).0
+}
+
 pub(crate) fn mid_ty_to_vir<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: rustc_middle::ty::Ty<'tcx>,
     allow_mut_ref: bool,
 ) -> Typ {
-    mid_ty_to_vir_ghost(tcx, ty, allow_mut_ref).0
+    mid_ty_to_vir_ghost(tcx, ty, false, allow_mut_ref).0
 }
 
 pub(crate) fn mid_ty_const_to_vir<'tcx>(
@@ -391,9 +458,7 @@ pub(crate) fn mid_ty_const_to_vir<'tcx>(
     use rustc_middle::ty::ConstKind;
 
     let cnst = match cnst.val {
-        ConstKind::Unevaluated(unevaluated) => {
-            cnst.eval(tcx, tcx.param_env(unevaluated.def.did))
-        }
+        ConstKind::Unevaluated(unevaluated) => cnst.eval(tcx, tcx.param_env(unevaluated.def.did)),
         _ => cnst,
     };
     match cnst.val {

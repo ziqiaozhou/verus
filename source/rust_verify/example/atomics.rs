@@ -1,3 +1,5 @@
+// rust_verify/tests/example.rs vstd-todo
+
 #![allow(unused_imports)]
 use builtin::*;
 use builtin_macros::*;
@@ -19,14 +21,14 @@ struct_with_invariants!{
     }
 }
 
-#[verifier(returns(proof))]
+#[verifier(returns(proof))] /* vattr */
 fn take<T>(lock: &Lock<T>) -> T {
     requires(lock.well_formed());
 
     loop {
         invariant(lock.well_formed());
 
-        #[proof] let ghost_value: Option<T>;
+        #[verifier::proof] let ghost_value: Option<T>;
 
         let result = atomic_with_ghost!(
             &lock.field => compare_exchange(true, false);
@@ -52,9 +54,18 @@ fn take<T>(lock: &Lock<T>) -> T {
 
 struct VEqualG { }
 impl AtomicInvariantPredicate<(), u64, u64> for VEqualG {
-    #[spec] fn atomic_inv(k: (), v: u64, g: u64) -> bool {
+    #[verifier::spec] fn atomic_inv(k: (), v: u64, g: u64) -> bool {
         v == g
     }
+}
+
+verus!{
+proof fn proof_int(x: u64) -> (tracked y: u64)
+    ensures x == y
+{
+    assume(false);
+    proof_from_false()
+}
 }
 
 pub fn main() {
@@ -67,14 +78,14 @@ pub fn main() {
     // ato ~ fetch_or(19)
 
     atomic_with_ghost!(ato => fetch_or(19); ghost g => {
-        g = g | 19;
+        g = proof_int(g | 19);
     });
 
     atomic_with_ghost!(ato => fetch_or(23); update old_val -> new_val; ghost g => {
         assert(new_val == old_val | 23);
         assert(g == old_val);
 
-        g = g | 23;
+        g = proof_int(g | 23);
 
         assert(g == new_val);
     });
@@ -89,7 +100,7 @@ pub fn main() {
         assert(imply(ret.is_Err(), old_val != 20 && new_val == old_val
             && ret.get_Err_0() == old_val));
 
-        g = if g == 20 { 25 } else { g };
+        g = if g == 20 { proof_int(25) } else { g };
     });
 
     let res = atomic_with_ghost!( ato => load();
@@ -105,7 +116,7 @@ pub fn main() {
     => {
         assert(old_val == g);
         assert(new_val == 36);
-        g = 36;
+        g = proof_int(36);
     });
 
     atomic_with_ghost!( ato => store(36);
@@ -114,13 +125,13 @@ pub fn main() {
     => {
         assert(old_val == g);
         assert(new_val == 36);
-        g = 36;
+        g = proof_int(36);
     });
 
     atomic_with_ghost!( ato => store(36);
         ghost g
     => {
-        g = 36;
+        g = proof_int(36);
     });
 
 

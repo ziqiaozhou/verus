@@ -11,26 +11,23 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 struct Ctxt {
+    pub(crate) crate_names: Vec<String>,
     pub(crate) funs: HashMap<Fun, Function>,
     pub(crate) dts: HashMap<Path, Datatype>,
 }
 
 #[warn(unused_must_use)]
-fn check_typ(typ: &Arc<TypX>, span: &air::ast::Span) -> Result<(), VirErr> {
+fn check_typ(ctxt: &Ctxt, typ: &Arc<TypX>, span: &air::ast::Span) -> Result<(), VirErr> {
     crate::ast_visitor::typ_visitor_check(typ, &mut |t| {
         if let crate::ast::TypX::Datatype(path, _) = &**t {
             let PathX { krate, segments: _ } = &**path;
             match krate {
                 None => Ok(()),
-                Some(krate_name)
-                    if crate::def::SUPPORTED_CRATES.contains(&&krate_name.as_str()) =>
-                {
-                    Ok(())
-                }
+                Some(krate_name) if ctxt.crate_names.contains(&krate_name) => Ok(()),
                 Some(_) => err_str(
                     span,
                     &format!(
-                        "`{:}` is not supported (note: currently Verus does not support definitions external to the crate, including most features in std)",
+                        "type `{:}` is not supported (note: currently Verus does not support definitions external to the crate, including most features in std)",
                         path_as_rust_name(path)
                     ),
                 ),
@@ -141,7 +138,21 @@ fn check_one_expr(
                     }
                 }
             } else {
-                panic!("constructor of undefined datatype");
+                return err_str(
+                    &expr.span,
+                    &format!(
+                        "`{:}` is not supported (note: currently Verus does not support definitions external to the crate, including most features in std)",
+                        path_as_rust_name(path)
+                    ),
+                );
+            }
+        }
+        ExprX::UnaryOpr(UnaryOpr::CustomErr(_), e) => {
+            if !crate::ast_util::type_is_bool(&e.typ) {
+                return Err(error(
+                    "`custom_err` attribute only makes sense for bool expressions",
+                    &expr.span,
+                ));
             }
         }
         ExprX::UnaryOpr(UnaryOpr::Field(FieldOpr { datatype: path, variant, field }), _) => {
@@ -219,6 +230,18 @@ fn check_one_expr(
         }
         ExprX::ExecClosure { .. } => {
             crate::closures::check_closure_well_formed(expr)?;
+        }
+        ExprX::Fuel(f, _) => {
+            let f = check_path_and_get_function(ctxt, f, None, &expr.span)?;
+            if f.x.mode != Mode::Spec {
+                return err_str(
+                    &expr.span,
+                    &format!(
+                        "reveal/fuel statements require a spec-mode function, got {:}-mode function",
+                        f.x.mode
+                    ),
+                );
+            }
         }
         _ => {}
     }
@@ -326,7 +349,7 @@ fn check_function(
 
     let ret_name = user_local_name(&*function.x.ret.x.name);
     for p in function.x.params.iter() {
-        check_typ(&p.x.typ, &p.span)?;
+        check_typ(ctxt, &p.x.typ, &p.span)?;
         if user_local_name(&*p.x.name) == ret_name {
             return err_str(&p.span, "parameter name cannot be the same as the return value name");
         }
@@ -602,12 +625,12 @@ fn check_function(
     if function.x.publish.is_some() && function.x.mode != Mode::Spec {
         return err_str(
             &function.span,
-            "function is marked #[verifier(publish)] but not marked #[spec]",
+            "function is marked #[verifier(publish)] but not marked #[verifier::spec]",
         );
     }
 
     if function.x.is_main() && function.x.mode != Mode::Exec {
-        return err_str(&function.span, "`main` function should be #[exec]");
+        return err_str(&function.span, "`main` function should be #[verifier::exec]");
     }
 
     if function.x.publish.is_some() && function.x.visibility.is_private {
@@ -704,11 +727,11 @@ fn check_function(
     Ok(())
 }
 
-fn check_datatype(dt: &Datatype) -> Result<(), VirErr> {
+fn check_datatype(ctxt: &Ctxt, dt: &Datatype) -> Result<(), VirErr> {
     for variant in dt.x.variants.iter() {
         for field in variant.a.iter() {
             let typ = &field.a.0;
-            check_typ(typ, &dt.span)?;
+            check_typ(ctxt, typ, &dt.span)?;
         }
     }
 
@@ -767,7 +790,12 @@ fn check_functions_match(
     Ok(())
 }
 
-pub fn check_crate(krate: &Krate, diags: &mut Vec<VirErrAs>) -> Result<(), VirErr> {
+pub fn check_crate(
+    krate: &Krate,
+    mut crate_names: Vec<String>,
+    diags: &mut Vec<VirErrAs>,
+) -> Result<(), VirErr> {
+    crate_names.push("builtin".to_string());
     let mut funs: HashMap<Fun, Function> = HashMap::new();
     for function in krate.functions.iter() {
         if funs.contains_key(&function.x.name) {
@@ -866,12 +894,12 @@ pub fn check_crate(krate: &Krate, diags: &mut Vec<VirErrAs>) -> Result<(), VirEr
         }
     }
 
-    let ctxt = Ctxt { funs, dts };
+    let ctxt = Ctxt { crate_names, funs, dts };
     for function in krate.functions.iter() {
         check_function(&ctxt, function, diags)?;
     }
     for dt in krate.datatypes.iter() {
-        check_datatype(dt)?;
+        check_datatype(&ctxt, dt)?;
     }
     crate::recursive_types::check_recursive_types(krate)?;
     Ok(())

@@ -35,11 +35,31 @@ impl<A> Option<A> {
         }
     }
 
-    pub fn unwrap(&self) -> (a: &A)
+    pub fn as_ref(&self) -> (a: Option<&A>)
+        ensures
+          a.is_Some() <==> self.is_Some(),
+          a.is_Some() ==> self.get_Some_0() == a.get_Some_0(),
+    {
+        match self {
+            Option::Some(x) => Option::Some(x),
+            Option::None => Option::None,
+        }
+    }
+
+    // A more-readable synonym for get_Some_0().
+    #[verifier(inline)]
+    pub open spec fn spec_unwrap(self) -> A
+    recommends self.is_Some()
+    {
+        self.get_Some_0()
+    }
+
+    #[verifier(when_used_as_spec(spec_unwrap))]
+    pub fn unwrap(self) -> (a: A)
         requires
             self.is_Some(),
         ensures
-            *a == self.get_Some_0(),
+            a == self.get_Some_0(),
     {
         match self {
             Option::Some(a) => a,

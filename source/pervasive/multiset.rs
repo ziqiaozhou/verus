@@ -6,8 +6,12 @@ use builtin::*;
 use builtin_macros::*;
 #[allow(unused_imports)]
 use crate::pervasive::*;
+#[cfg(not(vstd_build_todo))]
 #[allow(unused_imports)]
 use crate::pervasive::set::*;
+#[cfg(vstd_build_todo)]
+#[allow(unused_imports)]
+use crate::set::*;
 
 verus!{
 
@@ -201,12 +205,18 @@ pub proof fn axiom_filter_count<V>(m: Multiset<V>, f: FnSpec(V) -> bool, v: V)
 
 #[macro_export]
 macro_rules! assert_multisets_equal {
+    (::builtin::spec_eq($m1:expr, $m2:expr)) => {
+        assert_multisets_equal_internal!($m1, $m2)
+    };
+    (::builtin::spec_eq($m1:expr, $m2:expr), $k:ident $( : $t:ty )? => $bblock:block) => {
+        assert_multisets_equal_internal!($m1, $m2, $k $( : $t )? => $bblock)
+    };
     ($m1:expr, $m2:expr $(,)?) => {
         assert_multisets_equal!($m1, $m2, key => { })
     };
     ($m1:expr, $m2:expr, $k:ident $( : $t:ty )? => $bblock:block) => {
-        #[spec] let m1 = $m1;
-        #[spec] let m2 = $m2;
+        #[verifier::spec] let m1 = $m1;
+        #[verifier::spec] let m2 = $m2;
         ::builtin::assert_by(::builtin::equal(m1, m2), {
             ::builtin::assert_forall_by(|$k $( : $t )?| {
                 ::builtin::ensures([
@@ -218,5 +228,7 @@ macro_rules! assert_multisets_equal {
         });
     }
 }
+
+pub use assert_multisets_equal;
 
 } // verus!

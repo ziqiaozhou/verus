@@ -4,9 +4,9 @@ use crate::ast::Quant;
 use crate::ast::Typs;
 use crate::ast::{
     BinaryOp, Binder, BuiltinSpecFun, CallTarget, Constant, Datatype, DatatypeTransparency,
-    DatatypeX, Expr, ExprX, Exprs, Field, FieldOpr, Function, GenericBound, GenericBoundX, Ident,
-    IntRange, Krate, KrateX, Mode, MultiOp, Path, Pattern, PatternX, SpannedTyped, Stmt, StmtX,
-    Typ, TypX, UnaryOp, UnaryOpr, VirErr, Visibility,
+    DatatypeX, Expr, ExprX, Exprs, Field, FieldOpr, Function, FunctionKind, GenericBound,
+    GenericBoundX, Ident, IntRange, Krate, KrateX, Mode, MultiOp, Path, Pattern, PatternX,
+    SpannedTyped, Stmt, StmtX, Typ, TypX, UnaryOp, UnaryOpr, VirErr, Visibility,
 };
 use crate::ast_util::{conjoin, disjoin, if_then_else};
 use crate::ast_util::{err_str, err_string, wrap_in_trigger};
@@ -369,7 +369,7 @@ fn simplify_one_expr(ctx: &GlobalCtx, state: &mut State, expr: &Expr) -> Result<
                     }
                 };
                 let block = ExprX::Block(Arc::new(decls), Some(arm.x.body.clone()));
-                let body = SpannedTyped::new(&arm.x.pattern.span, &t_bool, block);
+                let body = SpannedTyped::new(&arm.x.pattern.span, &expr.typ, block);
                 if let Some(prev) = if_expr {
                     // if pattern && guard then body else prev
                     let ifx = ExprX::If(test.clone(), body, Some(prev));
@@ -718,11 +718,14 @@ fn simplify_function(
             .collect(),
     );
 
+    let is_trait_impl = matches!(functionx.kind, FunctionKind::TraitMethodImpl { .. });
+
     // To simplify the AIR/SMT encoding, add a dummy argument to any function with 0 arguments
     if functionx.typ_bounds.len() == 0
         && functionx.params.len() == 0
         && !functionx.is_const
         && !functionx.attrs.broadcast_forall
+        && !is_trait_impl
     {
         let paramx = crate::ast::ParamX {
             name: Arc::new(crate::def::DUMMY_PARAM.to_string()),
@@ -871,7 +874,24 @@ pub fn simplify_krate(ctx: &mut GlobalCtx, krate: &Krate) -> Result<Krate, VirEr
         ctx.inferred_modes.clone(),
         ctx.rlimit,
         ctx.interpreter_log.clone(),
+        ctx.vstd_crate_name.clone(),
         ctx.arch,
     )?;
     Ok(krate)
+}
+
+pub fn merge_krates(krates: Vec<Krate>) -> Result<Krate, VirErr> {
+    let mut kratex = KrateX {
+        functions: Vec::new(),
+        datatypes: Vec::new(),
+        traits: Vec::new(),
+        module_ids: Vec::new(),
+    };
+    for k in krates.into_iter() {
+        kratex.functions.extend(k.functions.clone());
+        kratex.datatypes.extend(k.datatypes.clone());
+        kratex.traits.extend(k.traits.clone());
+        kratex.module_ids.extend(k.module_ids.clone());
+    }
+    Ok(Arc::new(kratex))
 }

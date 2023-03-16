@@ -6,7 +6,8 @@ use crate::ast::{
 use crate::ast_util::bitwidth_from_int_range;
 use crate::ast_util::IntegerTypeBitwidth;
 use crate::ast_util::{
-    allowed_bitvector_type, bitwidth_from_type, err_string, fun_as_rust_dbg, get_field, get_variant,
+    allowed_bitvector_type, bitwidth_from_type, err_string, fun_as_rust_dbg, get_field,
+    get_variant, is_integer_type,
 };
 use crate::context::Ctx;
 use crate::def::{fn_inv_name, fn_namespace_name, new_user_qid_name};
@@ -321,7 +322,8 @@ fn call_inv(
     typ: &Typ,
     atomicity: InvAtomicity,
 ) -> Expr {
-    let inv_fn_ident = suffix_global_id(&fun_to_air_ident(&fn_inv_name(atomicity)));
+    let inv_fn_ident =
+        suffix_global_id(&fun_to_air_ident(&fn_inv_name(&ctx.global.vstd_crate_name, atomicity)));
     let boxed_inner = try_box(ctx, inner.clone(), typ).unwrap_or(inner);
 
     let mut args: Vec<Expr> = typ_args.iter().map(|t| typ_to_id(t)).collect();
@@ -330,8 +332,11 @@ fn call_inv(
     ident_apply(&inv_fn_ident, &args)
 }
 
-fn call_namespace(arg: Expr, typ_args: &Typs, atomicity: InvAtomicity) -> Expr {
-    let inv_fn_ident = suffix_global_id(&fun_to_air_ident(&fn_namespace_name(atomicity)));
+fn call_namespace(ctx: &Ctx, arg: Expr, typ_args: &Typs, atomicity: InvAtomicity) -> Expr {
+    let inv_fn_ident = suffix_global_id(&fun_to_air_ident(&fn_namespace_name(
+        &ctx.global.vstd_crate_name,
+        atomicity,
+    )));
 
     let mut args: Vec<Expr> = typ_args.iter().map(|t| typ_to_id(t)).collect();
     args.push(arg);
@@ -341,8 +346,8 @@ fn call_namespace(arg: Expr, typ_args: &Typs, atomicity: InvAtomicity) -> Expr {
 pub fn mask_set_from_spec(spec: &MaskSpec, mode: Mode) -> MaskSet {
     match spec {
         MaskSpec::NoSpec => {
-            // By default, we assume an #[exec] fn can open any invariant, and that
-            // a #[proof] fn can open no invariants.
+            // By default, we assume an #[verifier::exec] fn can open any invariant, and that
+            // a #[verifier::proof] fn can open no invariants.
             if mode == Mode::Exec { MaskSet::full() } else { MaskSet::empty() }
         }
         MaskSpec::InvariantOpens(exprs) if exprs.len() == 0 => MaskSet::empty(),
@@ -576,8 +581,25 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
         }
         (ExpX::Var(x), _) => {
             if expr_ctxt.is_bit_vector {
-                let width = bitwidth_from_type(&exp.typ);
-                bitvector_expect_exact(ctx, &exp.span, &exp.typ, &width)?;
+                if is_integer_type(&exp.typ) {
+                    // error if either:
+                    //  - it's an infinite width type
+                    //  - it's usize or isize and the arch-size is not specified
+                    // (TODO allow the second one)
+                    let width = bitwidth_from_type(&exp.typ);
+                    bitvector_expect_exact(ctx, &exp.span, &exp.typ, &width)?;
+                } else {
+                    if allowed_bitvector_type(&exp.typ) {
+                        // ok
+                    } else {
+                        return err_string(
+                            &exp.span,
+                            format!(
+                                "error: bit_vector prover cannot handle this type (bit_vector can only handle variables of type `bool` or of fixed-width integers)"
+                            ),
+                        );
+                    }
+                }
             }
 
             string_var(&suffix_local_unique_id(x))
@@ -781,6 +803,12 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                     variant_field_ident(datatype, variant, field),
                     Arc::new(vec![expr]),
                 ))
+            }
+            UnaryOpr::CustomErr(_) => {
+                // CustomErr is handled by split_expression. Maybe it could
+                // be useful in the 'normal' case too, but right now, we just
+                // ignore it here.
+                return exp_to_expr(ctx, exp, expr_ctxt);
             }
         },
         (ExpX::Binary(op, lhs, rhs), true) => {
@@ -1925,7 +1953,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
 
             // Assert that the namespace of the inv we are opening is in the mask set
             let typ_args = get_inv_typ_args(&inv_exp.typ);
-            let namespace_expr = call_namespace(inv_expr.clone(), &typ_args, *atomicity);
+            let namespace_expr = call_namespace(ctx, inv_expr.clone(), &typ_args, *atomicity);
             if !ctx.checking_recommends() {
                 state.mask.assert_contains(&inv_exp.span, &namespace_expr, &mut stmts);
             }

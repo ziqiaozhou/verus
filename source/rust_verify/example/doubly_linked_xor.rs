@@ -2,13 +2,14 @@
 
 use builtin::*;
 use builtin_macros::*;
+
+#[cfg(not(vstd_todo))]
 mod pervasive;
-use pervasive::*;
-use crate::pervasive::{ptr::*};
-use crate::pervasive::{seq::*};
-use crate::pervasive::{seq_lib::*};
-use crate::pervasive::{map::*};
-use crate::pervasive::{modes::*};
+#[cfg(not(vstd_todo))]
+use crate::pervasive::{*, ptr::*, seq::*, seq_lib::*, map::*, modes::*};
+
+#[cfg(vstd_todo)]
+use vstd::{*, ptr::*, seq::*, seq_lib::*, map::*, modes::*};
 
 // "XOR Linked List". This is a sorta-cute (if not usually practical) folk data structure:
 // A doubly-linked list which saves memory by having each node store the XOR of the two
@@ -272,7 +273,7 @@ impl<V> DListXor<V> {
             proof {
                 assert_by_contradiction!(self.ptrs@.len() == 1, {
                     assert(old(self).wf_perm((self.ptrs@.len() - 2) as nat));
-                    #[spec] let actual_penult_u64 = self.prev_of((self.ptrs@.len() - 1) as nat);
+                    #[verifier::spec] let actual_penult_u64 = self.prev_of((self.ptrs@.len() - 1) as nat);
                     assert(actual_penult_u64 ^ 0 == actual_penult_u64) by(bit_vector);
                 });
             }
@@ -317,7 +318,7 @@ impl<V> DListXor<V> {
             assert(self.wf_tail());
 
             if self.ptrs@.len() > 0 {
-                /*#[spec] let i = self.ptrs@.len() - 1;
+                /*#[verifier::spec] let i = self.ptrs@.len() - 1;
                 assert(self.ptrs@.len() == old(self).ptrs@.len() - 1);
                 assert(self.perms@.dom().contains(i));
                 assert(self.perms@[i]@.pptr == self.ptrs@[i]@);
@@ -382,7 +383,7 @@ impl<V> DListXor<V> {
             proof {
                 assert_by_contradiction!(self.ptrs@.len() == 1, {
                     assert(old(self).wf_perm(1));
-                    #[spec] let actual_second_u64 = self.next_of(0);
+                    #[verifier::spec] let actual_second_u64 = self.next_of(0);
                     assert(0 ^ actual_second_u64 == actual_second_u64) by(bit_vector);
                 });
             }

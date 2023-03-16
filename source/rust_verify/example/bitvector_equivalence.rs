@@ -1,10 +1,5 @@
 #[allow(unused_imports)]
 use builtin::*;
-mod pervasive;
-#[allow(unused_imports)]
-use pervasive::*;
-#[allow(unused_imports)]
-use crate::pervasive::seq::*;
 use builtin_macros::*;
 
 macro_rules! get_bit_macro {
@@ -159,7 +154,7 @@ proof fn equivalence_proof_2(a:u32, b:u32)
 }
 
 
-// #[spec]
+// #[verifier::spec]
 // fn u32_view(u: u32) -> Seq<bool> {
 //     Seq::new(32, |i: int| get_bit!(u, i as u32))
 // }

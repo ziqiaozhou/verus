@@ -1,8 +1,9 @@
 use crate::config::{Args, ShowTriggers};
 use crate::context::{ArchContextX, ContextX, ErasureInfo};
 use crate::debugger::Debugger;
+use crate::spans::{SpanContext, SpanContextX};
 use crate::unsupported;
-use crate::util::{error, from_raw_span, signalling};
+use crate::util::{error, signalling};
 use air::ast::{Command, CommandX, Commands};
 use air::context::{QueryContext, ValidityResult};
 use air::messages::{message, note, note_bare, Diagnostics, Message, MessageLabel, MessageLevel};
@@ -22,7 +23,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use vir::ast::{Fun, Function, InferMode, Krate, Mode, VirErr, Visibility};
+use vir::ast::{Fun, Function, Ident, InferMode, Krate, Mode, VirErr, Visibility};
 use vir::ast_util::{fun_as_rust_dbg, fun_name_crate_relative, is_visible_to};
 use vir::def::{CommandsWithContext, CommandsWithContextX, SnapPos};
 use vir::func_to_air::SstMap;
@@ -32,13 +33,14 @@ use vir::update_cell::UpdateCell;
 
 const RLIMIT_PER_SECOND: u32 = 3000000;
 
-pub struct Reporter<'tcx> {
+pub(crate) struct Reporter<'tcx> {
+    spans: SpanContext,
     compiler_diagnostics: &'tcx rustc_errors::Handler,
 }
 
 impl<'tcx> Reporter<'tcx> {
-    pub fn new(compiler: &'tcx Compiler) -> Self {
-        Reporter { compiler_diagnostics: compiler.session().diagnostic() }
+    pub(crate) fn new(spans: &SpanContext, compiler: &'tcx Compiler) -> Self {
+        Reporter { spans: spans.clone(), compiler_diagnostics: compiler.session().diagnostic() }
     }
 }
 
@@ -47,10 +49,11 @@ impl<'tcx> Reporter<'tcx> {
 /// errors/notes)
 impl Diagnostics for Reporter<'_> {
     fn report_as(&self, msg: &Message, level: MessageLevel) {
-        let mut v = Vec::new();
+        let mut v: Vec<Span> = Vec::new();
         for sp in &msg.spans {
-            let span: Span = from_raw_span(&sp.raw_span);
-            v.push(span);
+            if let Some(span) = self.spans.from_air_span(&sp) {
+                v.push(span);
+            }
         }
         while let Some(i) = v.iter().position(|a| v.iter().any(|b| a != b && a.contains(*b))) {
             // Remove i in favor of the more specific spans contained by i
@@ -60,8 +63,11 @@ impl Diagnostics for Reporter<'_> {
         let mut multispan = MultiSpan::from_spans(v);
 
         for MessageLabel { note, span: sp } in &msg.labels {
-            let span: Span = from_raw_span(&sp.raw_span);
-            multispan.push_span_label(span, note.clone());
+            if let Some(span) = self.spans.from_air_span(&sp) {
+                multispan.push_span_label(span, note.clone());
+            } else {
+                dbg!(&note, &sp.as_string);
+            }
         }
 
         use MessageLevel::*;
@@ -71,12 +77,6 @@ impl Diagnostics for Reporter<'_> {
             Error => self.compiler_diagnostics.span_err(multispan, &msg.note),
         }
     }
-}
-
-pub struct VerifierCallbacks {
-    pub verifier: Arc<Mutex<Verifier>>,
-    pub vir_ready: signalling::Signaller<bool>,
-    pub now_verify: signalling::Signalled<bool>,
 }
 
 pub struct Verifier {
@@ -97,6 +97,8 @@ pub struct Verifier {
     // If we've already created the log directory, this is the path to it:
     created_log_dir: Option<String>,
     vir_crate: Option<Krate>,
+    crate_names: Option<Vec<String>>,
+    vstd_crate_name: Option<Ident>,
     air_no_span: Option<air::ast::Span>,
     inferred_modes: Option<HashMap<InferMode, Mode>>,
 
@@ -117,8 +119,21 @@ pub struct ErrorSpan {
 }
 
 impl ErrorSpan {
-    fn new_from_air_span(source_map: &SourceMap, msg: &String, air_span: &air::ast::Span) -> Self {
-        let span: Span = from_raw_span(&air_span.raw_span);
+    fn new_from_air_span(
+        spans: &SpanContext,
+        source_map: &SourceMap,
+        msg: &String,
+        air_span: &air::ast::Span,
+    ) -> Self {
+        let span = if let Some(span) = spans.from_air_span(&air_span) {
+            span
+        } else {
+            return Self {
+                description: Some(msg.clone()),
+                span_data: (air_span.as_string.clone(), (0, CharPos(0)), (0, CharPos(0))),
+                test_span_line: air_span.as_string.clone(),
+            };
+        };
         let filename: String = match source_map.span_to_filename(span) {
             FileName::Real(rfn) => rfn
                 .local_path()
@@ -154,7 +169,7 @@ fn report_chosen_triggers(diagnostics: &impl Diagnostics, chosen: &vir::context:
     }
 }
 
-fn io_vir_err(msg: String, err: std::io::Error) -> VirErr {
+pub(crate) fn io_vir_err(msg: String, err: std::io::Error) -> VirErr {
     error(format!("{msg}: {err}"))
 }
 
@@ -181,6 +196,8 @@ impl Verifier {
 
             created_log_dir: None,
             vir_crate: None,
+            crate_names: None,
+            vstd_crate_name: None,
             air_no_span: None,
             inferred_modes: None,
 
@@ -298,6 +315,7 @@ impl Verifier {
     fn check_result_validity(
         &mut self,
         compiler: &Compiler,
+        spans: &SpanContext,
         level: MessageLevel,
         air_context: &mut air::context::Context,
         assign_map: &HashMap<*const air::ast::Span, HashSet<Arc<std::string::String>>>,
@@ -312,7 +330,7 @@ impl Verifier {
             let report_fn: Box<dyn FnMut(std::time::Duration) -> ()> = Box::new(move |elapsed| {
                 let msg =
                     format!("{} has been running for {} seconds", context.1, elapsed.as_secs());
-                let reporter = Reporter::new(compiler);
+                let reporter = Reporter::new(spans, compiler);
                 if counter % 5 == 0 {
                     reporter.report(&note(msg, &context.0));
                 } else {
@@ -322,7 +340,7 @@ impl Verifier {
             });
             (std::time::Duration::from_secs(2), report_fn)
         };
-        let reporter = Reporter::new(compiler);
+        let reporter = Reporter::new(spans, compiler);
         let is_check_valid = matches!(**command, CommandX::CheckValid(_));
         let time0 = Instant::now();
         #[cfg(feature = "singular")]
@@ -379,6 +397,7 @@ impl Verifier {
                     reporter.report(&message(level, msg, &context.0));
 
                     self.errors.push(vec![ErrorSpan::new_from_air_span(
+                        spans,
                         compiler.session().source_map(),
                         &context.1.to_string(),
                         &context.0,
@@ -409,12 +428,14 @@ impl Verifier {
 
                     if level == MessageLevel::Error {
                         let mut errors = vec![ErrorSpan::new_from_air_span(
+                            spans,
                             compiler.session().source_map(),
                             &error.note,
                             &error.spans[0],
                         )];
                         for MessageLabel { note, span } in &error.labels {
                             errors.push(ErrorSpan::new_from_air_span(
+                                spans,
                                 compiler.session().source_map(),
                                 note,
                                 span,
@@ -443,6 +464,7 @@ impl Verifier {
                             let mut errors: Vec<ErrorSpan> = vec![];
                             for span in &error.spans {
                                 let error = ErrorSpan::new_from_air_span(
+                                    spans,
                                     compiler.session().source_map(),
                                     &error.note,
                                     span,
@@ -457,6 +479,7 @@ impl Verifier {
 
                             for label in &error.labels {
                                 let error = ErrorSpan::new_from_air_span(
+                                    spans,
                                     compiler.session().source_map(),
                                     &error.note,
                                     &label.span,
@@ -539,6 +562,7 @@ impl Verifier {
     fn run_commands_queries(
         &mut self,
         compiler: &Compiler,
+        spans: &SpanContext,
         level: MessageLevel,
         air_context: &mut air::context::Context,
         commands_with_context: CommandsWithContext,
@@ -571,6 +595,7 @@ impl Verifier {
         for command in commands.iter() {
             let result_invalidity = self.check_result_validity(
                 compiler,
+                spans,
                 level,
                 air_context,
                 assign_map,
@@ -737,10 +762,11 @@ impl Verifier {
         &mut self,
         compiler: &Compiler,
         krate: &Krate,
+        spans: &SpanContext,
         module: &vir::ast::Path,
         ctx: &mut vir::context::Ctx,
     ) -> Result<(Duration, Duration), VirErr> {
-        let reporter = Reporter::new(compiler);
+        let reporter = Reporter::new(spans, compiler);
         let mut air_context = self.new_air_context_with_prelude(
             &reporter,
             module,
@@ -903,6 +929,7 @@ impl Verifier {
                 }
                 let invalidity = self.run_commands_queries(
                     compiler,
+                    spans,
                     MessageLevel::Error,
                     &mut air_context,
                     Arc::new(CommandsWithContextX {
@@ -940,6 +967,7 @@ impl Verifier {
                     for command in commands.iter().map(|x| &*x) {
                         self.run_commands_queries(
                             compiler,
+                            spans,
                             level,
                             &mut air_context,
                             command.clone(),
@@ -1059,6 +1087,7 @@ impl Verifier {
                     let desc_prefix = recommends_rerun.then(|| "recommends check: ");
                     let command_invalidity = self.run_commands_queries(
                         compiler,
+                        spans,
                         level,
                         query_air_context,
                         command.clone(),
@@ -1100,10 +1129,11 @@ impl Verifier {
         &mut self,
         compiler: &Compiler,
         krate: &Krate,
+        spans: &SpanContext,
         module: &vir::ast::Path,
         mut global_ctx: vir::context::GlobalCtx,
     ) -> Result<vir::context::GlobalCtx, VirErr> {
-        let reporter = Reporter::new(compiler);
+        let reporter = Reporter::new(spans, compiler);
         let module_name = module_name(module);
         if module.segments.len() == 0 {
             reporter.report(&note_bare("verifying root module"));
@@ -1112,7 +1142,7 @@ impl Verifier {
         }
 
         let (pruned_krate, mono_abstract_datatypes, lambda_types) =
-            vir::prune::prune_krate_for_module(&krate, &module);
+            vir::prune::prune_krate_for_module(&krate, &module, &self.vstd_crate_name);
         let mut ctx = vir::context::Ctx::new(
             &pruned_krate,
             global_ctx,
@@ -1129,7 +1159,7 @@ impl Verifier {
         }
 
         let (time_smt_init, time_smt_run) =
-            self.verify_module(compiler, &poly_krate, module, &mut ctx)?;
+            self.verify_module(compiler, &poly_krate, spans, module, &mut ctx)?;
 
         global_ctx = ctx.free();
 
@@ -1140,8 +1170,12 @@ impl Verifier {
     }
 
     // Verify one or more modules in a crate
-    fn verify_crate_inner(&mut self, compiler: &Compiler) -> Result<(), VirErr> {
-        let reporter = Reporter::new(compiler);
+    fn verify_crate_inner(
+        &mut self,
+        compiler: &Compiler,
+        spans: &SpanContext,
+    ) -> Result<(), VirErr> {
+        let reporter = Reporter::new(spans, compiler);
         let krate = self.vir_crate.clone().expect("vir_crate should be initialized");
         let air_no_span = self.air_no_span.clone().expect("air_no_span should be initialized");
         let inferred_modes =
@@ -1162,6 +1196,7 @@ impl Verifier {
             inferred_modes,
             self.args.rlimit,
             interpreter_log_file,
+            self.vstd_crate_name.clone(),
             self.args.arch_word_bits,
         )?;
         vir::recursive_types::check_traits(&krate, &global_ctx)?;
@@ -1205,7 +1240,9 @@ impl Verifier {
                 .iter()
                 .filter(|m| {
                     let name = module_name(m);
-                    let is_pervasive = name.starts_with("pervasive::") || name == "pervasive";
+                    let is_pervasive = name.starts_with("pervasive::")
+                        || name == "pervasive"
+                        || m.krate == Some(Arc::new("vstd".to_string()));
                     (!self.args.verify_root
                         && self.args.verify_module.is_empty()
                         && (!is_pervasive ^ self.args.verify_pervasive))
@@ -1238,7 +1275,7 @@ impl Verifier {
         };
 
         for module in &module_ids_to_verify {
-            global_ctx = self.verify_module_outer(compiler, &krate, module, global_ctx)?;
+            global_ctx = self.verify_module_outer(compiler, &krate, spans, module, global_ctx)?;
         }
 
         let verified_modules: HashSet<_> = module_ids_to_verify.iter().collect();
@@ -1293,11 +1330,15 @@ impl Verifier {
         Ok(())
     }
 
-    pub fn verify_crate<'tcx>(&mut self, compiler: &Compiler) -> Result<bool, VirErr> {
+    pub(crate) fn verify_crate<'tcx>(
+        &mut self,
+        compiler: &Compiler,
+        spans: &SpanContext,
+    ) -> Result<bool, VirErr> {
         // Verify crate
         let time3 = Instant::now();
         if !self.args.no_verify {
-            self.verify_crate_inner(&compiler)?;
+            self.verify_crate_inner(&compiler, spans)?;
         }
         let time4 = Instant::now();
 
@@ -1309,7 +1350,9 @@ impl Verifier {
     fn construct_vir_crate<'tcx>(
         &mut self,
         tcx: TyCtxt<'tcx>,
+        spans: &SpanContext,
         diagnostics: &impl Diagnostics,
+        crate_name: String,
     ) -> Result<bool, VirErr> {
         let autoviewed_call_typs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         if !self.args.no_enhanced_typecheck {
@@ -1330,34 +1373,15 @@ impl Verifier {
             }
         }
 
-        tcx.hir().par_body_owners(|def_id| tcx.ensure().check_match(def_id.to_def_id()));
+        let hir = tcx.hir();
+        hir.par_body_owners(|def_id| tcx.ensure().check_match(def_id.to_def_id()));
         tcx.ensure().check_private_in_public(());
-        tcx.hir().par_for_each_module(|module| {
+        hir.par_for_each_module(|module| {
             tcx.ensure().check_mod_privacy(module);
         });
 
         let autoviewed_call_typs =
             autoviewed_call_typs.lock().expect("get autoviewed_call_typs").clone();
-
-        let time0 = Instant::now();
-
-        let hir = tcx.hir();
-        let erasure_info = ErasureInfo {
-            resolved_calls: vec![],
-            resolved_exprs: vec![],
-            resolved_pats: vec![],
-            external_functions: vec![],
-            ignored_functions: vec![],
-        };
-        let erasure_info = std::rc::Rc::new(std::cell::RefCell::new(erasure_info));
-        let ctxt = Arc::new(ContextX {
-            tcx,
-            krate: hir.krate(),
-            erasure_info,
-            autoviewed_call_typs,
-            unique_id: std::cell::Cell::new(0),
-            arch: Arc::new(ArchContextX { word_bits: self.args.arch_word_bits }),
-        });
 
         self.air_no_span = {
             let no_span = hir
@@ -1372,24 +1396,83 @@ impl Verifier {
                 .next()
                 .expect("OwnerNode::Crate missing");
             Some(air::ast::Span {
-                raw_span: crate::util::to_raw_span(no_span),
+                raw_span: crate::spans::to_raw_span(no_span),
+                id: 0,
+                data: vec![],
                 as_string: "no location".to_string(),
             })
         };
-        let air_no_span = self.air_no_span.clone().unwrap();
+
+        let time0 = Instant::now();
+
+        // Import crates if requested
+        let mut crate_names: Vec<String> = vec![crate_name];
+        let mut vir_crates: Vec<Krate> =
+            vec![vir::builtins::builtin_krate(&self.air_no_span.clone().unwrap())];
+        crate::import_export::import_crates(&self.args, &mut crate_names, &mut vir_crates)?;
+
+        let erasure_info = ErasureInfo {
+            hir_vir_ids: vec![],
+            resolved_calls: vec![],
+            resolved_exprs: vec![],
+            resolved_pats: vec![],
+            external_functions: vec![],
+            ignored_functions: vec![],
+        };
+        let erasure_info = std::rc::Rc::new(std::cell::RefCell::new(erasure_info));
+        let vstd_crate_name = if self.args.import.len() > 0 || self.args.export.is_some() {
+            Some(Arc::new(vir::def::VERUSLIB.to_string()))
+        } else {
+            None
+        };
+        let ctxt = Arc::new(ContextX {
+            tcx,
+            krate: hir.krate(),
+            crate_names: crate_names.clone(),
+            erasure_info,
+            autoviewed_call_typs,
+            unique_id: std::cell::Cell::new(0),
+            spans: spans.clone(),
+            vstd_crate_name: vstd_crate_name.clone(),
+            arch: Arc::new(ArchContextX { word_bits: self.args.arch_word_bits }),
+        });
+        let multi_crate = self.args.export.is_some() || self.args.import.len() > 0;
+        crate::rust_to_vir_base::MULTI_CRATE
+            .with(|m| m.store(multi_crate, std::sync::atomic::Ordering::Relaxed));
 
         // Convert HIR -> VIR
         let time1 = Instant::now();
-        let vir_crate = crate::rust_to_vir::crate_to_vir(&ctxt, &air_no_span)?;
+        let vir_crate = crate::rust_to_vir::crate_to_vir(&ctxt)?;
         let time2 = Instant::now();
         let vir_crate = vir::ast_sort::sort_krate(&vir_crate);
+
+        // Export crate if requested.
+        if self.args.export.is_some() {
+            if ctxt.unique_id.get() != 0 {
+                // TODO: we should probably just get rid of InferMode,
+                // but there may still be some pre-syntax-macro code relying on it.
+                // In the meantime, exporting anything that relies on it is not supported.
+                panic!("exporting with InferMode is not supported");
+            }
+        }
+        crate::import_export::export_crate(&self.args, &vir_crate)?;
+
+        // Gather all crates and merge them into one crate.
+        // REVIEW: by merging all the crates into one here, we end up rechecking well_formed/modes
+        // of the library crates, which were already checked when they were exported.
+        // If this turns out to be slow, we could keep the library crates separate from
+        // the new crate.  (We do need to have all the crate definitions available in some form,
+        // because well_formed and modes checking look up definitions from libraries.)
+        vir_crates.push(vir_crate);
+        let vir_crate = vir::ast_simplify::merge_krates(vir_crates)?;
 
         if self.args.log_all || self.args.log_vir {
             let mut file = self.create_log_file(None, None, crate::config::VIR_FILE_SUFFIX)?;
             vir::printer::write_krate(&mut file, &vir_crate, &self.args.vir_log_option);
         }
         let mut check_crate_diags = vec![];
-        let check_crate_result = vir::well_formed::check_crate(&vir_crate, &mut check_crate_diags);
+        let check_crate_result =
+            vir::well_formed::check_crate(&vir_crate, crate_names.clone(), &mut check_crate_diags);
         for diag in check_crate_diags {
             match diag {
                 vir::ast::VirErrAs::Warning(err) => {
@@ -1399,13 +1482,19 @@ impl Verifier {
             }
         }
         check_crate_result?;
-        let (erasure_modes, inferred_modes) = vir::modes::check_crate(&vir_crate)?;
+        let (erasure_modes, inferred_modes) = vir::modes::check_crate(
+            &vir_crate,
+            self.args.erasure == crate::config::Erasure::Macro,
+        )?;
         let vir_crate = vir::traits::demote_foreign_traits(&vir_crate)?;
 
         self.vir_crate = Some(vir_crate.clone());
+        self.crate_names = Some(crate_names);
+        self.vstd_crate_name = vstd_crate_name;
         self.inferred_modes = Some(inferred_modes);
 
         let erasure_info = ctxt.erasure_info.borrow();
+        let hir_vir_ids = erasure_info.hir_vir_ids.clone();
         let resolved_calls = erasure_info.resolved_calls.clone();
         let resolved_exprs = erasure_info.resolved_exprs.clone();
         let resolved_pats = erasure_info.resolved_pats.clone();
@@ -1413,6 +1502,7 @@ impl Verifier {
         let ignored_functions = erasure_info.ignored_functions.clone();
         let erasure_hints = crate::erase::ErasureHints {
             vir_crate,
+            hir_vir_ids,
             resolved_calls,
             resolved_exprs,
             resolved_pats,
@@ -1459,14 +1549,145 @@ impl rustc_lint::FormalVerifierRewrite for Rewrite {
     }
 }
 
-impl rustc_driver::Callbacks for VerifierCallbacks {
+impl Verifier {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
-        if let Some(target) = &self.verifier.lock().unwrap().test_capture_output {
+        if let Some(target) = &self.test_capture_output {
             config.diagnostic_output =
                 rustc_session::DiagnosticOutput::Raw(Box::new(DiagnosticOutputBuffer {
                     output: target.clone(),
                 }));
         }
+    }
+}
+
+// TODO: move the callbacks into a different file, like driver.rs
+pub(crate) struct VerifierCallbacksEraseMacro {
+    pub(crate) verifier: Verifier,
+    pub(crate) lifetime_start_time: Option<Instant>,
+    pub(crate) rustc_args: Vec<String>,
+    pub(crate) file_loader:
+        Option<Box<dyn 'static + rustc_span::source_map::FileLoader + Send + Sync>>,
+}
+
+impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        self.verifier.config(config);
+    }
+
+    fn after_expansion<'tcx>(
+        &mut self,
+        compiler: &Compiler,
+        queries: &'tcx rustc_interface::Queries<'tcx>,
+    ) -> rustc_driver::Compilation {
+        if !compiler.session().compile_status().is_ok() {
+            return rustc_driver::Compilation::Stop;
+        }
+        let crate_name = queries.crate_name().expect("crate name").peek().clone();
+
+        let _result = queries.global_ctxt().expect("global_ctxt").peek_mut().enter(|tcx| {
+            let spans = SpanContextX::new(
+                tcx,
+                compiler.session().local_stable_crate_id(),
+                compiler.session().source_map(),
+            );
+            {
+                let reporter = Reporter::new(&spans, compiler);
+                if let Err(err) =
+                    self.verifier.construct_vir_crate(tcx, &spans, &reporter, crate_name.clone())
+                {
+                    reporter.report_as(&err, MessageLevel::Error);
+                    self.verifier.encountered_vir_error = true;
+                    return;
+                }
+                if !compiler.session().compile_status().is_ok() {
+                    return;
+                }
+                self.lifetime_start_time = Some(Instant::now());
+                let log_lifetime = self.verifier.args.log_all || self.verifier.args.log_lifetime;
+                let lifetime_log_file = if log_lifetime {
+                    let file = self.verifier.create_log_file(
+                        None,
+                        None,
+                        crate::config::LIFETIME_FILE_SUFFIX,
+                    );
+                    match file {
+                        Err(err) => {
+                            reporter.report_as(&err, MessageLevel::Error);
+                            self.verifier.encountered_vir_error = true;
+                            return;
+                        }
+                        Ok(file) => Some(file),
+                    }
+                } else {
+                    None
+                };
+                let status = crate::lifetime::check_tracked_lifetimes(
+                    tcx,
+                    &spans,
+                    self.rustc_args.clone(),
+                    self.verifier.crate_names.clone().expect("crate_names"),
+                    self.verifier.erasure_hints.as_ref().expect("erasure_hints"),
+                    lifetime_log_file,
+                );
+                match status {
+                    Ok(msgs) => {
+                        if msgs.len() > 0 {
+                            self.verifier.encountered_vir_error = true;
+                            // We found lifetime errors.
+                            // We could print them immediately, but instead,
+                            // let's first run rustc's standard lifetime checking
+                            // because the error messages are likely to be better.
+                            let file_loader =
+                                std::mem::take(&mut self.file_loader).expect("file_loader");
+                            let compile_status = crate::driver::run_with_erase_macro_compile(
+                                self.rustc_args.clone(),
+                                file_loader,
+                                false,
+                                self.verifier.test_capture_output.clone(),
+                            );
+                            if compile_status.is_err() {
+                                return;
+                            }
+                            for msg in &msgs {
+                                reporter.report(&msg);
+                            }
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        reporter.report_as(&err, MessageLevel::Error);
+                        self.verifier.encountered_vir_error = true;
+                        return;
+                    }
+                }
+            }
+
+            if !compiler.session().compile_status().is_ok() {
+                return;
+            }
+
+            match self.verifier.verify_crate(compiler, &spans) {
+                Ok(_) => {}
+                Err(err) => {
+                    let reporter = Reporter::new(&spans, compiler);
+                    reporter.report_as(&err, MessageLevel::Error);
+                    self.verifier.encountered_vir_error = true;
+                }
+            }
+        });
+        rustc_driver::Compilation::Stop
+    }
+}
+
+pub(crate) struct VerifierCallbacksEraseAst {
+    pub(crate) verifier: Arc<Mutex<Verifier>>,
+    pub(crate) vir_ready: signalling::Signaller<bool>,
+    pub(crate) now_verify: signalling::Signalled<bool>,
+}
+
+impl rustc_driver::Callbacks for VerifierCallbacksEraseAst {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        self.verifier.lock().unwrap().config(config);
     }
 
     fn after_parsing<'tcx>(
@@ -1489,11 +1710,19 @@ impl rustc_driver::Callbacks for VerifierCallbacks {
         compiler: &Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> rustc_driver::Compilation {
+        let crate_name = queries.crate_name().expect("crate name").peek().clone();
         let _result = queries.global_ctxt().expect("global_ctxt").peek_mut().enter(|tcx| {
+            let spans = SpanContextX::new(
+                tcx,
+                compiler.session().local_stable_crate_id(),
+                compiler.session().source_map(),
+            );
             {
                 let mut verifier = self.verifier.lock().expect("verifier mutex");
-                let reporter = Reporter::new(compiler);
-                if let Err(err) = verifier.construct_vir_crate(tcx, &reporter) {
+                let reporter = Reporter::new(&spans, compiler);
+                if let Err(err) =
+                    verifier.construct_vir_crate(tcx, &spans, &reporter, crate_name.clone())
+                {
                     reporter.report_as(&err, MessageLevel::Error);
                     verifier.encountered_vir_error = true;
                     return;
@@ -1513,10 +1742,10 @@ impl rustc_driver::Callbacks for VerifierCallbacks {
 
             {
                 let mut verifier = self.verifier.lock().expect("verifier mutex");
-                match verifier.verify_crate(compiler) {
+                match verifier.verify_crate(compiler, &spans) {
                     Ok(_) => {}
                     Err(err) => {
-                        let reporter = Reporter::new(compiler);
+                        let reporter = Reporter::new(&spans, compiler);
                         reporter.report_as(&err, MessageLevel::Error);
                         verifier.encountered_vir_error = true;
                     }

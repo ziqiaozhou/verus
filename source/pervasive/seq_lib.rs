@@ -4,8 +4,18 @@ use builtin::*;
 use builtin_macros::*;
 #[allow(unused_imports)]
 use crate::pervasive::*;
+#[cfg(not(vstd_build_todo))]
 #[allow(unused_imports)]
 use crate::pervasive::seq::*;
+#[cfg(vstd_build_todo)]
+#[allow(unused_imports)]
+use crate::seq::*;
+#[cfg(not(vstd_build_todo))]
+#[allow(unused_imports)]
+use crate::pervasive::set::Set;
+#[cfg(vstd_build_todo)]
+#[allow(unused_imports)]
+use crate::set::Set;
 
 verus! {
 
@@ -16,6 +26,132 @@ impl<A> Seq<A> {
 
     pub open spec fn map<B>(self, f: FnSpec(int, A) -> B) -> Seq<B> {
         Seq::new(self.len(), |i: int| f(i, self[i]))
+    }
+
+    pub closed spec fn filter(self, pred: FnSpec(A) -> bool) -> Self
+        decreases self.len()
+    {
+        if self.len() == 0 {
+            self
+        } else {
+            let subseq = self.drop_last().filter(pred);
+            if pred(self.last()) { subseq.push(self.last()) } else { subseq }
+        }
+    }
+
+    pub proof fn filter_lemma(self, pred: FnSpec(A) -> bool)
+        ensures
+            // we don't keep anything bad
+            // TODO(andrea): recommends didn't catch this error, where i isn't known to be in
+            // self.filter(pred).len()
+            //forall |i: int| 0 <= i < self.len() ==> pred(#[trigger] self.filter(pred)[i]),
+            forall |i: int| 0 <= i < self.filter(pred).len() ==> pred(#[trigger] self.filter(pred)[i]),
+            // we keep everything we should
+            forall |i: int| 0 <= i < self.len() && pred(self[i])
+                ==> #[trigger] self.filter(pred).contains(self[i]),
+            // the filtered list can't grow
+            self.filter(pred).len() <= self.len(),
+        decreases self.len()
+    {
+        let out = self.filter(pred);
+        if 0 < self.len() {
+            self.drop_last().filter_lemma(pred);
+            assert forall |i: int| 0 <= i < out.len() implies pred(out[i]) by {
+                if i < out.len()-1 {
+                    assert(self.drop_last().filter(pred)[i] == out.drop_last()[i]); // trigger drop_last
+                    assert(pred(out[i]));   // TODO(andrea): why is this line required? It's the conclusion of the assert-forall.
+                }
+            }
+            assert forall |i: int| 0 <= i < self.len() && pred(self[i])
+                implies #[trigger] out.contains(self[i]) by {
+                if i==self.len()-1 {
+                    assert(self[i] == out[out.len()-1]);  // witness to contains
+                } else {
+                    let subseq = self.drop_last().filter(pred);
+                    assert(subseq.contains(self.drop_last()[i]));   // trigger recursive invocation
+                    let j = choose(|j| 0<=j<subseq.len() && subseq[j]==self[i]);
+                    assert(out[j] == self[i]);  // TODO(andrea): same, seems needless
+                }
+            }
+        }
+    }
+
+    #[verifier(external_body)]
+    #[verifier(broadcast_forall)]
+    pub proof fn filter_lemma_broadcast(self, pred: FnSpec(A) -> bool)
+        ensures
+            forall |i: int| 0 <= i < self.filter(pred).len() ==> pred(#[trigger] self.filter(pred)[i]),
+            forall |i: int| 0 <= i < self.len() && pred(self[i])
+                ==> #[trigger] self.filter(pred).contains(self[i]),
+            self.filter(pred).len() <= self.len();
+
+    proof fn filter_distributes_over_add(a:Self, b:Self, pred:FnSpec(A)->bool)
+    ensures
+        (a+b).filter(pred) == a.filter(pred) + b.filter(pred),
+    decreases b.len()
+    {
+        if 0 < b.len()
+        {
+            Self::drop_last_distributes_over_add(a, b);
+            Self::filter_distributes_over_add(a, b.drop_last(), pred);
+            if pred(b.last()) {
+                Self::push_distributes_over_add(a.filter(pred), b.drop_last().filter(pred), b.last());
+            }
+        } else {
+            Self::add_empty(a, b);
+            Self::add_empty(a.filter(pred), b.filter(pred));
+        }
+    }
+
+    pub proof fn add_empty(a: Self, b: Self)
+    requires
+        b.len() == 0,
+    ensures
+        a+b == a,
+    {
+        assert_seqs_equal!(a+b, a);
+    }
+
+    pub proof fn push_distributes_over_add(a: Self, b: Self, elt: A)
+    ensures
+        (a+b).push(elt) == a+b.push(elt),
+    {
+        assert_seqs_equal!((a+b).push(elt), a+b.push(elt));
+    }
+
+    #[verifier(external_body)]
+    #[verifier(broadcast_forall)]
+    pub proof fn filter_distributes_over_add_broacast(a:Self, b:Self, pred:FnSpec(A)->bool)
+    ensures
+        #[trigger] (a+b).filter(pred) == a.filter(pred) + b.filter(pred),
+    {
+    // TODO(chris): We have perfectly good proofs sitting around for these broadcasts; they don't
+    // need to be axioms!
+//        assert forall |a:Self, b:Self, pred:FnSpec(A)->bool| (a+b).filter(pred) == a.filter(pred) + b.filter(pred) by {
+//            Self::filter_distributes_over_add(a, b, pred);
+//        }
+    }
+
+    #[verifier(external_body)]
+    #[verifier(broadcast_forall)]
+    pub proof fn add_empty_broacast(a:Self, b:Self)
+    ensures
+        b.len()==0 ==> a+b == a
+    {
+//        assert forall |a:Self, b:Self| b.len()==0 implies a+b == a {
+//            add_empty(a, b);
+//        }
+    }
+
+    #[verifier(external_body)]
+    #[verifier(broadcast_forall)]
+    pub proof fn push_distributes_over_add_broacast(a:Self, b:Self, elt: A)
+    ensures
+        (a+b).push(elt) == a+b.push(elt),
+    {
+//        assert forall |a:Self, b:Self, elt: A| (a+b).push(elt) == a+b.push(elt) {
+//            push_distributes_over_add(a, b, elt);
+//        }
     }
 
     // TODO is_sorted -- extract from summer_school e22
@@ -31,12 +167,115 @@ impl<A> Seq<A> {
     /// thereby 1 smaller.
     ///
     /// If the input sequence is empty, the result is meaningless and arbitrary.
-
     pub open spec fn drop_last(self) -> Seq<A>
         recommends self.len() >= 1
     {
         self.subrange(0, self.len() as int - 1)
-    } 
+    }
+
+    pub proof fn drop_last_distributes_over_add(a: Self, b: Self)
+    requires
+        0 < b.len(),
+    ensures
+        (a+b).drop_last() == a+b.drop_last(),
+    {
+        assert_seqs_equal!((a+b).drop_last(), a+b.drop_last());
+    }
+
+    /// returns `true` if the sequequence has no duplicate elements
+    pub open spec fn no_duplicates(self) -> bool {
+        forall(|i, j| 0 <= i < self.len() && 0 <= j < self.len() && i != j
+            ==> self[i] != self[j])
+    }
+
+    /// Returns `true` if two sequences are disjoint
+    pub open spec fn disjoint(self, other: Self) -> bool {
+        forall|i: int, j: int| 0 <= i < self.len() && 0 <= j < other.len() ==> self[i] != other[j]
+    }
+
+    /// Converts a sequence into a set
+    pub open spec fn to_set(self) -> Set<A> {
+        Set::new(|a: A| self.contains(a))
+    }
+}
+
+
+/// recursive definition of seq to set conversion
+spec fn seq_to_set_rec<A>(seq: Seq<A>) -> Set<A>
+    decreases seq.len()
+{
+    if seq.len() == 0 {
+        Set::empty()
+    } else {
+        seq_to_set_rec(seq.drop_last()).insert(seq.last())
+    }
+}
+
+/// helper function showing that the recursive definition of set_to_seq produces a finite set
+proof fn seq_to_set_rec_is_finite<A>(seq: Seq<A>)
+    ensures seq_to_set_rec(seq).finite()
+    decreases seq.len()
+{
+    if seq.len() > 0{
+        let sub_seq = seq.drop_last();
+        assert(seq_to_set_rec(sub_seq).finite()) by {
+            seq_to_set_rec_is_finite(sub_seq);
+        }
+    }
+}
+
+/// helper function showing that the resulting set contains all elements of the sequence
+proof fn seq_to_set_rec_contains<A>(seq: Seq<A>)
+    ensures forall |a| #[trigger] seq.contains(a) <==> seq_to_set_rec(seq).contains(a)
+    decreases seq.len()
+{
+    if seq.len() > 0 {
+        assert(forall |a| #[trigger] seq.drop_last().contains(a) <==> seq_to_set_rec(seq.drop_last()).contains(a)) by {
+            seq_to_set_rec_contains(seq.drop_last());
+        }
+
+        assert(seq.ext_equal(seq.drop_last().push(seq.last())));
+        assert forall |a| #[trigger] seq.contains(a) <==> seq_to_set_rec(seq).contains(a) by {
+            if !seq.drop_last().contains(a) {
+                if a == seq.last() {
+                    assert(seq.contains(a));
+                    assert(seq_to_set_rec(seq).contains(a));
+                } else {
+                    assert(!seq_to_set_rec(seq).contains(a));
+                }
+            }
+        }
+    }
+}
+
+/// helper function showing that the recursive definition matches the set comprehension one
+proof fn seq_to_set_equal_rec<A>(seq: Seq<A>)
+    ensures seq.to_set() == seq_to_set_rec(seq)
+{
+    assert(forall |n| #[trigger] seq.contains(n) <==> seq_to_set_rec(seq).contains(n)) by {
+        seq_to_set_rec_contains(seq);
+    }
+    assert(forall |n| #[trigger] seq.contains(n) <==> seq.to_set().contains(n));
+    assert(seq.to_set().ext_equal(seq_to_set_rec(seq)));
+}
+
+
+/// proof function showing that the set obtained from the sequence is finite
+pub proof fn seq_to_set_is_finite<A>(seq: Seq<A>)
+    ensures seq.to_set().finite()
+{
+    assert(seq.to_set().finite()) by {
+        seq_to_set_equal_rec(seq);
+        seq_to_set_rec_is_finite(seq);
+    }
+}
+
+#[verifier(external_body)]
+#[verifier(broadcast_forall)]
+pub proof fn seq_to_set_is_finite_broadcast<A>(seq: Seq<A>)
+    ensures #[trigger] seq.to_set().finite()
+{
+    // TODO: merge this with seq_to_set_is_finite when broadcast_forall is better supported
 }
 
 #[doc(hidden)]
@@ -64,7 +303,7 @@ pub open spec fn check_argument_is_seq<A>(s: Seq<A>) -> Seq<A> { s }
 ///     let t2 = s.subrange(i, s.len());
 ///     let t = t1.add(t2);
 /// 
-///     assert_seqs_equal!(s, t);
+///     assert_seqs_equal!(s == t);
 /// 
 ///     assert(s == t);
 /// }
@@ -78,7 +317,7 @@ pub open spec fn check_argument_is_seq<A>(s: Seq<A>) -> Seq<A> { s }
 ///     let s = Seq::<u64>::new(5, |i| i as u64);
 ///     let t = Seq::<u64>::new(5, |i| i as u64 | 0);
 /// 
-///     assert_seqs_equal!(s, t, i => {
+///     assert_seqs_equal!(s == t, i => {
 ///         // Need to show that s[i] == t[i]
 ///         // Prove that the elements are equal by appealing to a bitvector solver:
 ///         let j = i as u64;
@@ -98,12 +337,18 @@ macro_rules! assert_seqs_equal {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! assert_seqs_equal_internal {
+    (::builtin::spec_eq($s1:expr, $s2:expr)) => {
+        assert_seqs_equal_internal!($s1, $s2)
+    };
+    (::builtin::spec_eq($s1:expr, $s2:expr), $idx:ident => $bblock:block) => {
+        assert_seqs_equal_internal!($s1, $s2, $idx => $bblock)
+    };
     ($s1:expr, $s2:expr $(,)?) => {
         assert_seqs_equal_internal!($s1, $s2, idx => { })
     };
     ($s1:expr, $s2:expr, $idx:ident => $bblock:block) => {
-        #[spec] let s1 = $crate::pervasive::seq_lib::check_argument_is_seq($s1);
-        #[spec] let s2 = $crate::pervasive::seq_lib::check_argument_is_seq($s2);
+        #[verifier::spec] let s1 = $crate::pervasive::seq_lib::check_argument_is_seq($s1);
+        #[verifier::spec] let s2 = $crate::pervasive::seq_lib::check_argument_is_seq($s2);
         ::builtin::assert_by(::builtin::equal(s1, s2), {
             $crate::pervasive::assert(s1.len() == s2.len());
             ::builtin::assert_forall_by(|$idx : ::builtin::int| {

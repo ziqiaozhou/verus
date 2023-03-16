@@ -45,6 +45,10 @@ impl fmt::Display for Mode {
     }
 }
 
+pub fn type_is_bool(typ: &Typ) -> bool {
+    matches!(&**typ, TypX::Bool)
+}
+
 pub fn types_equal(typ1: &Typ, typ2: &Typ) -> bool {
     match (&**typ1, &**typ2) {
         (TypX::Bool, TypX::Bool) => true,
@@ -100,6 +104,14 @@ pub fn allowed_bitvector_type(typ: &Typ) -> bool {
         TypX::Bool => true,
         TypX::Int(IntRange::U(_) | IntRange::I(_) | IntRange::USize | IntRange::ISize) => true,
         TypX::Boxed(typ) => allowed_bitvector_type(typ),
+        _ => false,
+    }
+}
+
+pub fn is_integer_type(typ: &Typ) -> bool {
+    match &**typ {
+        TypX::Int(_) => true,
+        TypX::Boxed(typ) => is_integer_type(typ),
         _ => false,
     }
 }
@@ -179,6 +191,10 @@ pub fn path_as_rust_name(path: &Path) -> String {
         strings.push(segment.to_string());
     }
     strings.join("::")
+}
+
+pub fn path_as_vstd_name(path: &Path) -> Option<String> {
+    crate::def::name_as_vstd_name(&path_as_rust_name(path))
 }
 
 pub fn fun_as_rust_dbg(fun: &Fun) -> String {

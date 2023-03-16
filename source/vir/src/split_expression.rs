@@ -1,6 +1,6 @@
 use crate::ast::{
     BinaryOp, Exprs, Fun, Function, Ident, Params, Quant, SpannedTyped, Typ, TypBounds, TypX, Typs,
-    UnaryOp, VirErr,
+    UnaryOp, UnaryOpr, VirErr,
 };
 use crate::ast_to_sst::get_function;
 use crate::context::Ctx;
@@ -244,21 +244,6 @@ fn mk_imply_traced(e1: &Exp, e2: &TracedExp) -> TracedExp {
     TracedExpX::new(imply_exp, e2.trace.clone())
 }
 
-fn mk_chained_implies(es: TracedExps) -> TracedExps {
-    let mut chained_vec = vec![];
-    let mut chained_e = es.first().unwrap().clone();
-    // REVIEW: change encoding order ---- (A => B) => C to A => (B => C )
-    for (idx, e) in es.iter().enumerate() {
-        if idx == 0 {
-            chained_vec.push(chained_e.clone());
-        } else {
-            chained_e = mk_imply_traced(&chained_e.e, e);
-            chained_vec.push(chained_e.clone());
-        }
-    }
-    Arc::new(chained_vec)
-}
-
 // Note: this splitting referenced Dafny - https://github.com/dafny-lang/dafny/blob/cf285b9282499c46eb24f05c7ecc7c72423cd878/Source/Dafny/Verifier/Translator.cs#L11100
 fn split_expr(ctx: &Ctx, state: &State, exp: &TracedExp, negated: bool) -> TracedExps {
     if !is_bool_type(&exp.e.typ) {
@@ -286,8 +271,6 @@ fn split_expr(ctx: &Ctx, state: &State, exp: &TracedExp, negated: bool) -> Trace
                         false,
                     );
                     // instead of `A && B` to [A,B], use [A, A=>B]
-                    let es1 = mk_chained_implies(es1);
-                    let es2 = mk_chained_implies(es2);
                     let es2 = Arc::new(es2.iter().map(|e| mk_imply_traced(e1, e)).collect());
                     return merge_two_es(es1, es2);
                 }
@@ -307,8 +290,6 @@ fn split_expr(ctx: &Ctx, state: &State, exp: &TracedExp, negated: bool) -> Trace
                     );
                     // now `Or` is changed to `And`
                     // instead of `A && B` to [A,B], use [A, A=>B]
-                    let es1 = mk_chained_implies(es1);
-                    let es2 = mk_chained_implies(es2);
                     let e1 = SpannedTyped::new(
                         &e1.span,
                         &Arc::new(TypX::Bool),
@@ -397,27 +378,37 @@ fn split_expr(ctx: &Ctx, state: &State, exp: &TracedExp, negated: bool) -> Trace
             );
             return merge_two_es(es1, es2);
         }
-        ExpX::UnaryOpr(uop, e1) => {
-            match uop {
-                crate::ast::UnaryOpr::Box(_) | crate::ast::UnaryOpr::Unbox(_) => (),
-                crate::ast::UnaryOpr::HasType(_)
-                | crate::ast::UnaryOpr::IntegerTypeBound(..)
-                | crate::ast::UnaryOpr::Height
-                | crate::ast::UnaryOpr::IsVariant { .. }
-                | crate::ast::UnaryOpr::TupleField { .. }
-                | crate::ast::UnaryOpr::Field(_) => return mk_atom(exp.clone(), negated),
+        ExpX::UnaryOpr(uop, e1) => match uop {
+            UnaryOpr::Box(_) | UnaryOpr::Unbox(_) => {
+                let es1 = split_expr(
+                    ctx,
+                    state,
+                    &TracedExpX::new(e1.clone(), exp.trace.clone()),
+                    negated,
+                );
+                let mut split_traced: Vec<TracedExp> = vec![];
+                for e in &*es1 {
+                    let new_e = ExpX::UnaryOpr(uop.clone(), e.e.clone());
+                    let new_exp = SpannedTyped::new(&e.e.span, &exp.e.typ, new_e);
+                    let new_tr_exp = TracedExpX::new(new_exp.clone(), e.trace.clone());
+                    split_traced.push(new_tr_exp);
+                }
+                return Arc::new(split_traced);
             }
-            let es1 =
-                split_expr(ctx, state, &TracedExpX::new(e1.clone(), exp.trace.clone()), negated);
-            let mut split_traced: Vec<TracedExp> = vec![];
-            for e in &*es1 {
-                let new_e = ExpX::UnaryOpr(uop.clone(), e.e.clone());
-                let new_exp = SpannedTyped::new(&e.e.span, &exp.e.typ, new_e);
-                let new_tr_exp = TracedExpX::new(new_exp.clone(), e.trace.clone());
-                split_traced.push(new_tr_exp);
+            UnaryOpr::CustomErr(msg) => {
+                let traced_exp =
+                    TracedExpX::new(e1.clone(), exp.trace.secondary_label(&exp.e.span, &**msg));
+                return split_expr(ctx, state, &traced_exp, negated);
             }
-            return Arc::new(split_traced);
-        }
+            UnaryOpr::HasType(_)
+            | UnaryOpr::IntegerTypeBound(..)
+            | UnaryOpr::Height
+            | UnaryOpr::IsVariant { .. }
+            | UnaryOpr::TupleField { .. }
+            | UnaryOpr::Field(_) => {
+                return mk_atom(exp.clone(), negated);
+            }
+        },
         ExpX::Bind(bnd, e1) => {
             let new_bnd = match &bnd.x {
                 BndX::Let(..) if !negated => bnd.clone(), // REVIEW: Can we support `Let` in negated position?

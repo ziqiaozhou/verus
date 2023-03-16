@@ -4,8 +4,12 @@ use builtin::*;
 use builtin_macros::*;
 #[allow(unused_imports)]
 use crate::pervasive::*;
+#[cfg(not(vstd_build_todo))]
 #[allow(unused_imports)]
 use crate::pervasive::set::*;
+#[cfg(vstd_build_todo)]
+#[allow(unused_imports)]
+use crate::set::*;
 
 verus! {
 
@@ -166,13 +170,13 @@ pub open spec fn check_argument_is_set<A>(s: Set<A>) -> Set<A> { s }
 /// Prove two sets equal by extensionality. Usage is:
 ///
 /// ```rust
-/// assert_sets_equal!(set1, set2);
+/// assert_sets_equal!(set1 == set2);
 /// ```
 /// 
 /// or,
 /// 
 /// ```rust
-/// assert_sets_equal!(set1, set2, elem => {
+/// assert_sets_equal!(set1 == set2, elem => {
 ///     // prove that set1.contains(elem) iff set2.contains(elem)
 /// });
 /// ```
@@ -187,12 +191,18 @@ macro_rules! assert_sets_equal {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! assert_sets_equal_internal {
+    (::builtin::spec_eq($s1:expr, $s2:expr)) => {
+        assert_sets_equal_internal!($s1, $s2)
+    };
+    (::builtin::spec_eq($s1:expr, $s2:expr), $elem:ident $( : $t:ty )? => $bblock:block) => {
+        assert_sets_equal_internal!($s1, $s2, $elem $( : $t )? => $bblock)
+    };
     ($s1:expr, $s2:expr $(,)?) => {
         assert_sets_equal_internal!($s1, $s2, elem => { })
     };
     ($s1:expr, $s2:expr, $elem:ident $( : $t:ty )? => $bblock:block) => {
-        let s1 = $crate::pervasive::set_lib::check_argument_is_set($s1);
-        let s2 = $crate::pervasive::set_lib::check_argument_is_set($s2);
+        #[verifier::spec] let s1 = $crate::pervasive::set_lib::check_argument_is_set($s1);
+        #[verifier::spec] let s2 = $crate::pervasive::set_lib::check_argument_is_set($s2);
         ::builtin::assert_by(::builtin::equal(s1, s2), {
             ::builtin::assert_forall_by(|$elem $( : $t )?| {
                 ::builtin::ensures(

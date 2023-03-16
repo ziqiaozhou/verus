@@ -3,7 +3,7 @@ use crate::ast::{
     InferMode, InvAtomicity, Krate, Mode, ModeCoercion, MultiOp, Path, Pattern, PatternX, Stmt,
     StmtX, UnaryOp, UnaryOpr, VirErr,
 };
-use crate::ast_util::{err_str, err_string, get_field};
+use crate::ast_util::{err_str, err_string, get_field, path_as_vstd_name};
 use crate::def::user_local_name;
 use crate::util::vec_map_result;
 use air::ast::Span;
@@ -49,7 +49,7 @@ enum Ghost {
 // For example, if there are arithmetic operations that are exec (and therefore not erased),
 // then the AIR/SMT code will insert overflow checks for those arithmetic operations.
 // Example:
-//   fn test(#[exec] e: u64, #[spec] s: u64) {
+//   fn test(#[verifier::exec] e: u64, #[verifier::spec] s: u64) {
 //     if e + 1 < s { ... }
 //   }
 // Here, e + 1 < y is erased because the "<" comparison with s is spec, not exec.
@@ -124,6 +124,7 @@ struct Typing {
     inferred_modes: HashMap<InferMode, ErasureMode>,
     pub(crate) in_forall_stmt: bool,
     pub(crate) check_ghost_blocks: bool,
+    pub(crate) macro_erasure: bool,
     // Are we in a syntactic ghost block?
     // If not, Ghost::Exec (corresponds to exec mode).
     // If yes (corresponding to proof/spec mode), say whether variables are tracked or not.
@@ -331,6 +332,14 @@ fn get_var_loc_mode(
     let x_mode = match &expr.x {
         ExprX::VarLoc(x) => {
             let (_, x_mode) = typing.get(x);
+
+            if typing.check_ghost_blocks
+                && typing.block_ghostness == Ghost::Exec
+                && x_mode != Mode::Exec
+            {
+                return err_str(&expr.span, &format!("exec code cannot mutate non-exec variable"));
+            }
+
             x_mode
         }
         ExprX::Unary(
@@ -442,17 +451,24 @@ fn check_expr_handle_mut_arg(
     let mode = match &expr.x {
         ExprX::Const(_) => Ok(Mode::Exec),
         ExprX::Var(x) | ExprX::VarLoc(x) | ExprX::VarAt(x, _) => {
-            let x_mode = typing.get(x).1;
-            let mode = mode_join(outer_mode, x_mode);
-            if typing.in_forall_stmt && mode == Mode::Proof {
+            if typing.in_forall_stmt {
                 // Proof variables may be used as spec, but not as proof inside forall statements.
                 // This protects against effectively consuming a linear proof variable
                 // multiple times for different instantiations of the forall variables.
-                return err_str(
-                    &expr.span,
-                    "cannot use tracked variable inside 'assert ... by' statements",
-                );
+                return Ok((Mode::Spec, None));
             }
+
+            let x_mode = typing.get(x).1;
+
+            if typing.check_ghost_blocks
+                && typing.block_ghostness == Ghost::Exec
+                && x_mode != Mode::Exec
+            {
+                return err_str(&expr.span, &format!("cannot use {x_mode} variable in exec-code"));
+            }
+
+            let mode = mode_join(outer_mode, x_mode);
+
             let mode = if typing.check_ghost_blocks {
                 typing.block_ghostness.join_mode(mode)
             } else {
@@ -499,7 +515,9 @@ fn check_expr_handle_mut_arg(
                 }
             }
             let mode_error_msg = || {
-                if x.path == crate::def::exec_nonstatic_call_path() {
+                if path_as_vstd_name(&x.path)
+                    == path_as_vstd_name(&crate::def::exec_nonstatic_call_path(&None))
+                {
                     format!("to call a non-static function in ghost code, it must be a FnSpec")
                 } else {
                     format!("cannot call function with mode {}", function.x.mode)
@@ -528,7 +546,7 @@ fn check_expr_handle_mut_arg(
                     let arg_mode_write = arg_mode_write.expect("internal error: no arg_mode_write");
                     if arg_mode_read != param_mode {
                         return err_string(
-                            &param.span,
+                            &arg.span,
                             format!(
                                 "expected mode {}, &mut argument has mode {}",
                                 param_mode, arg_mode_read
@@ -537,7 +555,7 @@ fn check_expr_handle_mut_arg(
                     }
                     if arg_mode_write != param_mode {
                         return err_string(
-                            &param.span,
+                            &arg.span,
                             format!(
                                 "expected mode {}, &mut argument has mode {}",
                                 param_mode, arg_mode_write
@@ -658,6 +676,10 @@ fn check_expr_handle_mut_arg(
             if typing.check_ghost_blocks && typing.block_ghostness == Ghost::Exec {
                 return err_str(&expr.span, "cannot test 'height' in exec mode");
             }
+            check_expr_has_mode(typing, Mode::Spec, e1, Mode::Spec)?;
+            Ok(Mode::Spec)
+        }
+        ExprX::UnaryOpr(UnaryOpr::CustomErr(_), e1) => {
             check_expr_has_mode(typing, Mode::Spec, e1, Mode::Spec)?;
             Ok(Mode::Spec)
         }
@@ -804,8 +826,18 @@ fn check_expr_handle_mut_arg(
             check_expr_has_mode(typing, outer_mode, rhs, x_mode)?;
             Ok(x_mode)
         }
-        ExprX::Fuel(_, _) => Ok(outer_mode),
-        ExprX::RevealString(_) => Ok(outer_mode),
+        ExprX::Fuel(_, _) => {
+            if typing.macro_erasure && typing.block_ghostness == Ghost::Exec {
+                return err_str(&expr.span, "cannot use reveal/hide in exec mode");
+            }
+            Ok(outer_mode)
+        }
+        ExprX::RevealString(_) => {
+            if typing.macro_erasure && typing.block_ghostness == Ghost::Exec {
+                return err_str(&expr.span, "cannot use reveal_strlit in exec mode");
+            }
+            Ok(outer_mode)
+        }
         ExprX::Header(_) => panic!("internal error: Header shouldn't exist here"),
         ExprX::AssertAssume { is_assume: _, expr: e } => {
             if typing.check_ghost_blocks && typing.block_ghostness == Ghost::Exec {
@@ -1043,7 +1075,12 @@ fn check_expr_handle_mut_arg(
             if outer_mode == Mode::Spec {
                 return err_string(&expr.span, format!("Cannot open invariant in Spec mode."));
             }
+
+            let prev = typing.block_ghostness;
+            typing.block_ghostness = Ghost::Ghost;
             let mode1 = check_expr(typing, outer_mode, erasure_mode, inv)?;
+            typing.block_ghostness = prev;
+
             if mode1 != Mode::Proof {
                 return err_string(&inv.span, format!("Invariant must be Proof mode."));
             }
@@ -1088,10 +1125,7 @@ fn check_stmt(
             Ok(())
         }
         StmtX::Decl { pattern, mode, init } => {
-            let mode = if typing.check_ghost_blocks
-                && typing.block_ghostness != Ghost::Exec
-                && *mode == Mode::Exec
-            {
+            let mode = if typing.block_ghostness != Ghost::Exec && *mode == Mode::Exec {
                 Mode::Spec
             } else {
                 *mode
@@ -1099,8 +1133,9 @@ fn check_stmt(
             if typing.check_ghost_blocks
                 && typing.block_ghostness == Ghost::Exec
                 && mode != Mode::Exec
+                && init.is_some()
             {
-                return err_str(&stmt.span, "exec code cannot declare non-exec variables");
+                return err_str(&stmt.span, "exec code cannot initialize non-exec variables");
             }
             if !mode_le(outer_mode, mode) {
                 return err_string(&stmt.span, format!("pattern cannot have mode {}", mode));
@@ -1122,19 +1157,7 @@ fn check_function(typing: &mut Typing, function: &Function) -> Result<(), VirErr
 
     if let FunctionKind::TraitMethodImpl { method, trait_path, datatype, .. } = &function.x.kind {
         let datatype_mode = typing.datatypes[datatype].x.mode;
-        let self_mode = function.x.params[0].x.mode;
         let our_trait = typing.traits.contains(trait_path);
-        if self_mode != function.x.mode {
-            // It's hard for erase.rs to support mode != param_mode (we'd have to erase self),
-            // so we currently disallow it:
-            return err_string(
-                &function.x.params[0].span,
-                format!(
-                    "self has mode {}, function has mode {} -- these cannot be different",
-                    self_mode, function.x.mode
-                ),
-            );
-        }
         let (expected_params, expected_ret_mode): (Vec<Mode>, Mode) = if our_trait {
             let trait_method = &typing.funs[method];
             let expect_mode = mode_join(trait_method.x.mode, datatype_mode);
@@ -1233,7 +1256,10 @@ fn check_function(typing: &mut Typing, function: &Function) -> Result<(), VirErr
     Ok(())
 }
 
-pub fn check_crate(krate: &Krate) -> Result<(ErasureModes, HashMap<InferMode, Mode>), VirErr> {
+pub fn check_crate(
+    krate: &Krate,
+    macro_erasure: bool,
+) -> Result<(ErasureModes, HashMap<InferMode, Mode>), VirErr> {
     let mut funs: HashMap<Fun, Function> = HashMap::new();
     let mut datatypes: HashMap<Path, Datatype> = HashMap::new();
     for function in krate.functions.iter() {
@@ -1252,6 +1278,7 @@ pub fn check_crate(krate: &Krate) -> Result<(ErasureModes, HashMap<InferMode, Mo
         inferred_modes: HashMap::new(),
         in_forall_stmt: false,
         check_ghost_blocks: false,
+        macro_erasure,
         block_ghostness: Ghost::Exec,
         fun_mode: Mode::Exec,
         ret_mode: None,

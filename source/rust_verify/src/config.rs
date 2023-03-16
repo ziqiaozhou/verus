@@ -16,10 +16,22 @@ impl Default for ShowTriggers {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Erasure {
+    Ast,
+    Macro,
+}
+impl Default for Erasure {
+    fn default() -> Self {
+        Erasure::Ast
+    }
+}
+
 pub const LOG_DIR: &str = ".verus-log";
 pub const VIR_FILE_SUFFIX: &str = ".vir";
 pub const VIR_SIMPLE_FILE_SUFFIX: &str = "-simple.vir";
 pub const VIR_POLY_FILE_SUFFIX: &str = "-poly.vir";
+pub const LIFETIME_FILE_SUFFIX: &str = "-lifetime.rs";
 pub const INTERPRETER_FILE_SUFFIX: &str = ".interp";
 pub const AIR_INITIAL_FILE_SUFFIX: &str = ".air";
 pub const AIR_FINAL_FILE_SUFFIX: &str = "-final.air";
@@ -30,6 +42,8 @@ pub const TRIGGERS_FILE_SUFFIX: &str = ".triggers";
 #[derive(Debug, Default)]
 pub struct Args {
     pub pervasive_path: Option<String>,
+    pub export: Option<String>,
+    pub import: Vec<(String, String)>,
     pub verify_root: bool,
     pub verify_module: Vec<String>,
     pub verify_function: Option<String>,
@@ -50,6 +64,7 @@ pub struct Args {
     pub log_vir_simple: bool,
     pub log_vir_poly: bool,
     pub vir_log_option: VirLogOption,
+    pub log_lifetime: bool,
     pub log_interpreter: bool,
     pub log_air_initial: bool,
     pub log_air_final: bool,
@@ -63,10 +78,28 @@ pub struct Args {
     pub profile: bool,
     pub profile_all: bool,
     pub compile: bool,
+    pub erasure: Erasure,
     pub solver_version_check: bool,
 }
 
-pub fn enable_default_features(rustc_args: &mut Vec<String>) {
+pub fn enable_default_features_and_verus_attr(
+    rustc_args: &mut Vec<String>,
+    syntax_macro: bool,
+    erase_ghost: bool,
+) {
+    if syntax_macro {
+        // REVIEW: syntax macro adds superfluous parentheses and braces
+        for allow in &["unused_parens", "unused_braces"] {
+            rustc_args.push("-A".to_string());
+            rustc_args.push(allow.to_string());
+        }
+    }
+    if erase_ghost {
+        for allow in &["unused_imports", "unused_mut"] {
+            rustc_args.push("-A".to_string());
+            rustc_args.push(allow.to_string());
+        }
+    }
     for feature in &[
         "stmt_expr_attributes",
         "box_syntax",
@@ -74,14 +107,20 @@ pub fn enable_default_features(rustc_args: &mut Vec<String>) {
         "negative_impls",
         "rustc_attrs",
         "unboxed_closures",
+        "register_tool",
     ] {
         rustc_args.push("-Z".to_string());
         rustc_args.push(format!("enable_feature={}", feature));
     }
+
+    rustc_args.push("-Zcrate-attr=register_tool(verus)".to_string());
+    rustc_args.push("-Zcrate-attr=register_tool(verifier)".to_string());
 }
 
 pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args, Vec<String>) {
     const OPT_PERVASIVE_PATH: &str = "pervasive-path";
+    const OPT_EXPORT: &str = "export";
+    const OPT_IMPORT: &str = "import";
     const OPT_VERIFY_ROOT: &str = "verify-root";
     const OPT_VERIFY_MODULE: &str = "verify-module";
     const OPT_VERIFY_FUNCTION: &str = "verify-function";
@@ -102,6 +141,7 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
     const OPT_LOG_VIR_SIMPLE: &str = "log-vir-simple";
     const OPT_LOG_VIR_POLY: &str = "log-vir-poly";
     const OPT_VIR_LOG_OPTION: &str = "vir-log-option";
+    const OPT_LOG_LIFETIME: &str = "log-lifetime";
     const OPT_LOG_INTERPRETER: &str = "log-interpreter";
     const OPT_LOG_AIR_INITIAL: &str = "log-air";
     const OPT_LOG_AIR_FINAL: &str = "log-air-final";
@@ -118,10 +158,13 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
     const OPT_PROFILE: &str = "profile";
     const OPT_PROFILE_ALL: &str = "profile-all";
     const OPT_COMPILE: &str = "compile";
+    const OPT_ERASURE: &str = "erasure";
     const OPT_NO_SOLVER_VERSION_CHECK: &str = "no-solver-version-check";
 
     let mut opts = Options::new();
     opts.optopt("", OPT_PERVASIVE_PATH, "Path of the pervasive module", "PATH");
+    opts.optopt("", OPT_EXPORT, "Export Verus metadata for library crate", "CRATENAME=PATH");
+    opts.optmulti("", OPT_IMPORT, "Import Verus metadata from library crate", "CRATENAME=PATH");
     opts.optflag("", OPT_VERIFY_ROOT, "Verify just the root module of crate");
     opts.optmulti(
         "",
@@ -180,6 +223,7 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
          "Set VIR logging option (e.g. `--vir-log-option no_span+no_type`. Available options: `compact` `no_span` `no_type` `no_encoding` `no_fn_details`) (default: verbose)",
          "VIR_LOG_OPTION",
     );
+    opts.optflag("", OPT_LOG_LIFETIME, "Log lifetime checking for --erasure macro");
     opts.optflag("", OPT_LOG_INTERPRETER, "Log assert_by_compute's interpreter progress");
     opts.optflag("", OPT_LOG_AIR_INITIAL, "Log AIR queries in initial form");
     opts.optflag("", OPT_LOG_AIR_FINAL, "Log AIR queries in final form");
@@ -200,6 +244,12 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
     );
     opts.optflag("", OPT_PROFILE_ALL, "Always collect and report prover performance data");
     opts.optflag("", OPT_COMPILE, "Run Rustc compiler after verification");
+    opts.optopt(
+        "",
+        OPT_ERASURE,
+        "Mechanism to erase ghost code (options: ast, macro) default = ast",
+        "STRING",
+    );
     opts.optflag("", OPT_NO_SOLVER_VERSION_CHECK, "Skip the check that the solver has the expected version (useful to experiment with different versions of z3)");
     opts.optflag("h", "help", "print this help menu");
 
@@ -230,9 +280,20 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
         Err(f) => error(f.to_string()),
     };
 
+    let split_pair_eq = |pair: &String| {
+        let v = pair.split('=').map(|s| s.trim()).collect::<Vec<_>>();
+        if v.len() == 2 {
+            (v[0].to_string(), v[1].to_string())
+        } else {
+            error("expected SMT option of form option_name=option_value".to_string())
+        }
+    };
+
     let args = Args {
         pervasive_path: matches.opt_str(OPT_PERVASIVE_PATH),
         verify_root: matches.opt_present(OPT_VERIFY_ROOT),
+        export: matches.opt_str(OPT_EXPORT),
+        import: matches.opt_strs(OPT_IMPORT).iter().map(split_pair_eq).collect(),
         verify_module: matches.opt_strs(OPT_VERIFY_MODULE),
         verify_function: matches.opt_str(OPT_VERIFY_FUNCTION),
         verify_pervasive: matches.opt_present(OPT_VERIFY_PERVASIVE),
@@ -260,18 +321,7 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
             .opt_get::<u32>(OPT_RLIMIT)
             .unwrap_or_else(|_| error("expected integer after rlimit".to_string()))
             .unwrap_or(DEFAULT_RLIMIT_SECS),
-        smt_options: matches
-            .opt_strs(OPT_SMT_OPTION)
-            .iter()
-            .map(|line| {
-                let v = line.split('=').map(|s| s.trim()).collect::<Vec<_>>();
-                if v.len() == 2 {
-                    (v[0].to_string(), v[1].to_string())
-                } else {
-                    error("expected SMT option of form option_name=option_value".to_string())
-                }
-            })
-            .collect(),
+        smt_options: matches.opt_strs(OPT_SMT_OPTION).iter().map(split_pair_eq).collect(),
         multiple_errors: matches
             .opt_get::<u32>(OPT_MULTIPLE_ERRORS)
             .unwrap_or_else(|_| error("expected integer after multiple-errors".to_string()))
@@ -302,6 +352,7 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
                 }
             }
         },
+        log_lifetime: matches.opt_present(OPT_LOG_LIFETIME),
         log_interpreter: matches.opt_present(OPT_LOG_INTERPRETER),
         log_air_initial: matches.opt_present(OPT_LOG_AIR_INITIAL),
         log_air_final: matches.opt_present(OPT_LOG_AIR_FINAL),
@@ -325,6 +376,12 @@ pub fn parse_args(program: &String, args: impl Iterator<Item = String>) -> (Args
         profile: matches.opt_present(OPT_PROFILE),
         profile_all: matches.opt_present(OPT_PROFILE_ALL),
         compile: matches.opt_present(OPT_COMPILE),
+        erasure: match matches.opt_str(OPT_ERASURE).as_ref().map(|x| x.as_str()) {
+            None => Erasure::default(),
+            Some("ast") => Erasure::Ast,
+            Some("macro") => Erasure::Macro,
+            Some(s) => error(format!("unexpected erasure argument {s}")),
+        },
         solver_version_check: !matches.opt_present(OPT_NO_SOLVER_VERSION_CHECK),
     };
 

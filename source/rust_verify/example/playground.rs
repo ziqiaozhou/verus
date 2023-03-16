@@ -1,10 +1,5 @@
 use builtin_macros::*;
 use builtin::*;
-mod pervasive;
-use pervasive::{*, option::Option, result::Result};
-
-use pervasive::seq::*;
-use crate::pervasive::vec::*;
 
 verus! {
 
@@ -36,7 +31,7 @@ fn foo(s: S<u32>) {
 //
 // fndecl!(fn f(x: nat, y: nat) -> bool);
 //
-// #[proof] fn goodbye_z3() {
+// #[verus::proof] fn goodbye_z3() {
 //     requires(forall(|x: nat, y: nat| f(x + 1, 2 * y) && f(2 * x, y + x) || f(y, x) >>= (#[trigger] f(x, y))));
 //     ensures(forall(|x: nat, y: nat| x > 2318 && y < 100 >>= f(x, y)));
 // }

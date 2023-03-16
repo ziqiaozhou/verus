@@ -7,7 +7,10 @@ use core::marker;
 #[allow(unused_imports)] use crate::pervasive::*;
 #[allow(unused_imports)] use crate::pervasive::modes::*;
 #[allow(unused_imports)] use crate::pervasive::invariant::*;
+#[cfg(not(vstd_build_todo))]
 #[allow(unused_imports)] use crate::pervasive::set::*;
+#[cfg(vstd_build_todo)]
+#[allow(unused_imports)] use crate::set::*;
 
 verus!{
 
@@ -66,7 +69,7 @@ unsafe impl<T> Send for PCell<T> {}
 
 // PermissionOpt<V>, on the other hand, needs to inherit both Send and Sync from the V,
 // which it does by default in the given definition.
-// (Note: this depends on the current behavior that #[spec] fields are still counted for marker traits)
+// (Note: this depends on the current behavior that #[verifier::spec] fields are still counted for marker traits)
 
 #[verifier(external_body)]
 pub tracked struct PermissionOpt<#[verifier(strictly_positive)] V> {
@@ -251,8 +254,8 @@ pub struct InvCell<#[verifier(maybe_negative)] T> {
 
 }
 
+verus!{
 impl<T> InvCell<T> {
-    verus!{
     pub closed spec fn wf(&self) -> bool {
         &&& self.perm_inv@.constant() === (self.possible_values@, self.pcell)
     }
@@ -261,7 +264,7 @@ impl<T> InvCell<T> {
         &&& self.possible_values@.contains(val)
     }
 
-    pub fn new(val: T, #[spec] f: Ghost<FnSpec(T) -> bool>) -> (cell: Self)
+    pub fn new(val: T, #[verifier::spec] f: Ghost<FnSpec(T) -> bool>) -> (cell: Self)
         requires f@(val),
         ensures cell.wf() && forall |v| f@(v) <==> cell.inv(v),
     {
@@ -277,14 +280,18 @@ impl<T> InvCell<T> {
             perm_inv,
         }
     }
-    }
+}
+}
 
+impl<T> InvCell<T> {
     // note: can't use verus! for these right now because the invariants blocks
     // do not yet support Tracked/Ghost
 
     pub fn replace(&self, val: T) -> T
     {
+        #[cfg(not(verus_macro_erase_ghost))]
         requires(self.wf() && self.inv(val));
+        #[cfg(not(verus_macro_erase_ghost))]
         ensures(|old_val| self.inv(old_val));
 
         let r;
@@ -300,7 +307,9 @@ impl<T> InvCell<T> {
 impl<T: Copy> InvCell<T> {
     pub fn get(&self) -> T
     {
+        #[cfg(not(verus_macro_erase_ghost))]
         requires(self.wf());
+        #[cfg(not(verus_macro_erase_ghost))]
         ensures(|val| self.inv(val));
 
         let r;

@@ -1,7 +1,6 @@
 [package]
 name = "air"
 version = "0.1.0"
-authors = ["Chris Hawblitzel <Chris.Hawblitzel@microsoft.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,6 +10,7 @@ edition = "2018"
 sise = "0.6.0"
 getopts = { git = "https://github.com/utaal/getopts.git", branch = "parse-partial" }
 z3tracer = { git = "https://github.com/verus-lang/smt2utils.git", rev = "ff60e58b6c05d0daed6ab9177dd70aa285dc6afa" }
+serde = { version = "1", features = ["derive", "rc"] }
 
 [target.'cfg(windows)'.dependencies]
 win32job = "1"

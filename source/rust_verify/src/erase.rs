@@ -1,5 +1,5 @@
 //! This module erases the non-compiled code ("ghost code") so that Rust can compile the
-//! remaining code.  Ghost code includes #[spec] and #[proof] code.
+//! remaining code.  Ghost code includes #[verifier::spec] and #[verifier::proof] code.
 //! This "erasure" step happens after verification, since the ghost code is needed
 //! for verification.
 //!
@@ -32,13 +32,13 @@
 //! HIR/VIR with the corresponding expressions and statements in the AST.
 //!
 //! In fact, we actually make three runs, because we want to run Rust's lifetime checking
-//! on #[proof] variables.  In this run, we erase #[spec] but not #[proof] and #[exec],
+//! on #[verifier::proof] variables.  In this run, we erase #[verifier::spec] but not #[verifier::proof] and #[verifier::exec],
 //! then we run mir_borrowck, then we stop and throw away the results.
 //!
 //! Summary of three runs:
-//! 1) AST -> HIR -> VIR for verification on #[exec], #[proof], #[spec]
-//! 2) AST -> HIR -> VIR -> MIR for mir_borrowck on #[exec], #[proof]
-//! 3) AST -> HIR -> VIR -> MIR -> ... for compilation of #[exec]
+//! 1) AST -> HIR -> VIR for verification on #[verifier::exec], #[verifier::proof], #[verifier::spec]
+//! 2) AST -> HIR -> VIR -> MIR for mir_borrowck on #[verifier::exec], #[verifier::proof]
+//! 3) AST -> HIR -> VIR -> MIR -> ... for compilation of #[verifier::exec]
 //!
 //! Notes:
 //!
@@ -47,9 +47,12 @@
 
 use crate::attributes::{get_mode, get_verifier_attrs};
 use crate::rust_to_vir_expr::attrs_is_invariant_block;
+use crate::spans::from_raw_span;
 use crate::unsupported;
-use crate::util::{from_raw_span, vec_map};
+use crate::util::vec_map;
 use crate::verifier::DiagnosticOutputBuffer;
+
+use air::ast::AstId;
 
 use rustc_ast::ast::{
     AngleBracketedArg, AngleBracketedArgs, Arm, AssocItem, AssocItemKind, BinOpKind, Block, Crate,
@@ -60,6 +63,7 @@ use rustc_ast::ast::{
 };
 use rustc_ast::ptr::P;
 use rustc_data_structures::thin_vec::ThinVec;
+use rustc_hir::HirId;
 use rustc_interface::interface::Compiler;
 use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::{Span, SpanData};
@@ -76,13 +80,29 @@ use vir::ast::{
 use vir::ast_util::get_field;
 use vir::modes::{mode_join, ErasureModes};
 
+#[derive(Clone, Copy, Debug)]
+pub enum CompilableOperator {
+    IntIntrinsic,
+    Implies,
+    SmartPtrNew,
+    SmartPtrClone,
+    NewStrLit,
+    TrackedGet,
+    TrackedBorrow,
+    TrackedBorrowMut,
+    GhostSplitTuple,
+    TrackedSplitTuple,
+}
+
 /// Information about each call in the AST (each ExprKind::Call).
 #[derive(Clone, Debug)]
 pub enum ResolvedCall {
     /// The call is to a spec or proof function, and should be erased
     Spec,
+    /// The call is to a spec or proof function, but may have proof-mode arguments
+    SpecAllowProofArgs,
     /// The call is to an operator like == or + that should be compiled.
-    CompilableOperator,
+    CompilableOperator(CompilableOperator),
     /// The call is to a function, and we record the resolved name of the function here.
     Call(Fun),
     /// Path and variant of datatype constructor
@@ -95,8 +115,10 @@ pub enum ResolvedCall {
 pub struct ErasureHints {
     /// Copy of the entire VIR crate that was created in the first run's HIR -> VIR transformation
     pub vir_crate: Krate,
+    /// Connect expression and pattern HirId to corresponding vir AstId
+    pub hir_vir_ids: Vec<(HirId, AstId)>,
     /// Details of each call in the first run's HIR
-    pub resolved_calls: Vec<(SpanData, ResolvedCall)>,
+    pub resolved_calls: Vec<(HirId, SpanData, ResolvedCall)>,
     /// Details of some expressions in first run's HIR
     pub resolved_exprs: Vec<(SpanData, vir::ast::Expr)>,
     /// Details of some patterns in first run's HIR
@@ -107,7 +129,7 @@ pub struct ErasureHints {
     /// so we need to record them separately here.)
     pub external_functions: Vec<Fun>,
     /// List of function spans ignored by the verifier. These should not be erased
-    pub ignored_functions: Vec<SpanData>,
+    pub ignored_functions: Vec<(rustc_span::def_id::DefId, SpanData)>,
 }
 
 #[derive(Clone)]
@@ -136,7 +158,7 @@ pub struct Ctxt {
     /// "if x < 10 { x + 1 } else { x + 2 }", we will have three entries, one for each
     /// occurence of "x"
     var_modes: HashMap<Span, Mode>,
-    /// Keep #[proof] variables, code if true, erase #[proof] if false
+    /// Keep #[verifier::proof] variables, code if true, erase #[verifier::proof] if false
     keep_proofs: bool,
     /// counter to generate arbitrary unique integers
     arbitrary_counter: Cell<u64>,
@@ -446,7 +468,7 @@ fn erase_expr_opt(ctxt: &Ctxt, mctxt: &mut MCtxt, expect: Mode, expr: &Expr) -> 
         match &expr.kind {
             ExprKind::Block(..) => {}
             ExprKind::Call(f_expr, _) => match mctxt.find_span_opt(&ctxt.calls, f_expr.span) {
-                Some(ResolvedCall::Spec) => return None,
+                Some(ResolvedCall::Spec | ResolvedCall::SpecAllowProofArgs) => return None,
                 _ => return Some(expr.clone()),
             },
             _ => return Some(expr.clone()),
@@ -567,8 +589,8 @@ fn erase_expr_opt(ctxt: &Ctxt, mctxt: &mut MCtxt, expect: Mode, expr: &Expr) -> 
             let call = mctxt.find_span(&ctxt.calls, f_expr.span).clone();
 
             match &call {
-                ResolvedCall::Spec => return None,
-                ResolvedCall::CompilableOperator => {
+                ResolvedCall::Spec | ResolvedCall::SpecAllowProofArgs => return None,
+                ResolvedCall::CompilableOperator(_) => {
                     if keep_mode(ctxt, expect) {
                         ExprKind::Call(
                             f_expr.clone(),
@@ -649,8 +671,8 @@ fn erase_expr_opt(ctxt: &Ctxt, mctxt: &mut MCtxt, expect: Mode, expr: &Expr) -> 
                         }
                     }
                 },
-                ResolvedCall::Spec => return None,
-                ResolvedCall::CompilableOperator => {
+                ResolvedCall::Spec | ResolvedCall::SpecAllowProofArgs => return None,
+                ResolvedCall::CompilableOperator(_) => {
                     if keep_mode(ctxt, expect) {
                         ExprKind::MethodCall(
                             m_path.clone(),
@@ -1350,21 +1372,21 @@ fn mk_ctxt(erasure_hints: &ErasureHints, known_spans: &HashSet<Span>, keep_proof
     let mut resolved_pats: HashMap<Span, Pattern> = HashMap::new();
     for f in &erasure_hints.vir_crate.functions {
         functions.insert(f.x.name.clone(), Some(f.clone())).map(|_| panic!("{:?}", &f.x.name));
-        let span = from_raw_span(&f.span.raw_span);
+        let span = from_raw_span(&f.span.raw_span).expect("local span");
         assert!(known_spans.contains(&span));
         functions_by_span.insert(span, Some(f.clone())).map(|_| panic!("{:?}", &f.span));
     }
     for name in &erasure_hints.external_functions {
         functions.insert(name.clone(), None).map(|_| panic!("{:?}", name));
     }
-    for span in &erasure_hints.ignored_functions {
+    for (_id, span) in &erasure_hints.ignored_functions {
         assert!(known_spans.contains(&span.span()));
         functions_by_span.insert(span.span(), None).map(|v| v.map(|_| panic!("{:?}", span)));
     }
     for d in &erasure_hints.vir_crate.datatypes {
         datatypes.insert(d.x.path.clone(), d.clone()).map(|_| panic!("{:?}", &d.x.path));
     }
-    for (span, call) in &erasure_hints.resolved_calls {
+    for (_, span, call) in &erasure_hints.resolved_calls {
         assert!(known_spans.contains(&span.span()));
         calls.insert(span.span(), call.clone()).map(|_| panic!("{:?}", span));
     }
@@ -1379,12 +1401,12 @@ fn mk_ctxt(erasure_hints: &ErasureHints, known_spans: &HashSet<Span>, keep_proof
     let mut condition_modes: HashMap<Span, Mode> = HashMap::new();
     let mut var_modes: HashMap<Span, Mode> = HashMap::new();
     for (span, mode) in &erasure_hints.erasure_modes.condition_modes {
-        let span = from_raw_span(&span.raw_span);
+        let span = from_raw_span(&span.raw_span).expect("local span");
         assert!(known_spans.contains(&span));
         condition_modes.insert(span, *mode).map(|_| panic!("{:?}", span));
     }
     for (span, mode) in &erasure_hints.erasure_modes.var_modes {
-        let span = from_raw_span(&span.raw_span);
+        let span = from_raw_span(&span.raw_span).expect("local span");
         assert!(known_spans.contains(&span));
         var_modes.insert(span, *mode).map(|v| panic!("{:?} {:?}", span, v));
     }
@@ -1404,7 +1426,7 @@ fn mk_ctxt(erasure_hints: &ErasureHints, known_spans: &HashSet<Span>, keep_proof
 }
 
 #[derive(Clone)]
-pub struct CompilerCallbacks {
+pub struct CompilerCallbacksEraseAst {
     pub erasure_hints: ErasureHints,
     pub lifetimes_only: bool,
     pub print: bool,
@@ -1412,7 +1434,7 @@ pub struct CompilerCallbacks {
     pub time_erasure: Arc<Mutex<Duration>>,
 }
 
-impl CompilerCallbacks {
+impl CompilerCallbacksEraseAst {
     fn maybe_print<'tcx>(
         &self,
         compiler: &Compiler,
@@ -1433,7 +1455,7 @@ impl CompilerCallbacks {
 
 /// Implement the callback from Rust that rewrites the AST
 /// (Rust will call rewrite_crate just before transforming AST into HIR).
-impl rustc_lint::FormalVerifierRewrite for CompilerCallbacks {
+impl rustc_lint::FormalVerifierRewrite for CompilerCallbacksEraseAst {
     fn rewrite_crate(
         &mut self,
         krate: &rustc_ast::ast::Crate,
@@ -1459,7 +1481,7 @@ impl rustc_lint::FormalVerifierRewrite for CompilerCallbacks {
     }
 }
 
-impl rustc_driver::Callbacks for CompilerCallbacks {
+impl rustc_driver::Callbacks for CompilerCallbacksEraseAst {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         if let Some(target) = &self.test_capture_output {
             config.diagnostic_output =
