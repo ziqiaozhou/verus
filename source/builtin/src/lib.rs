@@ -327,6 +327,14 @@ impl<A> Clone for Ghost<A> {
     }
 }
 
+impl<A> Default for Ghost<A> {
+    #[verifier(external_body)]
+    #[inline(always)]
+    fn default() -> Self {
+        Ghost { phantom: Default::default() }
+    }
+}
+
 impl<A> Copy for Ghost<A> {}
 
 macro_rules! emit_phantom {
