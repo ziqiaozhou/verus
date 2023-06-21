@@ -66,6 +66,7 @@ pub struct ArgsX {
     pub profile: bool,
     pub profile_all: bool,
     pub no_vstd: bool,
+    pub no_builtin: bool,
     pub compile: bool,
     pub solver_version_check: bool,
     pub record: bool,
@@ -135,6 +136,7 @@ pub fn parse_args_with_imports(
     const OPT_SMT_OPTION: &str = "smt-option";
     const OPT_MULTIPLE_ERRORS: &str = "multiple-errors";
     const OPT_NO_VSTD: &str = "no-vstd";
+    const OPT_NO_BUILTIN: &str = "no-builtin";
     const OPT_EXPAND_ERRORS: &str = "expand-errors";
     const OPT_LOG_DIR: &str = "log-dir";
     const OPT_LOG_ALL: &str = "log-all";
@@ -210,6 +212,7 @@ pub fn parse_args_with_imports(
     opts.optmulti("", OPT_SMT_OPTION, "Set an SMT option (e.g. smt.random_seed=7)", "OPTION=VALUE");
     opts.optopt("", OPT_MULTIPLE_ERRORS, "If 0, look for at most one error per function; if > 0, always find first error in function and make extra queries to find more errors (default: 2)", "INTEGER");
     opts.optflag("", OPT_NO_VSTD, "Do not load or link against the vstd library");
+    opts.optflag("", OPT_NO_BUILTIN, "Do not load or link against the builtin and builtin_macros libraries");
     opts.optflag(
         "",
         OPT_EXPAND_ERRORS,
@@ -398,7 +401,8 @@ pub fn parse_args_with_imports(
         profile: matches.opt_present(OPT_PROFILE),
         profile_all: matches.opt_present(OPT_PROFILE_ALL),
         compile: matches.opt_present(OPT_COMPILE),
-        no_vstd,
+        no_vstd: matches.opt_present(OPT_NO_VSTD),
+        no_builtin: matches.opt_present(OPT_NO_BUILTIN),
         solver_version_check: !matches.opt_present(OPT_NO_SOLVER_VERSION_CHECK),
         record: matches.opt_present(OPT_RECORD),
         version: matches.opt_present(OPT_VERSION),

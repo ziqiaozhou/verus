@@ -214,12 +214,14 @@ use lib_exe_names::{LIB_DL, LIB_PRE};
 #[derive(Debug)]
 pub struct VerusExterns<'a> {
     path: &'a std::path::PathBuf,
+    has_builtin:bool,
     has_vstd: bool,
 }
 
 impl<'a> VerusExterns<'a> {
     pub fn to_args(&self) -> impl Iterator<Item = String> {
-        let mut args = vec![
+        let mut args = if self.has_builtin {
+            vec![
             format!("--extern"),
             format!("builtin={}", self.path.join(format!("libbuiltin.rlib")).to_str().unwrap()),
             format!("--extern"),
@@ -237,7 +239,10 @@ impl<'a> VerusExterns<'a> {
             ),
             format!("-L"),
             format!("dependency={}", self.path.to_str().unwrap()),
-        ];
+        ]
+        } else {
+            vec![]
+        };
         if self.has_vstd {
             args.push(format!("--extern"));
             args.push(format!(
@@ -263,7 +268,7 @@ where
         if let Some(VerusRoot { path: verusroot, in_vargo }) = verus_root {
             rustc_args.push(format!("--edition"));
             rustc_args.push(format!("2018"));
-            let externs = VerusExterns { path: &verusroot, has_vstd: !verifier.args.no_vstd };
+            let externs = VerusExterns { path: &verusroot, has_vstd: !verifier.args.no_vstd, has_builtin: !verifier.args.no_builtin};
             rustc_args.extend(externs.to_args());
             if in_vargo && !std::env::var("VERUS_Z3_PATH").is_ok() {
                 panic!("we are in vargo, but VERUS_Z3_PATH is not set; this is a bug");
