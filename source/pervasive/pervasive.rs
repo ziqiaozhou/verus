@@ -41,7 +41,7 @@ pub proof fn affirm(b: bool)
 #[doc(hidden)]
 #[verifier(external_body)]
 #[rustc_diagnostic_item = "verus::pervasive::pervasive::exec_nonstatic_call"]
-fn exec_nonstatic_call<Args: std::marker::Tuple, Output, F>(f: F, args: Args) -> (output: Output)
+fn exec_nonstatic_call<Args: core::marker::Tuple, Output, F>(f: F, args: Args) -> (output: Output)
     where F: FnOnce<Args, Output=Output>
     requires f.requires(args)
     ensures f.ensures(args, output)

@@ -30,6 +30,7 @@ pub exec fn slice_index_get<T>(slice: &[T], i: usize) -> (out: &T)
     &slice[i]
 }
 
+#[cfg(not(feature = "non_std"))]
 #[cfg(not(feature = "no_global_allocator"))] 
 #[verifier(external_body)]
 pub exec fn slice_to_vec<T: Copy>(slice: &[T]) -> (out: Vec<T>)
