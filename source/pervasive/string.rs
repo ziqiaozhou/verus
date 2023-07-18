@@ -9,6 +9,7 @@ use super::seq::Seq;
 use builtin::*;
 use builtin_macros::verus;
 use crate::prelude::*;
+use alloc::string::ToString;
 
 verus! {
 
@@ -130,6 +131,7 @@ impl<'a> StrSlice<'a> {
     // slice support is added
     // pub fn as_bytes<'a>(&'a [u8]) -> (ret: &'a [u8])
 
+    #[cfg(not(feature = "non_std"))]
     #[verifier(external_body)]
     pub fn as_bytes(&self) -> (ret: Vec<u8>)
         requires
@@ -236,18 +238,21 @@ impl String {
         String { inner: self.inner.clone() }
     }
 
+    #[cfg(not(feature = "non_std"))]
     #[verifier(external)]
     pub fn from_rust_string(inner: std::string::String) -> String
     {
         String { inner }
     }
 
+    #[cfg(not(feature = "non_std"))]
     #[verifier(external)]
     pub fn into_rust_string(self) -> std::string::String
     {
         self.inner
     }
 
+    #[cfg(not(feature = "non_std"))]
     #[verifier(external)]
     pub fn as_rust_string_ref(&self) -> &std::string::String
     {
