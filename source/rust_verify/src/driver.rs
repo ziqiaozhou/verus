@@ -104,9 +104,16 @@ impl verus_rustc_driver::Callbacks for CompilerCallbacksEraseMacro {
     }
 }
 
+/// Captures the verification and compilation time
 pub struct Stats {
+    /// time spent in rustc for parsing, initialization, macro expansion, etc.
+    /// (from run_compiler until we enter the `after_expansion` callback)
+    pub time_rustc: Duration,
+    /// time it took to verify the crate (this includes VIR generation, SMT solving, etc.)
     pub time_verify: Duration,
+    /// tiem for lifetime/borrow checking
     pub time_lifetime: Duration,
+    /// compilation time
     pub time_compile: Duration,
 }
 
@@ -136,12 +143,12 @@ pub(crate) fn run_with_erase_macro_compile(
     run_compiler(rustc_args, true, true, &mut callbacks, file_loader, build_test_mode)
 }
 
-struct VerusRoot {
-    path: std::path::PathBuf,
+pub struct VerusRoot {
+    pub path: std::path::PathBuf,
     in_vargo: bool,
 }
 
-fn find_verusroot() -> Option<VerusRoot> {
+pub fn find_verusroot() -> Option<VerusRoot> {
     std::env::var("VARGO_TARGET_DIR")
         .ok()
         .and_then(|target_dir| {
@@ -248,8 +255,9 @@ impl<'a> VerusExterns<'a> {
 }
 
 pub fn run<F>(
-    mut verifier: Verifier,
+    verifier: Verifier,
     mut rustc_args: Vec<String>,
+    verus_root: Option<VerusRoot>,
     file_loader: F,
     build_test_mode: bool,
 ) -> (Verifier, Stats, Result<(), ()>)
@@ -257,26 +265,13 @@ where
     F: 'static + rustc_span::source_map::FileLoader + Send + Sync + Clone,
 {
     if !build_test_mode {
-        if let Some(VerusRoot { path: verusroot, in_vargo }) = find_verusroot() {
-            if !verifier.args.no_vstd {
-                let vstd = verusroot.join("vstd.vir").to_str().unwrap().to_string();
-                verifier.args.import.push((format!("vstd"), vstd));
-            }
+        if let Some(VerusRoot { path: verusroot, in_vargo }) = verus_root {
             rustc_args.push(format!("--edition"));
             rustc_args.push(format!("2018"));
             let externs = VerusExterns { path: &verusroot, has_vstd: !verifier.args.no_vstd, has_builtin: !verifier.args.no_builtin};
             rustc_args.extend(externs.to_args());
             if in_vargo && !std::env::var("VERUS_Z3_PATH").is_ok() {
-                std::env::set_var(
-                    "VERUS_Z3_PATH",
-                    verusroot
-                        .parent()
-                        .and_then(|x| x.parent())
-                        .unwrap()
-                        .join(if cfg!(windows) { "z3.exe" } else { "z3" })
-                        .to_str()
-                        .unwrap(),
-                );
+                panic!("we are in vargo, but VERUS_Z3_PATH is not set; this is a bug");
             }
         }
     } else if verifier.args.no_vstd {
@@ -288,6 +283,8 @@ where
     // Build VIR and run verification
     let mut verifier_callbacks = VerifierCallbacksEraseMacro {
         verifier,
+        rust_start_time: Instant::now(),
+        rust_end_time: None,
         lifetime_start_time: None,
         lifetime_end_time: None,
         rustc_args: rustc_args.clone(),
@@ -302,11 +299,17 @@ where
         Box::new(file_loader.clone()),
         build_test_mode,
     );
-    let VerifierCallbacksEraseMacro { verifier, lifetime_start_time, lifetime_end_time, .. } =
-        verifier_callbacks;
+    let VerifierCallbacksEraseMacro {
+        verifier,
+        rust_start_time,
+        rust_end_time,
+        lifetime_start_time,
+        lifetime_end_time,
+        ..
+    } = verifier_callbacks;
     if !verifier.args.output_json && !verifier.encountered_vir_error {
         println!(
-            "verification results:: verified: {} errors: {}{}",
+            "verification results:: {} verified, {} errors{}",
             verifier.count_verified,
             verifier.count_errors,
             if !is_verifying_entire_crate(&verifier) {
@@ -322,11 +325,17 @@ where
         _ => Duration::new(0, 0),
     };
 
+    let time_rustc = match rust_end_time {
+        Some(t1) => t1 - rust_start_time,
+        _ => Duration::new(0, 0),
+    };
+
     if status.is_err() || verifier.encountered_vir_error {
         return (
             verifier,
             Stats {
-                time_verify: time1 - time0 - time_lifetime,
+                time_rustc,
+                time_verify: (time1 - time0) - time_lifetime,
                 time_lifetime,
                 time_compile: Duration::new(0, 0),
             },
@@ -348,7 +357,8 @@ where
     let time2 = Instant::now();
 
     let stats = Stats {
-        time_verify: time1 - time0 - time_lifetime,
+        time_rustc,
+        time_verify: (time1 - time0) - time_lifetime,
         time_lifetime,
         time_compile: time2 - time1,
     };

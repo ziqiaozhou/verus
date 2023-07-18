@@ -1,17 +1,17 @@
 use crate::attributes::{get_mode, get_verifier_attrs, VerifierAttrs};
 use crate::context::Context;
 use crate::rust_to_vir_base::{
-    check_generics_bounds, def_id_to_vir_path, hack_get_def_name, mid_ty_to_vir, mk_visibility,
+    check_generics_bounds, def_id_to_vir_path, mid_ty_to_vir_param_env, mk_visibility,
     mk_visibility_from_vis,
 };
 use crate::unsupported_err_unless;
 use crate::util::{err_span, unsupported_err_span};
+use crate::verus_items::{PervasiveItem, VerusItem};
 use air::ast_util::str_ident;
 use rustc_ast::Attribute;
 use rustc_hir::{EnumDef, Generics, ItemId, VariantData};
 use rustc_middle::ty::{SubstsRef, TyKind};
 use rustc_span::Span;
-use rustc_span::Symbol;
 use std::sync::Arc;
 use vir::ast::{DatatypeTransparency, DatatypeX, Ident, KrateX, Mode, Path, Variant, VirErr};
 use vir::ast_util::ident_binder;
@@ -27,6 +27,7 @@ use vir::def::positional_field_ident;
 fn check_variant_data<'tcx, 'fd>(
     span: Span,
     ctxt: &Context<'tcx>,
+    item_id: &ItemId,
     name: &Ident,
     variant_data_opt: Option<&'tcx rustc_hir::VariantData<'tcx>>,
     field_defs: impl Iterator<Item = &'fd rustc_middle::ty::FieldDef>,
@@ -81,7 +82,14 @@ where
             str_ident(&field_def_ident.as_str())
         };
 
-        let typ = mid_ty_to_vir(ctxt.tcx, span, &field_ty, false)?;
+        let typ = mid_ty_to_vir_param_env(
+            ctxt.tcx,
+            &ctxt.verus_items,
+            item_id.owner_id.to_def_id(),
+            span,
+            &field_ty,
+            false,
+        )?;
         let mode = match hir_field_def_opt {
             Some(hir_field_def) => get_mode(Mode::Exec, ctxt.tcx.hir().attrs(hir_field_def.hir_id)),
             None => Mode::Exec,
@@ -118,9 +126,10 @@ pub fn check_item_struct<'tcx>(
     assert!(adt_def.is_struct());
     let vattrs = get_verifier_attrs(attrs)?;
 
-    let is_strslice_struct = ctxt
-        .tcx
-        .is_diagnostic_item(Symbol::intern("pervasive::string::StrSlice"), id.owner_id.to_def_id());
+    let is_strslice_struct = matches!(
+        ctxt.verus_items.id_to_name.get(&id.owner_id.to_def_id()),
+        Some(&VerusItem::Pervasive(PervasiveItem::StrSlice, _))
+    );
 
     if is_strslice_struct {
         if vattrs.external_type_specification {
@@ -146,15 +155,16 @@ pub fn check_item_struct<'tcx>(
     }
 
     let def_id = id.owner_id.to_def_id();
-    let typ_params = Arc::new(check_generics_bounds(
+    let (typ_params, typ_bounds) = check_generics_bounds(
         ctxt.tcx,
+        &ctxt.verus_items,
         generics,
         vattrs.external_body,
         def_id,
         Some(&vattrs),
-    )?);
-    let name = hack_get_def_name(ctxt.tcx, def_id);
-    let path = def_id_to_vir_path(ctxt.tcx, def_id);
+    )?;
+    let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, def_id);
+    let name = path.segments.last().expect("unexpected struct path");
 
     let variant_name = Arc::new(name.clone());
     let (variant, transparency) = if vattrs.external_body {
@@ -164,6 +174,7 @@ pub fn check_item_struct<'tcx>(
         let (variant, inner_vis) = check_variant_data(
             span,
             ctxt,
+            id,
             &variant_name,
             Some(variant_data),
             field_defs,
@@ -181,6 +192,7 @@ pub fn check_item_struct<'tcx>(
         owning_module: Some(module_path.clone()),
         transparency,
         typ_params,
+        typ_bounds,
         variants,
         mode,
         ext_equal: vattrs.ext_equal,
@@ -226,14 +238,15 @@ pub fn check_item_enum<'tcx>(
     }
 
     let def_id = id.owner_id.to_def_id();
-    let typ_params = Arc::new(check_generics_bounds(
+    let (typ_params, typ_bounds) = check_generics_bounds(
         ctxt.tcx,
+        &ctxt.verus_items,
         generics,
         vattrs.external_body,
         def_id,
         Some(&vattrs),
-    )?);
-    let path = def_id_to_vir_path(ctxt.tcx, def_id);
+    )?;
+    let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, def_id);
     let mut total_vis = visibility.clone();
     let mut variants: Vec<_> = vec![];
     for variant in enum_def.variants.iter() {
@@ -244,6 +257,7 @@ pub fn check_item_enum<'tcx>(
         let (variant, total_vis2) = check_variant_data(
             variant.span,
             ctxt,
+            id,
             &variant_name,
             Some(&variant.data),
             field_defs,
@@ -267,6 +281,7 @@ pub fn check_item_enum<'tcx>(
             owning_module: Some(module_path.clone()),
             transparency,
             typ_params,
+            typ_bounds,
             variants: Arc::new(variants),
             mode: get_mode(Mode::Exec, attrs),
             ext_equal: vattrs.ext_equal,
@@ -427,23 +442,24 @@ pub(crate) fn check_item_external<'tcx>(
     // Turn it into VIR
 
     let def_id = id.owner_id.to_def_id();
-    let typ_params = Arc::new(check_generics_bounds(
+    let (typ_params, typ_bounds) = check_generics_bounds(
         ctxt.tcx,
+        &ctxt.verus_items,
         generics,
         vattrs.external_body,
         def_id,
         Some(&vattrs),
-    )?);
+    )?;
     let mode = Mode::Exec;
 
-    let name = hack_get_def_name(ctxt.tcx, external_def_id);
-    let path = def_id_to_vir_path(ctxt.tcx, external_def_id);
+    let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, external_def_id);
+    let name = path.segments.last().expect("unexpected struct path");
 
     if path.krate == Some(Arc::new("builtin".to_string())) {
         return err_span(span, "cannot apply `external_type_specification` to Verus builtin types");
     }
 
-    let proxy_path = def_id_to_vir_path(ctxt.tcx, proxy_adt_def.did());
+    let proxy_path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, proxy_adt_def.did());
     let proxy = ctxt.spanned_new(span, proxy_path);
     let proxy = Some((*proxy).clone());
     let owning_module = Some(module_path.clone());
@@ -461,6 +477,7 @@ pub(crate) fn check_item_external<'tcx>(
             owning_module,
             transparency,
             typ_params,
+            typ_bounds,
             variants,
             mode,
             ext_equal: vattrs.ext_equal,
@@ -472,6 +489,7 @@ pub(crate) fn check_item_external<'tcx>(
         let (variant, inner_vis) = check_variant_data(
             span,
             ctxt,
+            id,
             &variant_name,
             None,
             field_defs,
@@ -495,6 +513,7 @@ pub(crate) fn check_item_external<'tcx>(
             owning_module,
             transparency,
             typ_params,
+            typ_bounds,
             variants,
             mode,
             ext_equal: vattrs.ext_equal,
@@ -514,6 +533,7 @@ pub(crate) fn check_item_external<'tcx>(
             let (variant, total_vis2) = check_variant_data(
                 span,
                 ctxt,
+                id,
                 &variant_name,
                 None,
                 field_defs,
@@ -542,6 +562,7 @@ pub(crate) fn check_item_external<'tcx>(
             owning_module,
             transparency,
             typ_params,
+            typ_bounds,
             variants,
             mode,
             ext_equal: vattrs.ext_equal,
