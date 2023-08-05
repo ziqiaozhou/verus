@@ -21,8 +21,8 @@ use syn_verus::{
     InvariantEnsures, InvariantNameSet, Item, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod,
     ItemStruct, ItemTrait, Lit, Local, ModeSpec, ModeSpecChecked, Pat, Path, PathArguments,
     PathSegment, Publish, Recommends, Requires, ReturnType, Signature, SignatureDecreases,
-    SignatureInvariants, Stmt, Token, TraitItem, TraitItemMethod, Type, TypeFnSpec, UnOp,
-    Visibility,
+    SignatureInvariants, Stmt, Token, TraitItem, TraitItemMethod, Type, TypeArray, TypeFnSpec,
+    UnOp, Visibility,
 };
 
 const VERUS_SPEC: &str = "VERUS_SPEC__";
@@ -2035,6 +2035,11 @@ impl VisitMut for Visitor {
 
                 *ty = Type::Verbatim(quote_spanned! { span =>
                     ::builtin::FnSpec<(#(#param_types ,)*), #out_type>
+                });
+            }
+            Type::Array(TypeArray { bracket_token: _, elem, semi_token, len }) => {
+                *ty = Type::Verbatim(quote_spanned! { span =>
+                    Array<#elem, #len>
                 });
             }
             _ => {
