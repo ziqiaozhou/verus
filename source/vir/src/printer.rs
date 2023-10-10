@@ -341,6 +341,7 @@ pub fn write_krate(mut write: impl std::io::Write, vir_crate: &Krate, opts: &ToD
         trait_impls,
         assoc_type_impls,
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names: _,

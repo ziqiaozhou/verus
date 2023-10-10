@@ -605,6 +605,7 @@ pub fn prune_krate_for_module(
             .cloned()
             .collect(),
         module_ids: krate.module_ids.clone(),
+        external_mods: krate.external_mods.clone(),
         external_fns: krate.external_fns.clone(),
         external_types: krate.external_types.clone(),
         path_as_rust_names: krate.path_as_rust_names.clone(),

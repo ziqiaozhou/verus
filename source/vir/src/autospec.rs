@@ -58,6 +58,7 @@ pub fn resolve_autospec(krate: &Krate) -> Result<Krate, VirErr> {
         trait_impls,
         module_ids,
         assoc_type_impls,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names,
@@ -75,6 +76,7 @@ pub fn resolve_autospec(krate: &Krate) -> Result<Krate, VirErr> {
     let module_ids = module_ids.clone();
     let external_fns = external_fns.clone();
     let external_types = external_types.clone();
+    let external_mods = external_mods.clone();
     let krate = Arc::new(KrateX {
         functions,
         datatypes,
@@ -82,6 +84,7 @@ pub fn resolve_autospec(krate: &Krate) -> Result<Krate, VirErr> {
         trait_impls: trait_impls.clone(),
         assoc_type_impls: assoc_type_impls.clone(),
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names: path_as_rust_names.clone(),
