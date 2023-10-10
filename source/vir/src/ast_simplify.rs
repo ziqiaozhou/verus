@@ -854,6 +854,7 @@ pub fn simplify_krate(ctx: &mut GlobalCtx, krate: &Krate) -> Result<Krate, VirEr
         trait_impls,
         assoc_type_impls,
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names,
@@ -957,6 +958,7 @@ pub fn simplify_krate(ctx: &mut GlobalCtx, krate: &Krate) -> Result<Krate, VirEr
     let module_ids = module_ids.clone();
     let external_fns = external_fns.clone();
     let external_types = external_types.clone();
+    let external_mods = external_mods.clone();
     let krate = Arc::new(KrateX {
         functions,
         datatypes,
@@ -964,6 +966,7 @@ pub fn simplify_krate(ctx: &mut GlobalCtx, krate: &Krate) -> Result<Krate, VirEr
         trait_impls,
         assoc_type_impls,
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names: path_as_rust_names.clone(),
@@ -987,6 +990,7 @@ pub fn merge_krates(krates: Vec<Krate>) -> Result<Krate, VirErr> {
         trait_impls: Vec::new(),
         assoc_type_impls: Vec::new(),
         module_ids: Vec::new(),
+        external_mods: Vec::new(),
         external_fns: Vec::new(),
         external_types: Vec::new(),
         path_as_rust_names: Vec::new(),
@@ -999,6 +1003,7 @@ pub fn merge_krates(krates: Vec<Krate>) -> Result<Krate, VirErr> {
         kratex.assoc_type_impls.extend(k.assoc_type_impls.clone());
         kratex.module_ids.extend(k.module_ids.clone());
         kratex.external_fns.extend(k.external_fns.clone());
+        kratex.external_mods.extend(k.external_mods.clone());
         kratex.external_types.extend(k.external_types.clone());
         kratex.path_as_rust_names.extend(k.path_as_rust_names.clone());
     }

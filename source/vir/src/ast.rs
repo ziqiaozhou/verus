@@ -976,6 +976,7 @@ pub struct KrateX {
     pub assoc_type_impls: Vec<AssocTypeImpl>,
     /// List of all modules in the crate
     pub module_ids: Vec<Path>,
+    pub external_mods: Vec<Path>,
     /// List of all 'external' functions in the crate (only useful for diagnostics)
     pub external_fns: Vec<Fun>,
     /// List of all 'external' types in the crate (only useful for diagnostics)

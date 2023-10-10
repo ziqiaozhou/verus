@@ -1350,7 +1350,10 @@ fn erase_stmt<'tcx>(ctxt: &Context<'tcx>, state: &mut State, stmt: &Stmt<'tcx>) 
                 vec![Box::new((stmt.span, StmX::Let(pat, typ, init_exp)))]
             }
         }
-        StmtKind::Item(..) => panic!("unexpected statement"),
+        StmtKind::Item(..) => {
+            vec![]
+        }
+        //panic!("unexpected statement")},
     }
 }
 
@@ -1387,6 +1390,7 @@ fn erase_const<'tcx>(
             Box::new((body.value.span, ExpX::Panic))
         } else {
             erase_expr(ctxt, state, false, &body.value).expect("const body")
+            //.expect("const body")
         };
         // Turn const decl into fn decl so we can use the non-const ExpX::Op in the body:
         let decl = FunDecl {
@@ -1566,6 +1570,10 @@ fn erase_fn_common<'tcx>(
         return;
     }
     let fun_name = Arc::new(FunX { path: path.clone() });
+    if !ctxt.functions.contains_key(&fun_name) {
+        println!("not found fn {:?}", fun_name);
+        return;
+    }
     if let Some(f_vir) = &ctxt.functions[&fun_name] {
         if f_vir.x.mode == Mode::Spec {
             return;
@@ -2069,6 +2077,7 @@ fn erase_mir_datatype<'tcx>(ctxt: &Context<'tcx>, state: &mut State, id: DefId) 
         panic!("unexpected datatype {:?}", id);
     }
 }
+use crate::rust_to_vir::check_path_inside;
 
 pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -2189,16 +2198,22 @@ pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
         }
     }
 
+    let mut external_mods: Vec<Path> = Vec::new();
+
     for owner in krate.owners.iter() {
         if let MaybeOwner::Owner(owner) = owner {
             match owner.node() {
                 OwnerNode::Item(item) => {
                     let attrs = tcx.hir().attrs(item.hir_id());
                     let vattrs = get_verifier_attrs(attrs, None).expect("get_verifier_attrs");
+                    let id = item.owner_id.to_def_id();
                     if vattrs.external || vattrs.internal_reveal_fn {
+                        if let ItemKind::Mod { .. } = item.kind {
+                            let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, id);
+                            external_mods.push(path.clone());
+                        }
                         continue;
                     }
-                    let id = item.owner_id.to_def_id();
                     match &item.kind {
                         ItemKind::Use { .. } => {}
                         ItemKind::ExternCrate { .. } => {}
@@ -2215,17 +2230,25 @@ pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
                             state.reach_datatype(&ctxt, id);
                         }
                         ItemKind::Const(_ty, body_id) => {
+                            let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, id);
+                            if check_path_inside(&external_mods, &path) {
+                                continue;
+                            }
                             erase_const(
                                 krate,
                                 &mut ctxt,
                                 &mut state,
                                 item.span,
                                 id,
-                                vattrs.external_body,
+                                vattrs.external_body || vattrs.external,
                                 body_id,
                             );
                         }
                         ItemKind::Fn(sig, _generics, body_id) => {
+                            let path = def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, id);
+                            if check_path_inside(&external_mods, &path) {
+                                continue;
+                            }
                             if !vattrs.external_fn_specification {
                                 erase_fn(
                                     krate,

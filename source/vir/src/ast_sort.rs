@@ -24,6 +24,7 @@ pub fn sort_krate(krate: &Krate) -> Krate {
         trait_impls,
         assoc_type_impls,
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names,
@@ -35,6 +36,7 @@ pub fn sort_krate(krate: &Krate) -> Krate {
     let mut module_ids = module_ids.clone();
     let external_fns = external_fns.clone();
     let external_types = external_types.clone();
+    let external_mods = external_mods.clone();
 
     // Stable sort to move children before parents, but otherwise leave children in order
     module_ids.sort_by(|p1, p2| p2.segments.len().cmp(&p1.segments.len()));
@@ -61,6 +63,7 @@ pub fn sort_krate(krate: &Krate) -> Krate {
         trait_impls: trait_impls.clone(),
         assoc_type_impls,
         module_ids,
+        external_mods,
         external_fns,
         external_types,
         path_as_rust_names: path_as_rust_names.clone(),

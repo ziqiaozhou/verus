@@ -29,6 +29,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vir::ast::{Fun, FunX, FunctionKind, Krate, KrateX, Path, Typ, VirErr};
 
+pub fn check_path_inside(mods: &Vec<Path>, p: &Path) -> bool {
+    for path in mods {
+        if p.krate == path.krate {
+            if p.segments.len() < path.segments.len() {
+                return false;
+            }
+            for i in 0..path.segments.len() {
+                if p.segments[i] != path.segments[i] {
+                    return false;
+                }
+            }
+            return true;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
 fn check_item<'tcx>(
     ctxt: &Context<'tcx>,
     vir: &mut KrateX,
@@ -75,6 +93,9 @@ fn check_item<'tcx>(
     let visibility = || mk_visibility(ctxt, item.owner_id.to_def_id());
     match &item.kind {
         ItemKind::Fn(sig, generics, body_id) => {
+            if check_path_inside(&vir.external_mods, &module_path()) {
+                return Ok(());
+            }
             check_item_fn(
                 ctxt,
                 &mut vir.functions,
@@ -142,7 +163,6 @@ fn check_item<'tcx>(
 
                 return Ok(());
             }
-
             let tyof = ctxt.tcx.type_of(item.owner_id.to_def_id());
             let adt_def = tyof.ty_adt_def().expect("adt_def");
 
@@ -669,11 +689,21 @@ pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>) -> Result<Krate, VirErr> {
                         use crate::rustc_hir::intravisit::Visitor;
                         let mut visitor = VisitMod { _tcx: ctxt.tcx, ids: Vec::new() };
                         visitor.visit_item(item);
+                        let path =
+                            def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, owner_id.to_def_id());
+                        vir.external_mods.push(path.clone());
                         item_to_module.extend(visitor.ids.iter().map(move |ii| (*ii, None)))
                     } else {
                         // Shallowly visit just the top-level items (don't visit nested modules)
                         let path =
                             def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, owner_id.to_def_id());
+                        /*if check_path_inside(&vir.external_mods, &path) {
+                            use crate::rustc_hir::intravisit::Visitor;
+                            let mut visitor = VisitMod { _tcx: ctxt.tcx, ids: Vec::new() };
+                            visitor.visit_item(item);
+                            item_to_module.extend(visitor.ids.iter().map(move |ii| (*ii, None)));
+                            continue;
+                        }*/
                         vir.module_ids.push(path.clone());
                         let path = Some(path);
                         item_to_module
@@ -683,6 +713,11 @@ pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>) -> Result<Krate, VirErr> {
                 OwnerNode::Crate(mod_) => {
                     let path =
                         def_id_to_vir_path(ctxt.tcx, &ctxt.verus_items, owner_id.to_def_id());
+                    /*if check_path_inside(&vir.external_mods, &path) {
+                        item_to_module
+                        .extend(mod_.item_ids.iter().map(move |ii| (*ii, None)));
+                        continue;
+                    }*/
                     vir.module_ids.push(path.clone());
                     item_to_module
                         .extend(mod_.item_ids.iter().map(move |ii| (*ii, Some(path.clone()))))
@@ -701,8 +736,18 @@ pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>) -> Result<Krate, VirErr> {
                     if let Some(None) = mpath {
                         // whole module is external, so skip the item
                         continue;
+                    } else if let Some(path) = mpath {
+                        if path.is_none() {
+                            continue;
+                        }
+                        if check_path_inside(&vir.external_mods, &path.clone().unwrap()) {
+                            println!("mod {:?} is external", path.clone().unwrap());
+                            continue;
+                        }
                     }
+                    
                     check_item(ctxt, &mut vir, mpath, &item.item_id(), item)?
+                    
                 }
                 OwnerNode::ForeignItem(foreign_item) => check_foreign_item(
                     ctxt,
@@ -739,6 +784,6 @@ pub fn crate_to_vir<'tcx>(ctxt: &Context<'tcx>) -> Result<Krate, VirErr> {
     let erasure_info = ctxt.erasure_info.borrow();
     vir.external_fns = erasure_info.external_functions.clone();
     vir.path_as_rust_names = vir::ast_util::get_path_as_rust_names_for_krate(&ctxt.vstd_crate_name);
-
+    //println!("vir.external_mods = {:?}", vir.external_mods);
     Ok(Arc::new(vir))
 }
