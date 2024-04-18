@@ -215,6 +215,7 @@ use lib_exe_names::{LIB_DL, LIB_PRE};
 pub struct VerusExterns<'a> {
     path: &'a std::path::PathBuf,
     has_vstd: bool,
+    has_builtin: bool,
 }
 
 impl<'a> VerusExterns<'a> {
@@ -238,6 +239,10 @@ impl<'a> VerusExterns<'a> {
             format!("-L"),
             format!("dependency={}", self.path.to_str().unwrap()),
         ];
+        if !self.has_builtin {
+            args = vec![];
+        }
+
         if self.has_vstd {
             args.push(format!("--extern"));
             args.push(format!(
@@ -269,7 +274,7 @@ where
     }
     if !build_test_mode {
         if let Some(VerusRoot { path: verusroot, in_vargo }) = verus_root {
-            let externs = VerusExterns { path: &verusroot, has_vstd: !verifier.args.no_vstd };
+            let externs = VerusExterns { path: &verusroot, has_vstd: !verifier.args.no_vstd, has_builtin: !verifier.args.no_builtin};
             rustc_args.extend(externs.to_args());
             if in_vargo && !std::env::var("VERUS_Z3_PATH").is_ok() {
                 panic!("we are in vargo, but VERUS_Z3_PATH is not set; this is a bug");
