@@ -81,6 +81,7 @@ pub struct ArgsX {
     pub spinoff_all: bool,
     pub use_internal_profiler: bool,
     pub no_vstd: bool,
+    pub no_builtin: bool,
     pub compile: bool,
     pub solver_version_check: bool,
     pub version: bool,
@@ -121,6 +122,7 @@ impl ArgsX {
             spinoff_all: Default::default(),
             use_internal_profiler: Default::default(),
             no_vstd: Default::default(),
+            no_builtin: Default::default(),
             compile: Default::default(),
             solver_version_check: Default::default(),
             version: Default::default(),
@@ -193,6 +195,7 @@ pub fn parse_args_with_imports(
     const OPT_SMT_OPTION: &str = "smt-option";
     const OPT_MULTIPLE_ERRORS: &str = "multiple-errors";
     const OPT_NO_VSTD: &str = "no-vstd";
+    const OPT_NO_BUILTIN: &str = "no-builtin";
     const OPT_EXPAND_ERRORS: &str = "expand-errors";
 
     const OPT_LOG_DIR: &str = "log-dir";
@@ -314,6 +317,7 @@ pub fn parse_args_with_imports(
     opts.optmulti("", OPT_SMT_OPTION, "Set an SMT option (e.g. smt.random_seed=7)", "OPTION=VALUE");
     opts.optopt("", OPT_MULTIPLE_ERRORS, "If 0, look for at most one error per function; if > 0, always find first error in function and make extra queries to find more errors (default: 2)", "INTEGER");
     opts.optflag("", OPT_NO_VSTD, "Do not load or link against the vstd library");
+    opts.optflag("", OPT_NO_BUILTIN, "Do not load or link against the builtin and builtin_macros libraries");
     opts.optflag(
         "",
         OPT_EXPAND_ERRORS,
@@ -571,6 +575,7 @@ pub fn parse_args_with_imports(
         use_internal_profiler: extended.get(EXTENDED_USE_INTERNAL_PROFILER).is_some(),
         compile: matches.opt_present(OPT_COMPILE),
         no_vstd,
+        no_builtin: matches.opt_present(OPT_NO_BUILTIN),
         solver_version_check: !extended.get(EXTENDED_NO_SOLVER_VERSION_CHECK).is_some(),
         version: matches.opt_present(OPT_VERSION),
         num_threads: matches
