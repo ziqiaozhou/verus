@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use alloc::alloc::Layout;
+use core::alloc::Layout;
 use core::{marker, mem, mem::MaybeUninit};
 
 use crate::layout::*;
@@ -524,7 +524,7 @@ impl<V> PPtr<V> {
         // Constructing the layout object might fail if the allocation becomes too big.
         // The 'add' can't overflow, since we already know (size, align) is a valid layout.
         let layout = Layout::from_size_align(size + align, align).unwrap();
-        let p = PPtr { uptr: unsafe { ::alloc::alloc::alloc(layout) as *mut V } };
+        let p = PPtr { uptr: unsafe { alloc::alloc::alloc(layout) as *mut V } };
         // See explanation about exposing pointers, above
         let _exposed_addr = p.uptr as usize;
         (p, Tracked::assume_new(), Tracked::assume_new())
@@ -638,12 +638,12 @@ impl<V> PPtr<V> {
         opens_invariants none
     {
         unsafe {
-            let layout = alloc::alloc::Layout::for_value(&*self.uptr);
+            let layout = core::alloc::Layout::for_value(&*self.uptr);
             let size = layout.size();
             let align = layout.align();
             // Add the padding to match what we did in 'alloc'
             let layout = Layout::from_size_align_unchecked(size + align, align);
-            ::alloc::alloc::dealloc(self.uptr as *mut u8, layout);
+            alloc::alloc::dealloc(self.uptr as *mut u8, layout);
         }
     }
 
@@ -668,7 +668,7 @@ impl<V> PPtr<V> {
             // and that it's safe to call 'deallocate'
             // Remember to add the padding, like in `alloc`
             let layout = Layout::from_size_align_unchecked(size + align, align);
-            ::alloc::alloc::dealloc(self.uptr as *mut u8, layout);
+            alloc::alloc::dealloc(self.uptr as *mut u8, layout);
         }
     }
 

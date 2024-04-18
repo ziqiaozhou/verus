@@ -2393,7 +2393,8 @@ pub(crate) fn stmt_to_vir<'tcx>(
                 dbg!(&item_id.hir_id());
                 unreachable!();
             } else {
-                unsupported_err!(stmt.span, "internal item statements", stmt)
+                Ok(vec![])
+                //unsupported_err!(stmt.span, "internal item statements", stmt)
             }
         }
     }
