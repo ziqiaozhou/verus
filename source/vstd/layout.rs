@@ -69,6 +69,8 @@ pub open spec fn align_of_as_usize<V>() -> usize
     align_of::<V>() as usize
 }
 
+
+/*
 #[verifier::external_fn_specification]
 #[verifier::when_used_as_spec(size_of_as_usize)]
 pub fn ex_size_of<V>() -> (u: usize)
@@ -80,6 +82,7 @@ pub fn ex_size_of<V>() -> (u: usize)
 {
     core::mem::size_of::<V>()
 }
+*/
 
 #[verifier::external_fn_specification]
 #[verifier::when_used_as_spec(align_of_as_usize)]
