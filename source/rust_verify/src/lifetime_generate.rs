@@ -1556,7 +1556,10 @@ fn erase_stmt<'tcx>(ctxt: &Context<'tcx>, state: &mut State, stmt: &Stmt<'tcx>) 
                 vec![Box::new((stmt.span, StmX::Let(pat, typ, init_exp)))]
             }
         }
-        StmtKind::Item(..) => panic!("unexpected statement"),
+        StmtKind::Item(..) => {
+            vec![]
+        }
+        //panic!("unexpected statement"),
     }
 }
 
