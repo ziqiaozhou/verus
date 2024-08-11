@@ -145,8 +145,7 @@ pub fn opens_invariants_except<A>(_a: A) {
 #[cfg(verus_keep_ghost)]
 #[rustc_diagnostic_item = "verus::builtin::reveal_hide"]
 #[verifier::proof]
-pub fn reveal_hide_(_f: fn(), _n: u32) {
-    unimplemented!();
+pub const fn reveal_hide_(_f: fn(), _n: u32) {
 }
 
 #[cfg(verus_keep_ghost)]
