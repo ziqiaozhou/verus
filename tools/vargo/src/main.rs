@@ -69,7 +69,7 @@ impl PartialOrd for Fingerprint {
     }
 }
 
-const RUST_FLAGS: &str = "--cfg proc_macro_span --cfg verus_keep_ghost --cfg span_locations";
+const RUST_FLAGS: &str = "--cfg proc_macro_span --cfg verus_keep_ghost --cfg span_locations --cfg proc_macro_source_text";
 
 fn main() {
     match run() {
