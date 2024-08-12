@@ -1977,10 +1977,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                 let pattern = pattern_to_vir(bctx, &arm.pat)?;
                 let guard = match &arm.guard {
                     None => mk_expr(ExprX::Const(Constant::Bool(true)))?,
-                    Some(expr) => match &expr.kind {
-                        ExprKind::If(guard, _, _) => expr_to_vir(bctx, guard, modifier)?,
-                        _ => unsupported_err!(expr.span, "if let pattern"),
-                    }
+                    Some(guard_expr) => expr_to_vir(bctx, guard_expr, modifier)?,
                 };
                 let body = expr_to_vir(bctx, &arm.body, modifier)?;
                 let vir_arm = ArmX { pattern, guard, body };

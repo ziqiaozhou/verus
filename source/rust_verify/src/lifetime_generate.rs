@@ -1064,8 +1064,7 @@ fn erase_match<'tcx>(
         };
         let guard = match guard_opt {
             None => None,
-            Some(guard) if matches!(&guard.kind, ExprKind::If(..)) => erase_expr(ctxt, state, cond_spec, guard),
-            _ => panic!("unexpected guard"),
+            Some(guard) => erase_expr(ctxt, state, cond_spec, guard),
         };
         let (body, body_span) = if let Some(b) = body_expr {
             (erase_expr(ctxt, state, expect_spec, b), b.span)

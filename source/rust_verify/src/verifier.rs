@@ -2449,10 +2449,9 @@ impl Verifier {
         let time_hir0 = Instant::now();
 
         rustc_hir_analysis::check_crate(tcx);
-        // TODO(1.79.0)    Ok(()) => {}
-        // TODO(1.79.0)    Err(_) => {
-        // TODO(1.79.0)        return Ok(false);
-        // TODO(1.79.0)    }
+        if tcx.dcx().err_count() != 0 {
+            return Ok(false);
+        }
 
         let hir = tcx.hir();
         hir.par_body_owners(|def_id| tcx.ensure().check_match(def_id));
