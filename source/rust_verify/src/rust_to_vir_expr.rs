@@ -30,7 +30,7 @@ use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AutoBorrow, AutoBorrowMutability, PointerCoercion,
 };
 use rustc_middle::ty::{
-    AdtDef, ClauseKind, GenericArg, ImplPolarity, ToPredicate, TraitPredicate, TraitRef, TyCtxt,
+    AdtDef, ClauseKind, GenericArg, ToPredicate, TraitPredicate, TraitRef, TyCtxt,
     TyKind, VariantDef,
 };
 use rustc_span::def_id::DefId;
@@ -1979,10 +1979,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                     None => mk_expr(ExprX::Const(Constant::Bool(true)))?,
                     Some(expr) => match &expr.kind {
                         ExprKind::If(guard, _, _) => expr_to_vir(bctx, guard, modifier)?,
-                        // ExprKind::IfLet(_, _, _) => unsupported_err!(expr.span, "Guard IfLet"),
-                        // TODO(1.79.0) ExprKind::If(guard, _, _) => expr_to_vir(bctx, guard, modifier)?,
-                        // TODO(1.79.0) ExprKind::IfLet(_) => unsupported_err!(expr.span, "Guard IfLet"),
-                        // _ => todo!("TODO(1.79.0): {:?}", expr)
+                        _ => unsupported_err!(expr.span, "if let pattern"),
                     }
                 };
                 let body = expr_to_vir(bctx, &arm.body, modifier)?;
@@ -2315,7 +2312,7 @@ fn expr_assign_to_vir_innermost<'tcx>(
                 };
                 if not_mut {
                     let mut parent = bctx.ctxt.tcx.hir().parent_iter(*id);
-                    let (_, parent) = parent.next().expect("TODO(1.79.0)");
+                    let (_, parent) = parent.next().expect("one parent for local");
                     match parent {
                         Node::Param(_) => err_span(lhs.span, "cannot assign to non-mut parameter")?,
                         Node::LetStmt(_) => (),
@@ -2513,8 +2510,6 @@ pub(crate) fn stmt_to_vir<'tcx>(
             let vir_expr = expr_to_vir(bctx, expr, ExprModifier::REGULAR)?;
             Ok(vec![bctx.spanned_new(expr.span, StmtX::Expr(vir_expr))])
         }
-        // TODO(1.79.0) StmtKind::Local(Local { pat, init, .. }) => {
-        // TODO(1.79.0) }
         StmtKind::Item(item_id) => {
             let attrs = bctx.ctxt.tcx.hir().attrs(item_id.hir_id());
             let vattrs = bctx.ctxt.get_verifier_attrs(attrs)?;

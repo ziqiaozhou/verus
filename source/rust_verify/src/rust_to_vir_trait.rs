@@ -8,7 +8,7 @@ use crate::rust_to_vir_func::{check_item_fn, CheckItemFnEither};
 use crate::unsupported_err_unless;
 use crate::util::{err_span, err_span_bare};
 use rustc_hir::{Generics, TraitFn, TraitItem, TraitItemKind, TraitItemRef};
-use rustc_middle::ty::{ClauseKind, ImplPolarity, TraitPredicate, TraitRef, TyCtxt};
+use rustc_middle::ty::{ClauseKind, TraitPredicate, TraitRef, TyCtxt};
 use rustc_span::def_id::DefId;
 use rustc_span::Span;
 use std::sync::Arc;
@@ -331,7 +331,17 @@ pub(crate) fn translate_trait<'tcx>(
                     }
                     
                     for (p1, p2) in preds1.iter().zip(preds2.iter()) {
-
+                        match (p1.kind().skip_binder(), p2.kind().skip_binder()) {
+                            (ClauseKind::Trait(p1), ClauseKind::Trait(p2)) => {
+                                if p1.def_id() != p2.def_id() {
+                                    return err_span(
+                                        trait_span,
+                                        format!("Mismatched bounds on associated type ({} != {})", p1, p2),
+                                    );
+                                }
+                            }
+                            _ => return err_span(trait_span, "Verus does not yet support this bound on external specs"),
+                        }
                     }
                 }
             }

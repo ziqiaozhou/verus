@@ -1134,7 +1134,7 @@ pub fn crate_to_vir<'tcx>(ctxt: &mut Context<'tcx>) -> Result<(Krate, ItemToModu
                     }
                 },
                 OwnerNode::Crate(_mod_) => (),
-                OwnerNode::Synthetic => todo!("TODO(1.79.0)"),
+                OwnerNode::Synthetic => (),
             }
         }
     }

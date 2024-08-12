@@ -16,7 +16,7 @@ use rustc_middle::ty::{
     ConstKind, GenericArgKind, GenericArgsRef, ParamConst, TypeFoldable, TypeFolder,
     TypeSuperFoldable, TypeVisitableExt, ValTree,
 };
-use rustc_middle::ty::{ImplPolarity, TraitPredicate};
+use rustc_middle::ty::TraitPredicate;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::symbol::{kw, Ident};
 use rustc_span::Span;
@@ -1073,8 +1073,8 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
         TyKind::Placeholder(..) => unsupported_err!(span, "type inference Placeholder types"),
         TyKind::Infer(..) => unsupported_err!(span, "type inference Infer types"),
         TyKind::Error(..) => unsupported_err!(span, "type inference error types"),
-        TyKind::CoroutineClosure(_, _) => todo!("TODO(1.79.0)"),
-        TyKind::Pat(_, _) => todo!("TODO(1.79.0)"),
+        TyKind::CoroutineClosure(_, _) => unsupported_err!(span, "coroutine closure types"),
+        TyKind::Pat(_, _) => unsupported_err!(span, "pattern types"),
     };
     Ok(t)
 }

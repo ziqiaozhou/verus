@@ -1557,7 +1557,7 @@ fn erase_expr<'tcx>(
             }
             let body_exp = erase_expr(ctxt, state, expect_spec, &body.value);
             let body_exp = force_block(body_exp, body.value.span);
-            mk_exp(ExpX::Closure(*capture_by, /* TODO(1.79.0) */ None, params, body_exp))
+            mk_exp(ExpX::Closure(*capture_by, None, params, body_exp))
         }
         ExprKind::Block(block, None) => {
             let attrs = ctxt.tcx.hir().attrs(expr.hir_id);
@@ -1610,7 +1610,7 @@ fn erase_stmt<'tcx>(ctxt: &Context<'tcx>, state: &mut State, stmt: &Stmt<'tcx>) 
         }
         StmtKind::Let(LetStmt {
             pat,
-            ty,
+            ty: _,
             init,
             els: _,
             hir_id,
