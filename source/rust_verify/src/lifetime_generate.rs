@@ -2893,7 +2893,7 @@ pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
                 OwnerNode::Crate(_mod_) => {}
                 OwnerNode::ImplItem(_) => {}
                 OwnerNode::ForeignItem(_foreign_item) => {}
-                OwnerNode::Synthetic => todo!("TODO(1.79.0)"),
+                OwnerNode::Synthetic => {}
             }
         }
     }

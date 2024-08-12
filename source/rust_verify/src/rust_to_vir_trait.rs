@@ -305,15 +305,33 @@ pub(crate) fn translate_trait<'tcx>(
                     // TODO, but low priority, since this is just a check for trusted declarations:
                     // crate::rust_to_vir_func::predicates_match(tcx, true, &preds1.iter().collect(), &preds2.iter().collect())?;
                     // (would need to fix up the TyKind::Alias projections inside the clauses)
+                    
+                    let mut preds1 = preds1.to_vec();
+                    let mut preds2 = preds2.to_vec();
+                    preds1.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                    preds2.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
                     if preds1.len() != preds2.len() {
+                        let mut t = format!(
+                            "Mismatched bounds on associated type ({} != {})\n",
+                            preds1.len(), preds2.len(),
+                        );
+                        t.push_str("Target:\n");
+                        for p1 in preds1.iter() {
+                            t.push_str(&format!("  - {}\n", p1));
+                        }
+                        t.push_str("External specification:\n");
+                        for p2 in preds2.iter() {
+                            t.push_str(&format!("  - {}\n", p2));
+                        }
                         return err_span(
                             trait_span,
-                            format!(
-                                "Mismatched bounds on associated type\n{:?}\n vs.\n{:?}",
-                                preds1, preds2
-                            ),
+                            t
                         );
+                    }
+                    
+                    for (p1, p2) in preds1.iter().zip(preds2.iter()) {
+
                     }
                 }
             }

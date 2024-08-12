@@ -704,8 +704,8 @@ pub(crate) fn mid_ty_filter_for_external_impls<'tcx>(
                         && t_args.len() >= 1
                 }
                 
-                TyKind::CoroutineClosure(_, _) => todo!("TODO(1.79.0)"),
-                TyKind::Pat(_, _) => todo!("TODO(1.79.0)"),
+                TyKind::CoroutineClosure(_, _) => false,
+                TyKind::Pat(_, _) => false,
             };
             all_types_supported = all_types_supported && supported;
         }

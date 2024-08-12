@@ -603,8 +603,8 @@ pub(crate) fn pattern_to_vir_inner<'tcx>(
         PatKind::Ref(..) => unsupported_err!(pat.span, "ref patterns", pat),
         PatKind::Slice(..) => unsupported_err!(pat.span, "slice patterns", pat),
         PatKind::Never => unsupported_err!(pat.span, "never patterns", pat),
-        PatKind::Deref(_) => todo!("TODO(1.79.0)"),
-        PatKind::Err(_) => todo!("TODO(1.79.0)"),
+        PatKind::Deref(_) => unsupported_err!(pat.span, "deref patterns", pat),
+        PatKind::Err(_) => unsupported_err!(pat.span, "err patterns", pat),
     };
     let pattern = bctx.spanned_typed_new(pat.span, &pat_typ, pattern);
     let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
@@ -708,77 +708,76 @@ pub(crate) fn invariant_block_open<'a>(
     verus_items: &verus_items::VerusItems,
     open_stmt: &'a Stmt,
 ) -> Option<(HirId, HirId, &'a rustc_hir::Pat<'a>, &'a rustc_hir::Expr<'a>, InvAtomicity)> {
-    todo!()
-    // TODO(1.79.0) match open_stmt.kind {
-    // TODO(1.79.0)     StmtKind::Local(Local {
-    // TODO(1.79.0)         pat:
-    // TODO(1.79.0)             Pat {
-    // TODO(1.79.0)                 kind:
-    // TODO(1.79.0)                     PatKind::Tuple(
-    // TODO(1.79.0)                         [
-    // TODO(1.79.0)                             Pat {
-    // TODO(1.79.0)                                 kind:
-    // TODO(1.79.0)                                     PatKind::Binding(
-    // TODO(1.79.0)                                         BindingMode(_, Mutability::Not),
-    // TODO(1.79.0)                                         guard_hir,
-    // TODO(1.79.0)                                         _,
-    // TODO(1.79.0)                                         None,
-    // TODO(1.79.0)                                     ),
-    // TODO(1.79.0)                                 default_binding_modes: true,
-    // TODO(1.79.0)                                 ..
-    // TODO(1.79.0)                             },
-    // TODO(1.79.0)                             inner_pat @ Pat {
-    // TODO(1.79.0)                                 kind:
-    // TODO(1.79.0)                                     PatKind::Binding(
-    // TODO(1.79.0)                                         BindingMode(_, Mutability::Mut),
-    // TODO(1.79.0)                                         inner_hir,
-    // TODO(1.79.0)                                         _,
-    // TODO(1.79.0)                                         None,
-    // TODO(1.79.0)                                     ),
-    // TODO(1.79.0)                                 default_binding_modes: true,
-    // TODO(1.79.0)                                 ..
-    // TODO(1.79.0)                             },
-    // TODO(1.79.0)                         ],
-    // TODO(1.79.0)                         dot_dot_pos,
-    // TODO(1.79.0)                     ),
-    // TODO(1.79.0)                 ..
-    // TODO(1.79.0)             },
-    // TODO(1.79.0)         init:
-    // TODO(1.79.0)             Some(Expr {
-    // TODO(1.79.0)                 kind:
-    // TODO(1.79.0)                     ExprKind::Call(
-    // TODO(1.79.0)                         Expr {
-    // TODO(1.79.0)                             kind:
-    // TODO(1.79.0)                                 ExprKind::Path(QPath::Resolved(
-    // TODO(1.79.0)                                     None,
-    // TODO(1.79.0)                                     rustc_hir::Path {
-    // TODO(1.79.0)                                         res: Res::Def(DefKind::Fn, fun_id), ..
-    // TODO(1.79.0)                                     },
-    // TODO(1.79.0)                                 )),
-    // TODO(1.79.0)                             ..
-    // TODO(1.79.0)                         },
-    // TODO(1.79.0)                         [arg],
-    // TODO(1.79.0)                     ),
-    // TODO(1.79.0)                 ..
-    // TODO(1.79.0)             }),
-    // TODO(1.79.0)         ..
-    // TODO(1.79.0)     }) if dot_dot_pos.as_opt_usize().is_none() => {
-    // TODO(1.79.0)         let verus_item = verus_items.id_to_name.get(fun_id);
-    // TODO(1.79.0)         let atomicity = match verus_item {
-    // TODO(1.79.0)             Some(VerusItem::OpenInvariantBlock(
-    // TODO(1.79.0)                 OpenInvariantBlockItem::OpenAtomicInvariantBegin,
-    // TODO(1.79.0)             )) => InvAtomicity::Atomic,
-    // TODO(1.79.0)             Some(VerusItem::OpenInvariantBlock(
-    // TODO(1.79.0)                 OpenInvariantBlockItem::OpenLocalInvariantBegin,
-    // TODO(1.79.0)             )) => InvAtomicity::NonAtomic,
-    // TODO(1.79.0)             _ => {
-    // TODO(1.79.0)                 return None;
-    // TODO(1.79.0)             }
-    // TODO(1.79.0)         };
-    // TODO(1.79.0)         Some((*guard_hir, *inner_hir, inner_pat, arg, atomicity))
-    // TODO(1.79.0)     }
-    // TODO(1.79.0)     _ => None,
-    // TODO(1.79.0) }
+    match open_stmt.kind {
+        StmtKind::Let(LetStmt {
+            pat:
+                Pat {
+                    kind:
+                        PatKind::Tuple(
+                            [
+                                Pat {
+                                    kind:
+                                        PatKind::Binding(
+                                            BindingMode(_, Mutability::Not),
+                                            guard_hir,
+                                            _,
+                                            None,
+                                        ),
+                                    default_binding_modes: true,
+                                    ..
+                                },
+                                inner_pat @ Pat {
+                                    kind:
+                                        PatKind::Binding(
+                                            BindingMode(_, Mutability::Mut),
+                                            inner_hir,
+                                            _,
+                                            None,
+                                        ),
+                                    default_binding_modes: true,
+                                    ..
+                                },
+                            ],
+                            dot_dot_pos,
+                        ),
+                    ..
+                },
+            init:
+                Some(Expr {
+                    kind:
+                        ExprKind::Call(
+                            Expr {
+                                kind:
+                                    ExprKind::Path(QPath::Resolved(
+                                        None,
+                                        rustc_hir::Path {
+                                            res: Res::Def(DefKind::Fn, fun_id), ..
+                                        },
+                                    )),
+                                ..
+                            },
+                            [arg],
+                        ),
+                    ..
+                }),
+            ..
+        }) if dot_dot_pos.as_opt_usize().is_none() => {
+            let verus_item = verus_items.id_to_name.get(fun_id);
+            let atomicity = match verus_item {
+                Some(VerusItem::OpenInvariantBlock(
+                    OpenInvariantBlockItem::OpenAtomicInvariantBegin,
+                )) => InvAtomicity::Atomic,
+                Some(VerusItem::OpenInvariantBlock(
+                    OpenInvariantBlockItem::OpenLocalInvariantBegin,
+                )) => InvAtomicity::NonAtomic,
+                _ => {
+                    return None;
+                }
+            };
+            Some((*guard_hir, *inner_hir, inner_pat, arg, atomicity))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn invariant_block_close(close_stmt: &Stmt) -> Option<(HirId, HirId, DefId)> {
@@ -1979,9 +1978,11 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                 let guard = match &arm.guard {
                     None => mk_expr(ExprX::Const(Constant::Bool(true)))?,
                     Some(expr) => match &expr.kind {
+                        ExprKind::If(guard, _, _) => expr_to_vir(bctx, guard, modifier)?,
+                        // ExprKind::IfLet(_, _, _) => unsupported_err!(expr.span, "Guard IfLet"),
                         // TODO(1.79.0) ExprKind::If(guard, _, _) => expr_to_vir(bctx, guard, modifier)?,
                         // TODO(1.79.0) ExprKind::IfLet(_) => unsupported_err!(expr.span, "Guard IfLet"),
-                        _ => todo!("TODO(1.79.0): {:?}", expr)
+                        // _ => todo!("TODO(1.79.0): {:?}", expr)
                     }
                 };
                 let body = expr_to_vir(bctx, &arm.body, modifier)?;
@@ -2317,7 +2318,7 @@ fn expr_assign_to_vir_innermost<'tcx>(
                     let (_, parent) = parent.next().expect("TODO(1.79.0)");
                     match parent {
                         Node::Param(_) => err_span(lhs.span, "cannot assign to non-mut parameter")?,
-                        // TODO(1.79.0) Node::Local(_) => (),
+                        Node::LetStmt(_) => (),
                         other => unsupported_err!(lhs.span, "assignee node", other),
                     }
                 }
@@ -2399,101 +2400,100 @@ fn unwrap_parameter_to_vir<'tcx>(
     stmt1: &Stmt<'tcx>,
     stmt2: &Stmt<'tcx>,
 ) -> Result<Vec<vir::ast::Stmt>, VirErr> {
-    todo!()
-    // TODO(1.79.0) // match "let x;"
-    // TODO(1.79.0) let x = if let StmtKind::Local(Local {
-    // TODO(1.79.0)     pat:
-    // TODO(1.79.0)         pat @ Pat {
-    // TODO(1.79.0)             kind:
-    // TODO(1.79.0)                 PatKind::Binding(BindingMode(ByRef::No, Mutability::Not), hir_id, x, None),
-    // TODO(1.79.0)             ..
-    // TODO(1.79.0)         },
-    // TODO(1.79.0)     ty: None,
-    // TODO(1.79.0)     init: None,
-    // TODO(1.79.0)     ..
-    // TODO(1.79.0) }) = &stmt1.kind
-    // TODO(1.79.0) {
-    // TODO(1.79.0)     Some((pat.hir_id, local_to_var(x, hir_id.local_id)))
-    // TODO(1.79.0) } else {
-    // TODO(1.79.0)     None
-    // TODO(1.79.0) };
-    // TODO(1.79.0) // match #[verifier(proof_block)]
-    // TODO(1.79.0) let ghost = get_ghost_block_opt(bctx.ctxt.tcx.hir().attrs(stmt2.hir_id));
-    // TODO(1.79.0) // match { x = y.get() } or { x = y.view() }
-    // TODO(1.79.0) let xy_mode = if let StmtKind::Semi(Expr {
-    // TODO(1.79.0)     kind:
-    // TODO(1.79.0)         ExprKind::Block(
-    // TODO(1.79.0)             Block {
-    // TODO(1.79.0)                 stmts: [],
-    // TODO(1.79.0)                 expr:
-    // TODO(1.79.0)                     Some(Expr {
-    // TODO(1.79.0)                         kind:
-    // TODO(1.79.0)                             ExprKind::Assign(
-    // TODO(1.79.0)                                 expr_x @ Expr { kind: ExprKind::Path(path_x), .. },
-    // TODO(1.79.0)                                 expr_get @ Expr {
-    // TODO(1.79.0)                                     kind:
-    // TODO(1.79.0)                                         ExprKind::MethodCall(
-    // TODO(1.79.0)                                             _ident,
-    // TODO(1.79.0)                                             expr_y @ Expr {
-    // TODO(1.79.0)                                                 kind: ExprKind::Path(path_y), ..
-    // TODO(1.79.0)                                             },
-    // TODO(1.79.0)                                             [],
-    // TODO(1.79.0)                                             _span2,
-    // TODO(1.79.0)                                         ),
-    // TODO(1.79.0)                                     ..
-    // TODO(1.79.0)                                 },
-    // TODO(1.79.0)                                 _,
-    // TODO(1.79.0)                             ),
-    // TODO(1.79.0)                         ..
-    // TODO(1.79.0)                     }),
-    // TODO(1.79.0)                 ..
-    // TODO(1.79.0)             },
-    // TODO(1.79.0)             None,
-    // TODO(1.79.0)         ),
-    // TODO(1.79.0)     ..
-    // TODO(1.79.0) }) = &stmt2.kind
-    // TODO(1.79.0) {
-    // TODO(1.79.0)     let fn_def_id = bctx
-    // TODO(1.79.0)         .types
-    // TODO(1.79.0)         .type_dependent_def_id(expr_get.hir_id)
-    // TODO(1.79.0)         .expect("def id of the method definition");
-    // TODO(1.79.0)     let verus_item = bctx.ctxt.verus_items.id_to_name.get(&fn_def_id);
-    // TODO(1.79.0)     let ident_x = crate::rust_to_vir_base::qpath_to_ident(bctx.ctxt.tcx, path_x);
-    // TODO(1.79.0)     let ident_y = crate::rust_to_vir_base::qpath_to_ident(bctx.ctxt.tcx, path_y);
-    // TODO(1.79.0)     let mode = match verus_item {
-    // TODO(1.79.0)         Some(VerusItem::UnaryOp(UnaryOpItem::SpecGhostTracked(
-    // TODO(1.79.0)             SpecGhostTrackedItem::GhostView,
-    // TODO(1.79.0)         ))) => Some((Mode::Spec, ResolvedCall::Spec)),
-    // TODO(1.79.0)         Some(VerusItem::CompilableOpr(CompilableOprItem::TrackedGet)) => Some((
-    // TODO(1.79.0)             Mode::Proof,
-    // TODO(1.79.0)             ResolvedCall::CompilableOperator(CompilableOperator::TrackedGet),
-    // TODO(1.79.0)         )),
-    // TODO(1.79.0)         _ => None,
-    // TODO(1.79.0)     };
-    // TODO(1.79.0)     Some((expr_x.hir_id, expr_y.hir_id, expr_get.hir_id, ident_x, ident_y, mode))
-    // TODO(1.79.0) } else {
-    // TODO(1.79.0)     None
-    // TODO(1.79.0) };
-    // TODO(1.79.0) match (x, ghost, xy_mode) {
-    // TODO(1.79.0)     (
-    // TODO(1.79.0)         Some((hir_id1, x1)),
-    // TODO(1.79.0)         Some(GhostBlockAttr::Proof),
-    // TODO(1.79.0)         Some((hir_id2, hir_id_y, hir_id_get, Some(x2), Some(y), Some((mode, resolved_call)))),
-    // TODO(1.79.0)     ) if x1 == x2 => {
-    // TODO(1.79.0)         let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
-    // TODO(1.79.0)         erasure_info.direct_var_modes.push((hir_id1, mode));
-    // TODO(1.79.0)         erasure_info.direct_var_modes.push((hir_id2, mode));
-    // TODO(1.79.0)         erasure_info.direct_var_modes.push((hir_id_y, Mode::Exec));
-    // TODO(1.79.0)         erasure_info.resolved_calls.push((hir_id_get, stmt2.span.data(), resolved_call));
-    // TODO(1.79.0)         let unwrap = vir::ast::UnwrapParameter { mode, outer_name: y, inner_name: x1 };
-    // TODO(1.79.0)         let headerx = HeaderExprX::UnwrapParameter(unwrap);
-    // TODO(1.79.0)         let exprx = ExprX::Header(Arc::new(headerx));
-    // TODO(1.79.0)         let expr = bctx.spanned_typed_new(stmt1.span, &Arc::new(TypX::Bool), exprx);
-    // TODO(1.79.0)         let stmt = bctx.spanned_new(stmt1.span, StmtX::Expr(expr));
-    // TODO(1.79.0)         Ok(vec![stmt])
-    // TODO(1.79.0)     }
-    // TODO(1.79.0)     _ => err_span(stmt1.span, "ill-formed unwrap_parameter header"),
-    // TODO(1.79.0) }
+    // match "let x;"
+    let x = if let StmtKind::Let(LetStmt {
+        pat:
+            pat @ Pat {
+                kind:
+                    PatKind::Binding(BindingMode(ByRef::No, Mutability::Not), hir_id, x, None),
+                ..
+            },
+        ty: None,
+        init: None,
+        ..
+    }) = &stmt1.kind
+    {
+        Some((pat.hir_id, local_to_var(x, hir_id.local_id)))
+    } else {
+        None
+    };
+    // match #[verifier(proof_block)]
+    let ghost = get_ghost_block_opt(bctx.ctxt.tcx.hir().attrs(stmt2.hir_id));
+    // match { x = y.get() } or { x = y.view() }
+    let xy_mode = if let StmtKind::Semi(Expr {
+        kind:
+            ExprKind::Block(
+                Block {
+                    stmts: [],
+                    expr:
+                        Some(Expr {
+                            kind:
+                                ExprKind::Assign(
+                                    expr_x @ Expr { kind: ExprKind::Path(path_x), .. },
+                                    expr_get @ Expr {
+                                        kind:
+                                            ExprKind::MethodCall(
+                                                _ident,
+                                                expr_y @ Expr {
+                                                    kind: ExprKind::Path(path_y), ..
+                                                },
+                                                [],
+                                                _span2,
+                                            ),
+                                        ..
+                                    },
+                                    _,
+                                ),
+                            ..
+                        }),
+                    ..
+                },
+                None,
+            ),
+        ..
+    }) = &stmt2.kind
+    {
+        let fn_def_id = bctx
+            .types
+            .type_dependent_def_id(expr_get.hir_id)
+            .expect("def id of the method definition");
+        let verus_item = bctx.ctxt.verus_items.id_to_name.get(&fn_def_id);
+        let ident_x = crate::rust_to_vir_base::qpath_to_ident(bctx.ctxt.tcx, path_x);
+        let ident_y = crate::rust_to_vir_base::qpath_to_ident(bctx.ctxt.tcx, path_y);
+        let mode = match verus_item {
+            Some(VerusItem::UnaryOp(UnaryOpItem::SpecGhostTracked(
+                SpecGhostTrackedItem::GhostView,
+            ))) => Some((Mode::Spec, ResolvedCall::Spec)),
+            Some(VerusItem::CompilableOpr(CompilableOprItem::TrackedGet)) => Some((
+                Mode::Proof,
+                ResolvedCall::CompilableOperator(CompilableOperator::TrackedGet),
+            )),
+            _ => None,
+        };
+        Some((expr_x.hir_id, expr_y.hir_id, expr_get.hir_id, ident_x, ident_y, mode))
+    } else {
+        None
+    };
+    match (x, ghost, xy_mode) {
+        (
+            Some((hir_id1, x1)),
+            Some(GhostBlockAttr::Proof),
+            Some((hir_id2, hir_id_y, hir_id_get, Some(x2), Some(y), Some((mode, resolved_call)))),
+        ) if x1 == x2 => {
+            let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+            erasure_info.direct_var_modes.push((hir_id1, mode));
+            erasure_info.direct_var_modes.push((hir_id2, mode));
+            erasure_info.direct_var_modes.push((hir_id_y, Mode::Exec));
+            erasure_info.resolved_calls.push((hir_id_get, stmt2.span.data(), resolved_call));
+            let unwrap = vir::ast::UnwrapParameter { mode, outer_name: y, inner_name: x1 };
+            let headerx = HeaderExprX::UnwrapParameter(unwrap);
+            let exprx = ExprX::Header(Arc::new(headerx));
+            let expr = bctx.spanned_typed_new(stmt1.span, &Arc::new(TypX::Bool), exprx);
+            let stmt = bctx.spanned_new(stmt1.span, StmtX::Expr(expr));
+            Ok(vec![stmt])
+        }
+        _ => err_span(stmt1.span, "ill-formed unwrap_parameter header"),
+    }
 }
 
 pub(crate) fn stmt_to_vir<'tcx>(
@@ -2514,7 +2514,6 @@ pub(crate) fn stmt_to_vir<'tcx>(
             Ok(vec![bctx.spanned_new(expr.span, StmtX::Expr(vir_expr))])
         }
         // TODO(1.79.0) StmtKind::Local(Local { pat, init, .. }) => {
-        // TODO(1.79.0)     let_stmt_to_vir(bctx, pat, init, bctx.ctxt.tcx.hir().attrs(stmt.hir_id))
         // TODO(1.79.0) }
         StmtKind::Item(item_id) => {
             let attrs = bctx.ctxt.tcx.hir().attrs(item_id.hir_id());
@@ -2526,7 +2525,9 @@ pub(crate) fn stmt_to_vir<'tcx>(
                 unsupported_err!(stmt.span, "internal item statements", stmt)
             }
         }
-        StmtKind::Let(LetStmt { pat, ty, init, els, hir_id, span, source }) => todo!("TODO(1.79.0)"),
+        StmtKind::Let(LetStmt { pat, ty: _, init, els: _, hir_id: _, span: _, source: _ }) => {
+            let_stmt_to_vir(bctx, pat, init, bctx.ctxt.tcx.hir().attrs(stmt.hir_id))
+        }
     }
 }
 

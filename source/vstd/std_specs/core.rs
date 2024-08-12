@@ -56,7 +56,7 @@ pub trait ExHash {
 pub trait ExPtrPointee {
     type ExternalTraitSpecificationFor: core::ptr::Pointee;
 
-    type Metadata: Copy + Send + Sync + Ord + core::hash::Hash + Unpin;
+    type Metadata: Copy + Send + Sync + Ord + core::hash::Hash + Unpin + core::fmt::Debug + Sized + core::marker::Freeze;
 }
 
 #[verifier::external_trait_specification]
