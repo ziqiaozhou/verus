@@ -1545,7 +1545,25 @@ pub(crate) fn check_item_const_or_static<'tcx>(
 
     let fuel = get_fuel(&vattrs);
     let body = find_body(ctxt, body_id);
-    let mut vir_body = body_to_vir(ctxt, id, body_id, body, body_mode, vattrs.external_body)?;
+    let (actual_body_id, actual_body) = if let ExprKind::Block(block, _) = body.value.kind {
+        if let Some(rustc_hir::StmtKind::Item(item)) = block.stmts.iter().next().map(|stmt| &stmt.kind) {
+            let attrs = ctxt.tcx.hir().attrs(item.hir_id());
+            let vattrs = ctxt.get_verifier_attrs(attrs)?;
+            if vattrs.internal_const_body {
+                let body_id = ctxt.tcx.hir().body_owned_by(item.owner_id.def_id);
+                let body = find_body(ctxt, &body_id);
+                dbg!(&body);
+                Some((body_id, body))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }.unwrap_or((*body_id, body));
+    let mut vir_body = body_to_vir(ctxt, id, &actual_body_id, actual_body, body_mode, vattrs.external_body)?;
     let header = vir::headers::read_header(&mut vir_body)?;
     if header.require.len() + header.recommend.len() > 0 {
         return err_span(span, "consts cannot have requires/recommends");

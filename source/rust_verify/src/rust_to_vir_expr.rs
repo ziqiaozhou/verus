@@ -2513,6 +2513,9 @@ pub(crate) fn stmt_to_vir<'tcx>(
             if vattrs.internal_reveal_fn {
                 dbg!(&item_id.hir_id());
                 unreachable!();
+            } else if vattrs.internal_const_body {
+                dbg!(&item_id.hir_id());
+                unreachable!();
             } else {
                 unsupported_err!(stmt.span, "internal item statements", stmt)
             }

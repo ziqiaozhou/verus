@@ -570,16 +570,16 @@ impl Visitor {
         con_expr: &mut Option<Box<Expr>>,
         con_eq_token: &mut Option<Token![=]>,
         con_semi_token: &mut Option<Token![;]>,
+        con_ty: &Type,
         con_span: Span,
     ) {
         if matches!(con_mode, FnMode::Spec(_) | FnMode::SpecChecked(_)) {
-            // dbg!(&con_expr);
             if let Some(mut expr) = con_expr.take() {
                 let mut stmts = Vec::new();
                 self.inside_ghost += 1;
                 self.visit_expr_mut(&mut expr);
                 self.inside_ghost -= 1;
-                stmts.push(Stmt::Expr(Expr::Verbatim(quote!(fn __VERUS_CONST_BODY__() { let _ = #expr; } ))));
+                stmts.push(Stmt::Expr(Expr::Verbatim(quote!(#[verus::internal(const_body)] fn __VERUS_CONST_BODY__() -> #con_ty { #expr } ))));
                 stmts.push(Stmt::Expr(Expr::Verbatim(quote!(unsafe { core::mem::zeroed() }))));
                 *con_expr = Some(Box::new(Expr::Block(syn_verus::ExprBlock { attrs: vec![], label: None, block: Block {
                     brace_token: token::Brace(expr.span()), stmts
@@ -2960,6 +2960,7 @@ impl VisitMut for Visitor {
             &mut con.expr,
             &mut con.eq_token,
             &mut con.semi_token,
+            &con.ty,
             con.const_token.span,
         );
         visit_item_const_mut(self, con);
@@ -2980,6 +2981,7 @@ impl VisitMut for Visitor {
             &mut sta.expr,
             &mut sta.eq_token,
             &mut sta.semi_token,
+            &sta.ty,
             sta.static_token.span,
         );
         visit_item_static_mut(self, sta);
