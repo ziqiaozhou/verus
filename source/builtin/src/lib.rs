@@ -1427,7 +1427,6 @@ pub fn infer_spec_for_loop_iter<A>(_: A, _print_hint: bool) -> Option<A> {
 #[rustc_diagnostic_item = "verus::builtin::global_size_of"]
 #[verifier::spec]
 pub const fn global_size_of<T>(_bytes: usize) {
-    unimplemented!()
 }
 
 #[cfg(verus_keep_ghost)]

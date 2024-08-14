@@ -989,10 +989,14 @@ impl Visitor {
                         }
                     };
                     let span = item.span();
-                    let static_assert_size = quote! {
-                        if ::core::mem::size_of::<#type_>() != #size_lit {
-                            panic!("does not have the expected size");
+                    let static_assert_size = if self.erase_ghost.erase() {
+                        quote! {
+                            if ::core::mem::size_of::<#type_>() != #size_lit {
+                                panic!("does not have the expected size");
+                            }
                         }
+                    } else {
+                        quote! { }
                     };
                     let static_assert_align = if let Some(align_lit) = align_lit {
                         quote! {
