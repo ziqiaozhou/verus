@@ -2122,18 +2122,19 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
         ExprKind::Closure(Closure { fn_decl: _, body: body_id, .. }) => {
             if expr_vattrs.internal_const_header_wrapper {
                 let closure_body = find_body(&bctx.ctxt, body_id);
-                if let ExprKind::Block(block, _) = closure_body.value.kind {
-                    if block.stmts.len() != 1 {
-                        unsupported_err!(expr.span, "invalid const closure wrapper (many)");
-                    }
-                    if let StmtKind::Semi(expr) = &block.stmts[0].kind {
-                        expr_to_vir(bctx, expr, modifier)
-                    } else {
-                        unsupported_err!(expr.span, "invalid const closure wrapper (stmt)");
-                    }
-                } else {
-                    unsupported_err!(expr.span, "invalid const closure wrapper (body)");
-                }
+                expr_to_vir(bctx, closure_body.value, modifier)
+                //if let ExprKind::Block(block, _) = closure_body.value.kind {
+                //    // if block.stmts.len() != 1 {
+                //    //     unsupported_err!(expr.span, "invalid const closure wrapper (many)");
+                //    // }
+                //    // if let StmtKind::Semi(expr) = &block.stmts[0].kind {
+                //    expr_to_vir(bctx, block.st, modifier)
+                //    // } else {
+                //    //     unsupported_err!(expr.span, "invalid const closure wrapper (stmt)");
+                //    // }
+                //} else {
+                //    unsupported_err!(expr.span, "invalid const closure wrapper (body)");
+                //}
             } else {
                 closure_to_vir(bctx, expr, expr_typ()?, false, modifier)
             }

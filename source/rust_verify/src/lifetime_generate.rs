@@ -1150,6 +1150,9 @@ fn erase_expr<'tcx>(
             match res {
                 Res::Local(id) => match ctxt.tcx.hir_node(id) {
                     Node::Pat(Pat { kind: PatKind::Binding(_ann, id, ident, _pat), .. }) => {
+                        if !ctxt.var_modes.contains_key(&expr.hir_id) {
+                            dbg!(expr);
+                        }
                         if expect_spec || ctxt.var_modes[&expr.hir_id] == Mode::Spec {
                             None
                         } else {

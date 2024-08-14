@@ -12,6 +12,7 @@ use crate::util::{err_span, err_span_bare, unsupported_err_span};
 use crate::verus_items::{BuiltinTypeItem, VerusItem};
 use crate::{unsupported_err, unsupported_err_unless};
 use rustc_ast::Attribute;
+use rustc_data_structures::aligned::Aligned;
 use rustc_hir::{
     Body, BodyId, Crate, ExprKind, FnDecl, FnHeader, FnSig, Generics, HirId, MaybeOwner, Param,
     Unsafety,
@@ -65,17 +66,23 @@ pub(crate) fn body_to_vir<'tcx>(
         external_body,
         in_ghost: mode != Mode::Exec,
     };
-    /* TODO(1.79.0) */ if let ExprKind::Block(block, _) = body.value.kind {
-    /* TODO(1.79.0) */     let first_stmt = block.stmts.iter().next();
-    /* TODO(1.79.0) */     if let Some(rustc_hir::StmtKind::Semi(expr)) = first_stmt.map(|stmt| &stmt.kind) {
-    /* TODO(1.79.0) */         let attrs = ctxt.tcx.hir().attrs(expr.hir_id);
-    /* TODO(1.79.0) */         let vattrs = ctxt.get_verifier_attrs(attrs)?;
-    /* TODO(1.79.0) */         if vattrs.internal_const_header_wrapper {
+    // let mut inspect = false;
+    // /* TODO(1.79.0) */ if let ExprKind::Block(block, _) = &body.value.kind {
+    // /* TODO(1.79.0) */     let first_stmt = block.stmts.iter().next();
+    // /* TODO(1.79.0) */     if let Some(rustc_hir::StmtKind::Semi(expr)) = first_stmt.map(|stmt| &stmt.kind) {
+    // /* TODO(1.79.0) */         let attrs = ctxt.tcx.hir().attrs(expr.hir_id);
+    // /* TODO(1.79.0) */         let vattrs = ctxt.get_verifier_attrs(attrs)?;
+    // /* TODO(1.79.0) */         if vattrs.internal_const_header_wrapper {
+    // /* TODO(1.79.0) */             inspect = true;
+    // /* TODO(1.79.0) */         }
+    // /* TODO(1.79.0) */     }
+    // /* TODO(1.79.0) */ }
+    let vir = expr_to_vir(&bctx, &body.value, ExprModifier::REGULAR);
+    // if inspect {
+    //     dbg!(&vir);
+    // }
+    vir
 
-    /* TODO(1.79.0) */         }
-    /* TODO(1.79.0) */     }
-    /* TODO(1.79.0) */ }
-    expr_to_vir(&bctx, &body.value, ExprModifier::REGULAR)
 }
 
 fn check_fn_decl<'tcx>(

@@ -6,6 +6,7 @@ use crate::ast_util::{air_unique_var, params_equal_opt};
 use crate::def::VERUS_SPEC;
 use crate::messages::error;
 use std::collections::HashMap;
+use std::f64::consts::E;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -203,7 +204,26 @@ pub fn read_header(body: &mut Expr) -> Result<Header, VirErr> {
     match &body.x {
         ExprX::Block(stmts, expr) => {
             let mut expr = expr.clone();
-            let mut block: Vec<Stmt> = (**stmts).clone();
+            let mut block = Vec::new();
+            for stmt in (**stmts).iter() {
+                if let StmtX::Expr(e) = &stmt.x {
+                    if let ExprX::Block(b, e) = &e.x {
+                        if let Some(e) = &e {
+                            if let ExprX::Header(h) = &e.x {
+                                return Err(error(
+                                    &e.span,
+                                    "internal error: nested header block with expr",
+                                ));
+                            }
+                        }
+                        block.extend(b.iter().cloned())
+                    } else {
+                        block.push(stmt.clone());
+                    }
+                } else {
+                    block.push(stmt.clone());
+                }
+            }
             let mut header = read_header_block(&mut block)?;
             if let Some(e) = &expr {
                 if let ExprX::Header(h) = &e.x {
