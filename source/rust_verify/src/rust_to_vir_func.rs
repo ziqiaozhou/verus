@@ -65,6 +65,16 @@ pub(crate) fn body_to_vir<'tcx>(
         external_body,
         in_ghost: mode != Mode::Exec,
     };
+    /* TODO(1.79.0) */ if let ExprKind::Block(block, _) = body.value.kind {
+    /* TODO(1.79.0) */     let first_stmt = block.stmts.iter().next();
+    /* TODO(1.79.0) */     if let Some(rustc_hir::StmtKind::Semi(expr)) = first_stmt.map(|stmt| &stmt.kind) {
+    /* TODO(1.79.0) */         let attrs = ctxt.tcx.hir().attrs(expr.hir_id);
+    /* TODO(1.79.0) */         let vattrs = ctxt.get_verifier_attrs(attrs)?;
+    /* TODO(1.79.0) */         if vattrs.internal_const_header_wrapper {
+
+    /* TODO(1.79.0) */         }
+    /* TODO(1.79.0) */     }
+    /* TODO(1.79.0) */ }
     expr_to_vir(&bctx, &body.value, ExprModifier::REGULAR)
 }
 
@@ -1546,13 +1556,13 @@ pub(crate) fn check_item_const_or_static<'tcx>(
     let fuel = get_fuel(&vattrs);
     let body = find_body(ctxt, body_id);
     let (actual_body_id, actual_body) = if let ExprKind::Block(block, _) = body.value.kind {
-        if let Some(rustc_hir::StmtKind::Item(item)) = block.stmts.iter().next().map(|stmt| &stmt.kind) {
+        let first_stmt = block.stmts.iter().next();
+        if let Some(rustc_hir::StmtKind::Item(item)) = first_stmt.map(|stmt| &stmt.kind) {
             let attrs = ctxt.tcx.hir().attrs(item.hir_id());
             let vattrs = ctxt.get_verifier_attrs(attrs)?;
             if vattrs.internal_const_body {
                 let body_id = ctxt.tcx.hir().body_owned_by(item.owner_id.def_id);
                 let body = find_body(ctxt, &body_id);
-                dbg!(&body);
                 Some((body_id, body))
             } else {
                 None

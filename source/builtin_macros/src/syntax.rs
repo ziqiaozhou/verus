@@ -543,7 +543,13 @@ impl Visitor {
                 }
             }
         }
-        stmts.push(Stmt::Expr(Expr::Verbatim(quote!(|| { #(#spec_stmts)* };))));
+        if !self.erase_ghost.erase_all() {
+            if sig.constness.is_some() {
+                stmts.push(Stmt::Expr(Expr::Verbatim(quote_spanned!(sig.span() => #[verus::internal(const_header_wrapper)] || { #(#spec_stmts)* };))));
+            } else {
+                stmts.extend(spec_stmts);
+            }
+        }
 
         self.inside_ghost -= 1;
         self.inside_bitvector = false;
@@ -579,8 +585,8 @@ impl Visitor {
                 self.inside_ghost += 1;
                 self.visit_expr_mut(&mut expr);
                 self.inside_ghost -= 1;
-                stmts.push(Stmt::Expr(Expr::Verbatim(quote!(#[verus::internal(const_body)] fn __VERUS_CONST_BODY__() -> #con_ty { #expr } ))));
-                stmts.push(Stmt::Expr(Expr::Verbatim(quote!(unsafe { core::mem::zeroed() }))));
+                stmts.push(Stmt::Expr(Expr::Verbatim(quote_spanned!(con_span => #[verus::internal(const_body)] fn __VERUS_CONST_BODY__() -> #con_ty { #expr } ))));
+                stmts.push(Stmt::Expr(Expr::Verbatim(quote_spanned!(con_span => unsafe { core::mem::zeroed() }))));
                 *con_expr = Some(Box::new(Expr::Block(syn_verus::ExprBlock { attrs: vec![], label: None, block: Block {
                     brace_token: token::Brace(expr.span()), stmts
                 } })));
@@ -602,7 +608,7 @@ impl Visitor {
                     // Note: we can't use con.ident as the closure pattern,
                     // because Rust would treat this as a const path pattern.
                     // So we use a 0-parameter closure.
-                    stmts.push(stmt_with_semi!(builtin, token.span => || { #builtin::ensures(|| [#exprs]) }));
+                    stmts.push(stmt_with_semi!(builtin, token.span => #[verus::internal(const_header_wrapper)] || { #builtin::ensures(|| [#exprs]); }));
                 }
                 let mut block = std::mem::take(con_block).expect("const-with-ensures block");
                 block.stmts.splice(0..0, stmts);
@@ -1010,7 +1016,7 @@ impl Visitor {
                         }
                     };
                     let span = item.span();
-                    let static_assert_size = if self.erase_ghost.erase() {
+                    let static_assert_size = if self.erase_ghost.erase_all() {
                         quote! {
                             if ::core::mem::size_of::<#type_>() != #size_lit {
                                 panic!("does not have the expected size");

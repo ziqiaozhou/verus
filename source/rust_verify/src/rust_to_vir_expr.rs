@@ -10,6 +10,7 @@ use crate::rust_to_vir_base::{
     is_smt_arith, is_smt_equality, local_to_var, mid_ty_simplify, mid_ty_to_vir,
     mid_ty_to_vir_ghost, mk_range, typ_of_node, typ_of_node_expect_mut_ref,
 };
+use crate::rust_to_vir_func::find_body;
 use crate::spans::err_air_span;
 use crate::util::{
     err_span, err_span_bare, slice_vec_map_result, unsupported_err_span, vec_map_result,
@@ -2118,7 +2119,25 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                 true,
             )
         }
-        ExprKind::Closure(..) => closure_to_vir(bctx, expr, expr_typ()?, false, modifier),
+        ExprKind::Closure(Closure { fn_decl: _, body: body_id, .. }) => {
+            if expr_vattrs.internal_const_header_wrapper {
+                let closure_body = find_body(&bctx.ctxt, body_id);
+                if let ExprKind::Block(block, _) = closure_body.value.kind {
+                    if block.stmts.len() != 1 {
+                        unsupported_err!(expr.span, "invalid const closure wrapper (many)");
+                    }
+                    if let StmtKind::Semi(expr) = &block.stmts[0].kind {
+                        expr_to_vir(bctx, expr, modifier)
+                    } else {
+                        unsupported_err!(expr.span, "invalid const closure wrapper (stmt)");
+                    }
+                } else {
+                    unsupported_err!(expr.span, "invalid const closure wrapper (body)");
+                }
+            } else {
+                closure_to_vir(bctx, expr, expr_typ()?, false, modifier)
+            }
+        },
         ExprKind::Index(tgt_expr, idx_expr, _span) => {
             // Determine if this is Index or IndexMut
             // Based on ./rustc_mir_build/src/thir/cx/expr.rs in rustc
