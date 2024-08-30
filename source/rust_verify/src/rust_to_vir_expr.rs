@@ -777,7 +777,10 @@ pub(crate) fn invariant_block_open<'a>(
             };
             Some((*guard_hir, *inner_hir, inner_pat, arg, atomicity))
         }
-        _ => None,
+        _ => {
+            dbg!(&open_stmt);
+            None
+        },
     }
 }
 
