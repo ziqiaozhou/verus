@@ -207,7 +207,7 @@ pub(crate) fn expr_to_vir_inner<'tcx>(
     if bctx.external_body {
         // we want just requires/ensures, not the whole body
         match &expr.kind {
-            ExprKind::Block(..) | ExprKind::Call(..) => {}
+            ExprKind::Block(..) | ExprKind::Call(..) | ExprKind::Closure(_) => {}
             _ => {
                 return Ok(bctx.spanned_typed_new(
                     expr.span,
@@ -2126,18 +2126,6 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
             if expr_vattrs.internal_const_header_wrapper {
                 let closure_body = find_body(&bctx.ctxt, body_id);
                 expr_to_vir(bctx, closure_body.value, modifier)
-                //if let ExprKind::Block(block, _) = closure_body.value.kind {
-                //    // if block.stmts.len() != 1 {
-                //    //     unsupported_err!(expr.span, "invalid const closure wrapper (many)");
-                //    // }
-                //    // if let StmtKind::Semi(expr) = &block.stmts[0].kind {
-                //    expr_to_vir(bctx, block.st, modifier)
-                //    // } else {
-                //    //     unsupported_err!(expr.span, "invalid const closure wrapper (stmt)");
-                //    // }
-                //} else {
-                //    unsupported_err!(expr.span, "invalid const closure wrapper (body)");
-                //}
             } else {
                 closure_to_vir(bctx, expr, expr_typ()?, false, modifier)
             }

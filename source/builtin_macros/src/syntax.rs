@@ -543,7 +543,7 @@ impl Visitor {
                 }
             }
         }
-        if !self.erase_ghost.erase_all() {
+        if !self.erase_ghost.erase() {
             if sig.constness.is_some() {
                 stmts.push(Stmt::Expr(Expr::Verbatim(quote_spanned!(sig.span() => #[verus::internal(const_header_wrapper)] || { #(#spec_stmts)* };))));
             } else {

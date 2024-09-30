@@ -72,7 +72,7 @@ macro_rules! declare_atomic_type {
                 let tracked pair = (perm, g);
                 // TODO(1.79.0) assert(Pred::atomic_inv(k, u, g));
                 // TODO(1.79.0) assert(perm.view().patomic == patomic.id());
-                /* TODO(1.79.0) */ assume(<$atomic_pred_ty<Pred>>::inv((k, patomic.id()), pair));
+                // /* TODO(1.79.0) */ assume(<$atomic_pred_ty<Pred>>::inv((k, patomic.id()), pair));
                 let tracked atomic_inv = AtomicInvariant::new(
                     (k, patomic.id()), pair, 0);
 
