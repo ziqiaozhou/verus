@@ -2745,7 +2745,7 @@ pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
                     let attrs = tcx.hir().attrs(item.hir_id());
                     let vattrs = get_verifier_attrs(attrs, None, Some(&ctxt.cmd_line_args))
                         .expect("get_verifier_attrs");
-                    if vattrs.external || vattrs.internal_reveal_fn {
+                    if vattrs.external || vattrs.internal_reveal_fn || vattrs.internal_const_body {
                         continue;
                     }
                     let id = item.owner_id.to_def_id();
