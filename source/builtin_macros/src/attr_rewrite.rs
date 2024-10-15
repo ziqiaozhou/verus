@@ -30,10 +30,14 @@ use core::convert::{TryFrom, TryInto};
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
 use syn::{
-    parse2, parse_quote, spanned::Spanned, token::Brace, visit_mut, visit_mut::VisitMut, Attribute,
-    AttributeArgs, Block, Expr, ExprForLoop, ExprLoop, ExprWhile, Ident, ImplItemMethod, Item,
-    ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, ItemUnion, Stmt,
-    TraitItem, TraitItemMethod,
+    parse2, parse_quote,
+    punctuated::Punctuated,
+    spanned::Spanned,
+    token::Brace,
+    visit_mut::{self, VisitMut},
+    Attribute, AttributeArgs, Block, Expr, ExprForLoop, ExprLoop, ExprWhile, Ident, ImplItemMethod,
+    Item, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, ItemUnion,
+    PathArguments, PathSegment, Stmt, TraitItem, TraitItemMethod,
 };
 
 use crate::{
@@ -50,6 +54,7 @@ pub enum SpecAttributeKind {
     Decreases,
     Invariant,
     InvariantExceptBreak,
+    Verifier,
 }
 
 struct SpecAttributeApply {
@@ -65,6 +70,7 @@ impl SpecAttributeKind {
             SpecAttributeKind::Decreases => (true, true),
             SpecAttributeKind::Invariant => (false, true),
             SpecAttributeKind::InvariantExceptBreak => (false, true),
+            SpecAttributeKind::Verifier => (true, false),
         };
         SpecAttributeApply { on_function, on_loop }
     }
@@ -87,6 +93,7 @@ impl TryFrom<String> for SpecAttributeKind {
             "ensures" => Ok(SpecAttributeKind::Ensures),
             "decreases" => Ok(SpecAttributeKind::Decreases),
             "invariant" => Ok(SpecAttributeKind::Invariant),
+            "verifier" => Ok(SpecAttributeKind::Verifier),
             _ => Err(name),
         }
     }
@@ -121,6 +128,21 @@ fn remove_bracket(tokens: TokenStream) -> Result<TokenStream, syn_verus::Expr> {
     let t = syn_verus::parse2::<syn_verus::ExprTuple>(tokens.clone())
         .map_or(tokens, |e| e.elems.to_token_stream());
     Ok(t)
+}
+
+pub(crate) fn mk_verus_attr(span: proc_macro2::Span, tokens: TokenStream) -> Attribute {
+    let mut path_segments = Punctuated::new();
+    path_segments
+        .push(PathSegment { ident: Ident::new("verus", span), arguments: PathArguments::None });
+    path_segments
+        .push(PathSegment { ident: Ident::new("internal", span), arguments: PathArguments::None });
+    Attribute {
+        pound_token: syn::token::Pound { spans: [span] },
+        style: syn::AttrStyle::Outer,
+        bracket_token: syn::token::Bracket { span },
+        path: syn::Path { leading_colon: None, segments: path_segments },
+        tokens: quote! { #tokens },
+    }
 }
 
 fn expand_verus_attribute(
@@ -158,6 +180,11 @@ fn expand_verus_attribute(
                 "invariant_except_break",
                 quote! {[#attr_tokens]},
             ),
+            SpecAttributeKind::Verifier => {
+                any_with_attr_block
+                    .attrs_mut()
+                    .push(mk_verus_attr(attr_tokens.span(), attr_tokens));
+            }
         }
     }
 }
@@ -215,12 +242,12 @@ pub fn rewrite_verus_attribute(
 ) -> TokenStream {
     if erase.keep() {
         let item: Item = parse2(input).expect("#[verus_verify] must on item");
-        let mut attributes: Vec<TokenStream> = vec![];
+        let mut attributes = vec![mk_verus_attr(item.span(), quote! {(verus_macro)})];
         const VERIFIER_ATTRS: [&str; 2] = ["external", "external_body"];
         for arg in attr_args {
             if let syn::NestedMeta::Meta(m) = arg {
                 if VERIFIER_ATTRS.contains(&m.to_token_stream().to_string().as_str()) {
-                    attributes.push(quote_spanned!(m.span() => #[verifier::#m]));
+                    attributes.push(mk_verus_attr(m.span(), quote! {(#m)}));
                 } else {
                     panic!(
                         "unsupported parameters {:?} in #[verus_verify(...)]",
@@ -228,9 +255,6 @@ pub fn rewrite_verus_attribute(
                     );
                 }
             }
-        }
-        if attributes.len() == 0 {
-            attributes.push(quote_spanned!(item.span() => #[verifier::verify]));
         }
 
         quote_spanned! {item.span()=>
@@ -310,7 +334,7 @@ fn has_external_code(attrs: &Vec<Attribute>) -> bool {
 
 fn add_verifier_attr(attrs: &mut Vec<Attribute>) {
     if !has_external_code(attrs) {
-        let verifier_attr: Attribute = parse_quote!(#[verifier::verify]);
+        let verifier_attr: Attribute = parse_quote!(#[verus::internal(verus_macro)]);
         attrs.push(verifier_attr.clone());
     }
 }

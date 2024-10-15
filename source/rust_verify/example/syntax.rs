@@ -657,3 +657,12 @@ fn test_external_body() -> bool
 {
     false
 }
+
+#[verus_verify]
+trait X {
+    #[verus_verify(external_body)]
+    #[ensures(|ret: bool| ret)]
+    fn default(&self) -> bool {
+        false
+    }
+}
