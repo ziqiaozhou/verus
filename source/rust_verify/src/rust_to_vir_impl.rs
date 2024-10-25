@@ -289,8 +289,7 @@ pub(crate) fn translate_impl<'tcx>(
             );
             true
         } else if let Some(
-            RustItem::StructuralEq
-            | RustItem::StructuralPartialEq
+            RustItem::StructuralPartialEq
             | RustItem::PartialEq
             | RustItem::Eq,
         ) = rust_item

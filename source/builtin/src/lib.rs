@@ -167,8 +167,7 @@ pub fn no_unwind_when(_b: bool) {
 #[cfg(verus_keep_ghost)]
 #[rustc_diagnostic_item = "verus::builtin::reveal_hide"]
 #[verifier::proof]
-pub fn reveal_hide_(_f: fn(), _n: u32) {
-    unimplemented!();
+pub const fn reveal_hide_(_f: fn(), _n: u32) {
 }
 
 #[cfg(verus_keep_ghost)]
@@ -1457,7 +1456,6 @@ pub fn infer_spec_for_loop_iter<A>(_: A, _print_hint: bool) -> Option<A> {
 #[rustc_diagnostic_item = "verus::builtin::global_size_of"]
 #[verifier::spec]
 pub const fn global_size_of<T>(_bytes: usize) {
-    unimplemented!()
 }
 
 #[cfg(verus_keep_ghost)]

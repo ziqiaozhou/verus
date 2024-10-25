@@ -326,6 +326,7 @@ impl<T> InvCell<T> {
     {
         let (pcell, Tracked(perm)) = PCell::new(val);
         let ghost possible_values = Set::new(f);
+        // /* TODO(1.79.0) */ assume(InvCellPred::inv((possible_values, pcell), perm));
         let tracked perm_inv = LocalInvariant::new((possible_values, pcell), perm, 0);
         InvCell { possible_values: Ghost(possible_values), pcell, perm_inv: Tracked(perm_inv) }
     }
