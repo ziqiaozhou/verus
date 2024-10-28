@@ -298,9 +298,10 @@ pub fn rewrite(
 pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::TokenStream {
     if erase.keep() {
         let block: TokenStream =
-            syntax::proof_block(erase, quote_spanned!(input.span() => {#input;}).into()).into();
+            syntax::proof_block(erase, quote_spanned!(input.span() => {#input}).into()).into();
         quote! {
             #[verus::internal(proof_block)]
+            #[allow(redundant_semicolons)]
             {
                 #[verus::internal(const_header_wrapper)]||#block;
             }
