@@ -1320,14 +1320,14 @@ impl<'f> Visitor<'f> {
     ) {
         self.mark(&sig, code_kind, LineContent::Signature(content_code_kind));
         if code_kind != CodeKind::Spec {
-            if let Some(requires) = &sig.requires {
+            if let Some(requires) = &sig.spec.requires {
                 self.mark(
                     requires,
                     self.mode_or_trusted(CodeKind::Spec),
                     LineContent::FunctionSpec,
                 );
             }
-            if let Some(ensures) = &sig.ensures {
+            if let Some(ensures) = &sig.spec.ensures {
                 self.mark(ensures, self.mode_or_trusted(CodeKind::Spec), LineContent::FunctionSpec);
             }
             if let Some(decreases) = &sig.decreases {
