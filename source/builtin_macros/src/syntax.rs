@@ -3528,7 +3528,7 @@ pub(crate) fn rewrite_expr(
         inside_ghost: if inside_ghost { 1 } else { 0 },
         inside_type: 0,
         inside_external_code: 0,
-        inside_const: false,
+        inside_const: true,
         inside_arith: InsideArith::None,
         assign_to: false,
         rustdoc: env_rustdoc(),
