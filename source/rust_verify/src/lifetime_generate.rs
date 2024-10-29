@@ -15,7 +15,7 @@ use rustc_hir::{
 };
 use rustc_middle::ty::{
     AdtDef, BoundRegionKind, BoundVariableKind, ClauseKind, Const, GenericArgKind,
-    GenericParamDefKind, RegionKind, Ty, TyCtxt, TyKind, TypeckResults, VariantDef, TermKind
+    GenericParamDefKind, RegionKind, TermKind, Ty, TyCtxt, TyKind, TypeckResults, VariantDef,
 };
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::kw;
@@ -2253,11 +2253,16 @@ fn erase_impl_assocs<'tcx>(ctxt: &Context<'tcx>, state: &mut State, impl_id: Def
         span: Some(span),
         generic_params,
         generic_bounds,
-        self_typ,
+        self_typ: self_typ.clone(),
         trait_as_datatype,
         assoc_typs,
     };
-    state.trait_impls.push(trait_impl);
+    // v1.80 impls IntoIterator and Iterator for Box<[T]> which cause conflicts
+    if let TypX::Datatype(Id { kind: IdKind::Builtin, .. }, ..) = self_typ.as_ref() {
+        if !matches!(name.raw_id.as_str(), "Iterator" | "IntoIterator") {
+            state.trait_impls.push(trait_impl);
+        }
+    }
 }
 
 fn erase_trait<'tcx>(ctxt: &Context<'tcx>, state: &mut State, trait_id: DefId) {
