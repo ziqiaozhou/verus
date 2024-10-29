@@ -15,7 +15,7 @@ use rustc_hir::{
 };
 use rustc_middle::ty::{
     AdtDef, BoundRegionKind, BoundVariableKind, ClauseKind, Const, GenericArgKind,
-    GenericParamDefKind, RegionKind, Ty, TyCtxt, TyKind, TypeckResults, VariantDef, TermKind
+    GenericParamDefKind, RegionKind, TermKind, Ty, TyCtxt, TyKind, TypeckResults, VariantDef,
 };
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::kw;
@@ -2249,14 +2249,39 @@ fn erase_impl_assocs<'tcx>(ctxt: &Context<'tcx>, state: &mut State, impl_id: Def
         }
     }
 
+    let trait_polarity = ctxt.tcx.impl_polarity(impl_id);
     let trait_impl = TraitImpl {
         span: Some(span),
         generic_params,
         generic_bounds,
-        self_typ,
+        self_typ: self_typ.clone(),
+        trait_polarity,
         trait_as_datatype,
         assoc_typs,
     };
+
+    // v1.80 stablized Iterator and IntoIterator for Box.
+    // It needs to implement !Iterartor to avoid conflicts.
+    // The lifetime checking does not reserve polarity.
+    /*if matches!(name.raw_id.as_str(), "Iterator" | "IntoIterator") {
+        let skip = match self_typ.as_ref() {
+            // found both positive and negative implementation of trait `T55_Iterator` for type `&mut std::boxed::Box<[_], _>
+            TypX::Ref(r, ..) => {
+                if let TypX::Datatype(sid, ..) = r.as_ref() {
+                    sid.raw_id == "Box"
+                } else {
+                    false
+                }
+            }
+            TypX::Datatype(sid, ..) if sid.raw_id == "Box" => true,
+            _ => false,
+        };
+        if skip {
+            println!("skip  = {:?} {:?} {:?}", self_typ, trait_polarity, name);
+            return;
+        }
+    }*/
+
     state.trait_impls.push(trait_impl);
 }
 
