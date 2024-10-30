@@ -233,7 +233,7 @@ pub fn rewrite_verus_attribute(
         for arg in attr_args {
             if let syn::NestedMeta::Meta(m) = arg {
                 if VERIFIER_ATTRS.contains(&m.to_token_stream().to_string().as_str()) {
-                    attributes.push(quote_spanned!(m.span() => #[verus::internal(#m)]));
+                    attributes.push(quote_spanned!(m.span() => #[verifier::#m]));
                 } else {
                     panic!(
                         "unsupported parameters {:?} in #[verus_verify(...)]",
@@ -242,7 +242,9 @@ pub fn rewrite_verus_attribute(
                 }
             }
         }
-        attributes.push(quote_spanned!(item.span() => #[verus::internal(verus_macro)]));
+        if attributes.len() == 0 {
+            attributes.push(quote_spanned!(item.span() => #[verifier::verify]));
+        }
 
         quote_spanned! {item.span()=>
             #(#attributes)*
@@ -300,7 +302,7 @@ pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::Token
         let block: TokenStream =
             syntax::proof_block(erase, quote_spanned!(input.span() => {#input}).into()).into();
         quote! {
-            #[verus::internal(proof_block)]
+            #[verifier::proof_block]
             {
                 #[verus::internal(const_header_wrapper)]||#block;
             }
