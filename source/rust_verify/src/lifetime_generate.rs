@@ -2794,10 +2794,6 @@ pub(crate) fn gen_check_tracked_lifetimes<'tcx>(
         if let MaybeOwner::Owner(owner) = owner {
             match owner.node() {
                 OwnerNode::Item(item) => {
-                    if crate_items.is_item_external(item.item_id()) {
-                        // item is external
-                        continue;
-                    }
                     match &item.kind {
                         ItemKind::Impl(Impl { of_trait: Some(trait_ref), .. }) => {
                             if Some(trait_ref.path.res.def_id()) == tcx.lang_items().copy_trait() {
