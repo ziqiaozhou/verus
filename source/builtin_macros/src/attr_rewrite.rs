@@ -164,7 +164,7 @@ pub fn rewrite_verus_attribute(
     input: TokenStream,
 ) -> TokenStream {
     if erase.keep() {
-        let item: Item = parse2(input).expect("#[verus_verify] must be applied to an item");
+        let mut item: Item = parse2(input).expect("#[verus_verify] must be applied to an item");
         let mut attributes: Vec<TokenStream> = vec![];
         const VERIFIER_ATTRS: [&str; 2] = ["external", "external_body"];
         for arg in attr_args {
@@ -181,6 +181,20 @@ pub fn rewrite_verus_attribute(
         }
         if attributes.len() == 0 {
             attributes.push(quote_spanned!(item.span() => #[verifier::verify]));
+        }
+
+        match &mut item {
+            Item::Fn(ref mut f) => {
+                rewrite_dynamic_type(&mut f.sig);
+            }
+            Item::Trait(ref mut t) => {
+                for i in &mut t.items {
+                    if let syn::TraitItem::Method(ref mut f) = i {
+                        rewrite_dynamic_type(&mut f.sig);
+                    }
+                }
+            }
+            _ => {}
         }
 
         quote_spanned! {item.span()=>
@@ -269,6 +283,36 @@ pub fn rewrite(
         AnyFnOrLoop::Fn(_) | AnyFnOrLoop::TraitMethod(_) => Ok(
             quote_spanned!(span => compile_error!("'verus_spec' attribute expected on function");),
         ),
+    }
+}
+
+pub fn rewrite_dynamic_type(sig: &mut syn::Signature) {
+    let mut type_counter = 0;
+    for arg in &mut sig.inputs {
+        if let syn::FnArg::Typed(ref mut pat_type) = arg {
+            if let syn::Type::Reference(ref mut ty_ref) = pat_type.ty.as_mut() {
+                if let syn::Type::TraitObject(trait_obj) = ty_ref.elem.as_ref() {
+                    // Create a new type parameter Tn for the dynamic trait
+                    let new_type_ident =
+                        syn::Ident::new(&format!("T{}", type_counter), ty_ref.span());
+                    type_counter += 1;
+                    let type_params = syn::TypeParam {
+                        attrs: vec![],
+                        ident: new_type_ident.clone(),
+                        colon_token: Some(syn::token::Colon { spans: [ty_ref.span()] }),
+                        bounds: trait_obj.bounds.clone(),
+                        eq_token: None,
+                        default: None,
+                    };
+                    sig.generics.params.push(syn::GenericParam::Type(type_params));
+
+                    // Create a new input with the unique generic type
+                    let param_ident = &pat_type.pat;
+                    // Change the parameter type to the new type
+                    ty_ref.elem = Box::new(syn::parse_quote! { #new_type_ident });
+                }
+            }
+        }
     }
 }
 
