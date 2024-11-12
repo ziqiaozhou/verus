@@ -450,15 +450,6 @@ fn emit_errors_warnings_for_ignored_attrs<'tcx>(
             )));
         }
     }
-
-    if state == VerifState::Default && !opts_in_to_verus(&eattrs) {
-        if eattrs.any_other_verus_specific_attribute {
-            diagnostics.push(VirErrAs::Warning(crate::util::err_span_bare(
-                span,
-                format!("verus-related attribute has no effect because Verus is already ignoring this item. You may need to mark it as `#[verifier::verify]`."),
-            )));
-        }
-    }
 }
 
 impl<'a> GeneralItem<'a> {
