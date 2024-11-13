@@ -2783,24 +2783,6 @@ impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         config.override_queries = Some(|_session, providers| {
             providers.hir_crate = hir_crate;
-
-            // Do not actually evaluate consts if we are not compiling, as doing so triggers the
-            // constness checker, which is more restrictive than necessary for verification.
-            // Doing this will delay some const-ness errors to when verus is run with `--compile`.
-            providers.eval_to_const_value_raw =
-                |_tcx, _key| Ok(rustc_middle::mir::ConstValue::ZeroSized);
-
-            // Prevent the borrow checker from running, as we will run our own lifetime analysis.
-            // Stopping after `after_expansion` used to be enough, but now borrow check is triggered
-            // by const evaluation through the mir interpreter.
-            providers.mir_borrowck = |tcx, _local_def_id| {
-                tcx.arena.alloc(rustc_middle::mir::BorrowCheckResult {
-                    concrete_opaque_types: rustc_data_structures::fx::FxIndexMap::default(),
-                    closure_requirements: None,
-                    used_mut_upvars: smallvec::SmallVec::new(),
-                    tainted_by_errors: None,
-                })
-            };
         });
     }
 
