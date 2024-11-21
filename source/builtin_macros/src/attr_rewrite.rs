@@ -307,7 +307,6 @@ pub fn rewrite_dynamic_type(sig: &mut syn::Signature) {
                     sig.generics.params.push(syn::GenericParam::Type(type_params));
 
                     // Create a new input with the unique generic type
-                    let param_ident = &pat_type.pat;
                     // Change the parameter type to the new type
                     ty_ref.elem = Box::new(syn::parse_quote! { #new_type_ident });
                 }
