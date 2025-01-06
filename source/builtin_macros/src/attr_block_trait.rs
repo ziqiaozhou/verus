@@ -1,11 +1,13 @@
 use syn::{
-    Attribute, Block, ExprForLoop, ExprLoop, ExprWhile, ImplItemMethod, ItemFn, TraitItemMethod,
+    Attribute, Block, ExprForLoop, ExprLoop, ExprWhile, ImplItemMethod, ItemFn, Signature,
+    TraitItemMethod,
 };
 
 pub trait AnyAttrBlock {
     #[allow(dead_code)]
     fn attrs_mut(&mut self) -> &mut Vec<Attribute>;
     fn block_mut(&mut self) -> Option<&mut Block>;
+    fn sig_mut(&mut self) -> Option<&mut Signature>;
 }
 
 impl AnyAttrBlock for ItemFn {
@@ -15,6 +17,10 @@ impl AnyAttrBlock for ItemFn {
 
     fn block_mut(&mut self) -> Option<&mut Block> {
         Some(&mut self.block)
+    }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        Some(&mut self.sig)
     }
 }
 
@@ -26,6 +32,10 @@ impl AnyAttrBlock for ImplItemMethod {
     fn block_mut(&mut self) -> Option<&mut Block> {
         Some(&mut self.block)
     }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        Some(&mut self.sig)
+    }
 }
 
 impl AnyAttrBlock for ExprLoop {
@@ -35,6 +45,10 @@ impl AnyAttrBlock for ExprLoop {
 
     fn block_mut(&mut self) -> Option<&mut Block> {
         Some(&mut self.body)
+    }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        None
     }
 }
 
@@ -46,6 +60,10 @@ impl AnyAttrBlock for ExprForLoop {
     fn block_mut(&mut self) -> Option<&mut Block> {
         Some(&mut self.body)
     }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        None
+    }
 }
 
 impl AnyAttrBlock for ExprWhile {
@@ -56,6 +74,10 @@ impl AnyAttrBlock for ExprWhile {
     fn block_mut(&mut self) -> Option<&mut Block> {
         Some(&mut self.body)
     }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        None
+    }
 }
 
 impl AnyAttrBlock for TraitItemMethod {
@@ -65,6 +87,10 @@ impl AnyAttrBlock for TraitItemMethod {
 
     fn block_mut(&mut self) -> Option<&mut Block> {
         self.default.as_mut()
+    }
+
+    fn sig_mut(&mut self) -> Option<&mut Signature> {
+        Some(&mut self.sig)
     }
 }
 

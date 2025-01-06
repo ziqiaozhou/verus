@@ -33,7 +33,10 @@
 use core::convert::TryFrom;
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
-use syn::{parse2, spanned::Spanned, AttributeArgs, Ident, Item};
+use syn::{
+    parse2, parse_quote, punctuated::Punctuated, spanned::Spanned, token, token::Comma, Attribute,
+    AttributeArgs, Block, Expr, FnArg, Ident, Item, Stmt, TraitItem, TraitItemMethod,
+};
 
 use crate::{
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
@@ -49,6 +52,7 @@ pub enum SpecAttributeKind {
     Decreases,
     Invariant,
     InvariantExceptBreak,
+    Tracked,
 }
 
 struct SpecAttributeApply {
@@ -66,6 +70,7 @@ impl SpecAttributeKind {
             SpecAttributeKind::Decreases => (true, true),
             SpecAttributeKind::Invariant => (false, true),
             SpecAttributeKind::InvariantExceptBreak => (false, true),
+            SpecAttributeKind::Tracked => (true, false),
         };
         SpecAttributeApply { on_function, on_loop }
     }
@@ -88,6 +93,7 @@ impl TryFrom<String> for SpecAttributeKind {
             "ensures" => Ok(SpecAttributeKind::Ensures),
             "decreases" => Ok(SpecAttributeKind::Decreases),
             "invariant" => Ok(SpecAttributeKind::Invariant),
+            "tracks" => Ok(SpecAttributeKind::Tracked),
             _ => Err(name),
         }
     }
@@ -104,6 +110,7 @@ fn insert_brackets(attr_type: &SpecAttributeKind, tokens: TokenStream) -> TokenS
                 .map_or(quote! {[#tokens]}, |e| quote! {#e})
         }
         SpecAttributeKind::Decreases => tokens,
+        SpecAttributeKind::Tracked => tokens,
         _ => {
             quote! {[#tokens]}
         }
@@ -143,6 +150,10 @@ fn expand_verus_attribute(
             SpecAttributeKind::InvariantExceptBreak => {
                 insert_spec_call(any_with_attr_block, "invariant_except_break", attr_tokens)
             }
+            SpecAttributeKind::Tracked => {
+                insert_arguments_to_fn(any_with_attr_block, attr_tokens, true)
+                    .expect("failed to add tracked arguments");
+            }
         }
     }
 }
@@ -151,11 +162,105 @@ fn insert_spec_call(any_fn: &mut dyn AnyAttrBlock, call: &str, verus_expr: Token
     let fname = Ident::new(call, verus_expr.span());
     let tokens: TokenStream =
         syntax::rewrite_expr(EraseGhost::Keep, true, verus_expr.into()).into();
-    any_fn
-        .block_mut()
-        .unwrap()
-        .stmts
-        .insert(0, parse2(quote! { ::builtin::#fname(#tokens); }).unwrap());
+    any_fn.block_mut().unwrap().stmts.insert(
+        0,
+        parse2(quote_spanned_builtin! { builtin, fname.span() => #builtin::#fname(#tokens); })
+            .unwrap(),
+    );
+}
+
+struct PunctuatedList<T: syn::parse::Parse> {
+    pub items: Punctuated<T, Comma>,
+}
+
+impl<T: syn::parse::Parse> syn::parse::Parse for PunctuatedList<T> {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        // Use Punctuated's parse_terminated method for parsing
+        let items = Punctuated::parse_terminated(input)?;
+        Ok(PunctuatedList { items })
+    }
+}
+
+fn insert_arguments_to_fn(
+    any_fn: &mut dyn AnyAttrBlock,
+    attr_input: TokenStream,
+    is_tracked: bool,
+) -> Result<(), syn::Error> {
+    let mut stmts = Vec::<Stmt>::new();
+    let args: PunctuatedList<FnArg> = parse2(attr_input)?;
+    for arg in &args.items {
+        let FnArg::Typed(arg) = arg else { unreachable!() };
+        let ty = &arg.ty;
+        let syn::Pat::Ident(ref pid) = *arg.pat else { unreachable!() };
+        let id = &pid.ident;
+        let tmp_id = Ident::new(&format!("verus_tmp_{id}"), id.span());
+        let new_arg: FnArg = if is_tracked {
+            parse_quote! {
+            #tmp_id: Tracked<#ty>
+            }
+        } else {
+            parse_quote! {
+                #tmp_id: Ghost<#ty>
+            }
+        };
+        any_fn.sig_mut().unwrap().inputs.push(new_arg);
+        stmts.push(parse2(quote! {#[verus::internal(header_unwrap_parameter)] let #id;}).unwrap());
+        if is_tracked {
+            stmts.push(parse2(quote! {#[verifier::proof_block] { #id = #tmp_id.get() };}).unwrap());
+        } else {
+            stmts
+                .push(parse2(quote! {#[verifier::proof_block] { #id = #tmp_id.view() };}).unwrap());
+        }
+    }
+    any_fn.block_mut().unwrap().stmts.splice(0..0, stmts);
+    Ok(())
+}
+
+fn insert_arguments_to_call(
+    args_mut: &mut Punctuated<Expr, Comma>,
+    attr_input: TokenStream,
+    is_tracked: bool,
+) -> Result<(), syn::Error> {
+    let args: PunctuatedList<Expr> = parse2(attr_input)?;
+    for arg in args.items {
+        let builtin = crate::syntax::Builtin(arg.span());
+        if is_tracked {
+            args_mut.push(parse_quote!{
+                #[verifier::ghost_wrapper] #builtin::tracked_exec(#[verifier::tracked_block_wrapped] #arg)
+            });
+        } else {
+            args_mut.push(parse_quote!{
+                #[verifier::ghost_wrapper] #builtin::ghost_exec(#[verifier::ghost_block_wrapped] #arg)
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn tracks(
+    erase: &EraseGhost,
+    attr_input: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> Result<proc_macro::TokenStream, syn::Error> {
+    if !erase.keep() {
+        return Ok(input);
+    }
+    let mut e = syn::parse::<Expr>(input)?;
+    match &mut e {
+        Expr::MethodCall(call) => {
+            insert_arguments_to_call(&mut call.args, attr_input.into(), true)?;
+            let ret = call.to_token_stream();
+            println!("{}", ret);
+            Ok(call.to_token_stream().into())
+        }
+        Expr::Call(call) => {
+            insert_arguments_to_call(&mut call.args, attr_input.into(), true)?;
+            let ret = call.to_token_stream();
+            println!("{}", ret);
+            Ok(call.to_token_stream().into())
+        }
+        _ => Err(syn::Error::new(e.span(), "expected ExprMethodCall or ExprCall")),
+    }
 }
 
 pub fn rewrite_verus_attribute(

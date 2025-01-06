@@ -281,6 +281,31 @@ pub fn verus_spec(
 
 // The attribute should work together with verus_verify attribute.
 #[proc_macro_attribute]
+pub fn tracks(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_rewrite::tracks(&cfg_erase(), attr, input)
+        .expect("Misuse of #[track()]. Must follow verus_verify or used on ExprCall")
+}
+
+#[proc_macro_attribute]
+pub fn tracked(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_rewrite::rewrite(
+        cfg_erase(),
+        attr_rewrite::SpecAttributeKind::Tracked,
+        attr.into(),
+        input.into(),
+    )
+    .expect("Misuse of #[requires()].")
+    .into()
+}
+
+// The attribute should work together with verus_verify attribute.
+#[proc_macro_attribute]
 pub fn ensures(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
