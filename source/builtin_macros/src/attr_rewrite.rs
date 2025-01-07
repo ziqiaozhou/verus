@@ -34,8 +34,8 @@ use core::convert::TryFrom;
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
 use syn::{
-    parse2, parse_quote, punctuated::Punctuated, spanned::Spanned, token, token::Comma, Attribute,
-    AttributeArgs, Block, Expr, FnArg, Ident, Item, Stmt, TraitItem, TraitItemMethod,
+    parse2, parse_quote, punctuated::Punctuated, spanned::Spanned, token::Comma, AttributeArgs,
+    Expr, FnArg, Ident, Item, Stmt,
 };
 
 use crate::{
