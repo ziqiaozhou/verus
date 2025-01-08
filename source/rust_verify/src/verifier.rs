@@ -2954,6 +2954,18 @@ impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
                 }
             }
         });
+        if !self.verifier.args.output_json && !self.verifier.encountered_vir_error {
+            println!(
+                "verification results:: {} verified, {} errors{}",
+                self.verifier.count_verified,
+                self.verifier.count_errors,
+                if !crate::driver::is_verifying_entire_crate(&self.verifier) {
+                    " (partial verification with `--verify-*`)"
+                } else {
+                    ""
+                }
+            );
+        }
         rustc_driver::Compilation::Stop
     }
 }
