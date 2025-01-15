@@ -191,6 +191,36 @@ ast_struct! {
     }
 }
 
+ast_struct! {
+    pub struct Tracks {
+        pub token: Token![takes],
+        pub paren: token::Paren,
+        pub args: Punctuated<FnArg, Token![,]>,
+    }
+}
+
+ast_struct! {
+    pub struct ReturnTracks {
+        pub token: Token![->],
+        pub paren: token::Paren,
+        pub args: Punctuated<FnArg, Token![,]>,
+    }
+}
+
+ast_struct! {
+pub struct VerusOut {
+    pub tracked: Punctuated<Expr, Token![,]>,
+    pub expr: Option<(Expr, Token![=>])>,
+}
+}
+
+ast_struct! {
+    pub struct TrackedIO {
+        pub input: Option<Punctuated<ExprCall, Token![,]>>,
+        pub out: Option<(Token![=>], Punctuated<ExprCall, Token![,]>)>,
+    }
+}
+
 ast_enum_of_structs! {
     pub enum InvariantNameSet {
         Any(InvariantNameSetAny),
@@ -229,6 +259,8 @@ ast_struct! {
         pub decreases: Option<SignatureDecreases>,
         pub invariants: Option<SignatureInvariants>,
         pub unwind: Option<SignatureUnwind>,
+        pub tracks: Option<Tracks>,
+        pub return_tracks: Option<ReturnTracks>,
     }
 }
 
@@ -663,6 +695,94 @@ pub mod parsing {
     }
 
     #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for Tracks {
+        fn parse(input: ParseStream) -> Result<Self> {
+            let token = input.parse()?;
+            let content;
+            let paren = parenthesized!(content in input);
+            Ok(Tracks {
+                token,
+                paren,
+                args: content.parse_terminated(FnArg::parse)?,
+            })
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for ReturnTracks {
+        fn parse(input: ParseStream) -> Result<Self> {
+            let token = input.parse()?;
+            let content;
+            let paren = parenthesized!(content in input);
+            Ok(ReturnTracks {
+                token,
+                paren,
+                args: content.parse_terminated(FnArg::parse)?,
+            })
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for VerusOut {
+        fn parse(input: ParseStream) -> Result<Self> {
+            let mut tracked = Punctuated::new();
+            loop {
+                let expr = input.parse()?;
+                tracked.push(expr);
+                if !input.peek(Token![,]) {
+                    break;
+                }
+                let _comma: Token![,] = input.parse()?;
+            }
+            let expr = if input.peek(Token![=>]) {
+                let token: Token![=>] = input.parse()?;
+                let expr = input.parse()?;
+                Some((expr, token))
+            } else {
+                None
+            };
+
+            Ok(VerusOut { tracked, expr })
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for TrackedIO {
+        fn parse(input: ParseStream) -> Result<Self> {
+            let input_ = if !input.peek(Token![=>]) {
+                let mut inputs = Punctuated::new();
+                loop {
+                    let expr = input.parse()?;
+                    inputs.push(expr);
+                    if !input.peek(Token![,]) {
+                        break;
+                    }
+                    let _comma: Token![,] = input.parse()?;
+                }
+                Some(inputs)
+            } else {
+                None
+            };
+            let out = if input.peek(Token![=>]) {
+                let token: Token![=>] = input.parse()?;
+                let mut out = Punctuated::new();
+                loop {
+                    let expr = input.parse()?;
+                    out.push(expr);
+                    if !input.peek(Token![,]) {
+                        break;
+                    }
+                    let _comma: Token![,] = input.parse()?;
+                }
+                Some((token, out))
+            } else {
+                None
+            };
+            Ok(TrackedIO { input: input_, out })
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
     impl Parse for InvariantExceptBreak {
         fn parse(input: ParseStream) -> Result<Self> {
             Ok(InvariantExceptBreak {
@@ -871,6 +991,28 @@ pub mod parsing {
     }
 
     #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for Option<Tracks> {
+        fn parse(input: ParseStream) -> Result<Self> {
+            if input.peek(Token![takes]) {
+                input.parse().map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    impl Parse for Option<ReturnTracks> {
+        fn parse(input: ParseStream) -> Result<Self> {
+            if input.peek(Token![->]) {
+                input.parse().map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
     impl Parse for Option<InvariantExceptBreak> {
         fn parse(input: ParseStream) -> Result<Self> {
             if input.peek(Token![invariant_except_break]) {
@@ -940,6 +1082,8 @@ pub mod parsing {
     impl Parse for SignatureSpec {
         fn parse(input: ParseStream) -> Result<Self> {
             let prover: Option<Prover> = input.parse()?;
+            let tracks: Option<Tracks> = input.parse()?;
+            let return_tracks: Option<ReturnTracks> = input.parse()?;
             let requires: Option<Requires> = input.parse()?;
             let recommends: Option<Recommends> = input.parse()?;
             let ensures: Option<Ensures> = input.parse()?;
@@ -957,6 +1101,8 @@ pub mod parsing {
                 decreases,
                 invariants,
                 unwind,
+                tracks,
+                return_tracks,
             })
         }
     }

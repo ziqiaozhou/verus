@@ -273,10 +273,24 @@ pub fn verus_spec(
 ) -> proc_macro::TokenStream {
     let erase = cfg_erase();
     if erase.keep() {
-        attr_rewrite::rewrite_verus_spec(erase, attr.into(), input.into()).into()
+        let r = attr_rewrite::rewrite_verus_spec(erase, attr.into(), input.into()).into();
+        //println!("{}", r);
+        r
     } else {
         input
     }
+}
+
+// The attribute should work together with verus_verify attribute.
+#[proc_macro_attribute]
+pub fn verus_io(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let ret = attr_rewrite::verus_io(&cfg_erase(), attr, input)
+        .expect("Misuse of #[verus_io()]. Must used on ExprCall");
+    //println!("{}", ret);
+    ret
 }
 
 // The attribute should work together with verus_verify attribute.
@@ -349,4 +363,14 @@ pub fn proof(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     attr_rewrite::proof_rewrite(cfg_erase(), input.into()).into()
 }
 
+#[proc_macro]
+pub fn verus_out(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    attr_rewrite::verus_out_rewrite(cfg_erase(), input.into())
+        .expect("expected verus_out!(Tracked(..), Ghost(...) => expr) ")
+}
+
+#[proc_macro]
+pub fn verus_stmts(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    syntax::rewrite_stmt(cfg_erase(), false, input.into())
+}
 /*** End of verus small macro definition for executable items ***/

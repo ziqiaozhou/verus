@@ -24,7 +24,7 @@ use syn_verus::ExprBlock;
 use syn_verus::{
     braced, bracketed, parenthesized, parse_macro_input, AttrStyle, Attribute, BareFnArg, BinOp,
     Block, DataMode, Decreases, Ensures, Expr, ExprBinary, ExprCall, ExprLit, ExprLoop,
-    ExprMatches, ExprTuple, ExprUnary, ExprWhile, Field, FnArgKind, FnMode, Global, Ident,
+    ExprMatches, ExprTuple, ExprUnary, ExprWhile, Field, FnArg, FnArgKind, FnMode, Global, Ident,
     ImplItem, ImplItemMethod, Invariant, InvariantEnsures, InvariantExceptBreak, InvariantNameSet,
     InvariantNameSetList, Item, ItemBroadcastGroup, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod,
     ItemStatic, ItemStruct, ItemTrait, ItemUnion, Lit, Local, MatchesOpExpr, MatchesOpToken,
@@ -96,12 +96,26 @@ struct Visitor {
 }
 
 // For exec "let pat = init" declarations, recursively find Tracked(x), Ghost(x), x in pat
-struct ExecGhostPatVisitor {
+pub struct ExecGhostPatVisitor {
     inside_ghost: u32,
     tracked: Option<Token![tracked]>,
     ghost: Option<Token![ghost]>,
     x_decls: Vec<Stmt>,
     x_assigns: Vec<Stmt>,
+}
+
+pub(crate) fn rewrite_exe_pat(pat: &mut Pat) -> (Vec<Stmt>, Vec<Stmt>) {
+    let mut visit_pat = ExecGhostPatVisitor {
+        inside_ghost: 0,
+        tracked: None,
+        ghost: None,
+        x_decls: Vec::new(),
+        x_assigns: Vec::new(),
+    };
+
+    visit_pat.visit_pat_mut(pat);
+    let ExecGhostPatVisitor { x_decls, x_assigns, .. } = visit_pat;
+    return (x_decls, x_assigns);
 }
 
 fn data_mode_attrs(mode: &DataMode) -> Vec<Attribute> {
@@ -214,6 +228,48 @@ macro_rules! parse_quote_spanned_vstd {
     }
 }
 
+pub(crate) fn is_tracked_or_ghost_call(call: &ExprCall) -> Option<bool> {
+    let ExprCall { func, args, .. } = call;
+    match func.as_ref() {
+        Expr::Path(path) if path.qself.is_none() && args.len() == 1 => {
+            if path_is_ident(&path.path, "Ghost") {
+                Some(false)
+            } else if path_is_ident(&path.path, "Tracked") {
+                Some(true)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+}
+pub(crate) fn create_tracked_ghost_vars<T: ToTokens>(
+    erase: &EraseGhost,
+    is_tracked: bool,
+    is_inside_ghost: bool,
+    span: Span,
+    inner: T,
+) -> Expr {
+    if is_tracked {
+        // Tracked(...)
+        Expr::Verbatim(if erase.erase() {
+            quote_spanned!(span => Tracked::assume_new_fallback(|| unreachable!()))
+        } else if is_inside_ghost {
+            quote_spanned_builtin!(builtin, span => #builtin::Tracked::new(#inner))
+        } else {
+            quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::tracked_exec(#[verifier::tracked_block_wrapped] /* vattr */ #inner))
+        })
+    } else {
+        // Ghost(...)
+        Expr::Verbatim(if erase.erase() {
+            quote_spanned!(span => Ghost::assume_new_fallback(|| unreachable!()))
+        } else if is_inside_ghost {
+            quote_spanned_builtin!(builtin, span => #builtin::Ghost::new(#inner))
+        } else {
+            quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::ghost_exec(#[verifier::ghost_block_wrapped] /* vattr */ #inner))
+        })
+    }
+}
 impl Visitor {
     fn take_ghost<T: Default>(&self, dest: &mut T) -> T {
         take_ghost(self.erase_ghost, dest)
@@ -248,8 +304,8 @@ impl Visitor {
         let decreases = self.take_ghost(&mut spec.decreases);
         let opens_invariants = self.take_ghost(&mut spec.invariants);
         let unwind = self.take_ghost(&mut spec.unwind);
-
         let mut spec_stmts = Vec::new();
+
         // TODO: wrap specs inside ghost blocks
         if let Some(Requires { token, mut exprs }) = requires {
             if exprs.exprs.len() > 0 {
@@ -486,48 +542,7 @@ impl Visitor {
             }
 
             // Check for Ghost(x) or Tracked(x) argument
-            use syn_verus::PatType;
-            if let FnArgKind::Typed(PatType { pat, .. }) = &mut arg.kind {
-                let pat = &mut **pat;
-                let mut tracked_wrapper = false;
-                let mut wrapped_pat_id = None;
-                if let Pat::TupleStruct(tup) = &*pat {
-                    let ghost_wrapper = path_is_ident(&tup.path, "Ghost");
-                    tracked_wrapper = path_is_ident(&tup.path, "Tracked");
-                    if ghost_wrapper || tracked_wrapper || tup.pat.elems.len() == 1 {
-                        if let Pat::Ident(id) = &tup.pat.elems[0] {
-                            wrapped_pat_id = Some(id.clone());
-                        }
-                    }
-                }
-                if let Some(mut wrapped_pat_id) = wrapped_pat_id {
-                    // Change
-                    //   fn f(x: Tracked<T>) {
-                    // to
-                    //   fn f(verus_tmp_x: Tracked<T>) {
-                    //       #[verus::internal(header_unwrap_parameter)] let t;
-                    //       #[verifier::proof_block] { t = verus_tmp_x.get() };
-                    let span = pat.span();
-                    let x = wrapped_pat_id.ident;
-                    let tmp_id = Ident::new(
-                        &format!("verus_tmp_{x}"),
-                        Span::mixed_site().located_at(pat.span()),
-                    );
-                    wrapped_pat_id.ident = tmp_id.clone();
-                    *pat = Pat::Ident(wrapped_pat_id);
-                    if self.erase_ghost.keep() {
-                        unwrap_ghost_tracked.push(stmt_with_semi!(
-                            span => #[verus::internal(header_unwrap_parameter)] let #x));
-                        if tracked_wrapper {
-                            unwrap_ghost_tracked.push(stmt_with_semi!(
-                                span => #[verifier::proof_block] { #x = #tmp_id.get() }));
-                        } else {
-                            unwrap_ghost_tracked.push(stmt_with_semi!(
-                                span => #[verifier::proof_block] { #x = #tmp_id.view() }));
-                        }
-                    }
-                }
-            }
+            unwrap_ghost_tracked.extend(sig_update_track_ghost(&self.erase_ghost, arg, true));
 
             arg.tracked = None;
         }
@@ -2344,16 +2359,8 @@ impl Visitor {
     fn handle_mode_blocks(&mut self, expr: &mut Expr) -> bool {
         let mode_block = match expr {
             Expr::Unary(ExprUnary { op: UnOp::Proof(..), .. }) => (false, false),
-            Expr::Call(ExprCall { func, args, .. }) => match &**func {
-                Expr::Path(path) if path.qself.is_none() && args.len() == 1 => {
-                    if path_is_ident(&path.path, "Ghost") {
-                        (true, false)
-                    } else if path_is_ident(&path.path, "Tracked") {
-                        (true, true)
-                    } else {
-                        return false;
-                    }
-                }
+            Expr::Call(call) => match is_tracked_or_ghost_call(call) {
+                Some(is_tracked) => (true, is_tracked),
                 _ => {
                     return false;
                 }
@@ -2372,27 +2379,14 @@ impl Visitor {
         if let Expr::Call(call) = expr {
             let (_, is_tracked) = mode_block;
             let span = call.span();
-            if is_tracked {
-                // Tracked(...)
-                let inner = take_expr(&mut call.args[0]);
-                *expr = Expr::Verbatim(if self.erase_ghost.erase() {
-                    quote_spanned!(span => Tracked::assume_new_fallback(|| unreachable!()))
-                } else if is_inside_ghost {
-                    quote_spanned_builtin!(builtin, span => #builtin::Tracked::new(#inner))
-                } else {
-                    quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::tracked_exec(#[verifier::tracked_block_wrapped] /* vattr */ #inner))
-                });
-            } else {
-                // Ghost(...)
-                let inner = take_expr(&mut call.args[0]);
-                *expr = Expr::Verbatim(if self.erase_ghost.erase() {
-                    quote_spanned!(span => Ghost::assume_new_fallback(|| unreachable!()))
-                } else if is_inside_ghost {
-                    quote_spanned_builtin!(builtin, span => #builtin::Ghost::new(#inner))
-                } else {
-                    quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::ghost_exec(#[verifier::ghost_block_wrapped] /* vattr */ #inner))
-                });
-            }
+            let inner = take_expr(&mut call.args[0]);
+            *expr = create_tracked_ghost_vars(
+                &self.erase_ghost,
+                is_tracked,
+                is_inside_ghost,
+                span,
+                inner,
+            );
         } else if let Expr::Unary(unary) = expr {
             let span = unary.span();
             match (is_inside_ghost, mode_block, &*unary.expr) {
@@ -3727,6 +3721,61 @@ pub(crate) fn rewrite_expr(
     proc_macro::TokenStream::from(new_stream)
 }
 
+struct Stmts(Vec<Stmt>);
+
+impl Parse for Stmts {
+    fn parse(input: ParseStream) -> syn_verus::Result<Self> {
+        let mut stmts = Vec::new();
+        while !input.is_empty() {
+            stmts.push(input.parse()?);
+        }
+        Ok(Stmts(stmts))
+    }
+}
+
+impl ToTokens for Stmts {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for stmt in &self.0 {
+            stmt.to_tokens(tokens);
+        }
+    }
+}
+
+pub(crate) fn rewrite_stmt(
+    erase_ghost: EraseGhost,
+    inside_ghost: bool,
+    stream: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let stream = rejoin_tokens(stream);
+    let s: Stmts = parse_macro_input!(stream as Stmts);
+    let mut new_stream = TokenStream::new();
+    let mut visitor = Visitor {
+        erase_ghost,
+        use_spec_traits: true,
+        inside_ghost: if inside_ghost { 1 } else { 0 },
+        inside_type: 0,
+        inside_external_code: 0,
+        inside_const: false,
+        inside_arith: InsideArith::None,
+        assign_to: false,
+        rustdoc: env_rustdoc(),
+    };
+    let mut stmts = Vec::new();
+    let Stmts(old_stmts) = s;
+    for mut ss in old_stmts {
+        let (skip, extra_stmts) = visitor.visit_stmt_extend(&mut ss);
+        if !skip {
+            stmts.push(ss);
+        }
+        stmts.extend(extra_stmts);
+    }
+    for ss in &mut stmts {
+        visitor.visit_stmt_mut(ss);
+    }
+    Stmts(stmts).to_tokens(&mut new_stream);
+    proc_macro::TokenStream::from(new_stream)
+}
+
 pub(crate) fn rewrite_expr_node(erase_ghost: EraseGhost, inside_ghost: bool, expr: &mut Expr) {
     let mut visitor = Visitor {
         erase_ghost,
@@ -3740,6 +3789,62 @@ pub(crate) fn rewrite_expr_node(erase_ghost: EraseGhost, inside_ghost: bool, exp
         rustdoc: env_rustdoc(),
     };
     visitor.visit_expr_mut(expr);
+}
+
+pub(crate) fn sig_update_track_ghost(
+    erase_ghost: &EraseGhost,
+    arg: &mut FnArg,
+    is_wrapped: bool,
+) -> Vec<Stmt> {
+    // Check for Ghost(x) or Tracked(x) argument
+    let mut unwrap_ghost_tracked = Vec::new();
+    use syn_verus::PatType;
+    if let FnArgKind::Typed(PatType { pat, .. }) = &mut arg.kind {
+        let pat = &mut **pat;
+        let mut tracked_wrapper = false;
+        let mut wrapped_pat_id = None;
+        if let Pat::TupleStruct(tup) = &*pat {
+            let ghost_wrapper = path_is_ident(&tup.path, "Ghost");
+            tracked_wrapper = path_is_ident(&tup.path, "Tracked");
+            if ghost_wrapper || tracked_wrapper || tup.pat.elems.len() == 1 {
+                if let Pat::Ident(id) = &tup.pat.elems[0] {
+                    wrapped_pat_id = Some(id.clone());
+                }
+            }
+        } else if let Pat::Type(pt) = &*pat {
+            if !is_wrapped {
+                if let Pat::Ident(id) = pt.pat.as_ref() {
+                    wrapped_pat_id = Some(id.clone());
+                }
+            }
+        }
+        if let Some(mut wrapped_pat_id) = wrapped_pat_id {
+            // Change
+            //   fn f(x: Tracked<T>) {
+            // to
+            //   fn f(verus_tmp_x: Tracked<T>) {
+            //       #[verus::internal(header_unwrap_parameter)] let t;
+            //       #[verifier::proof_block] { t = verus_tmp_x.get() };
+            let span = pat.span();
+            let x = wrapped_pat_id.ident;
+            let tmp_id =
+                Ident::new(&format!("verus_tmp_{x}"), Span::mixed_site().located_at(pat.span()));
+            wrapped_pat_id.ident = tmp_id.clone();
+            *pat = Pat::Ident(wrapped_pat_id);
+            if erase_ghost.keep() {
+                unwrap_ghost_tracked.push(stmt_with_semi!(
+                    span => #[verus::internal(header_unwrap_parameter)] let #x));
+                if tracked_wrapper {
+                    unwrap_ghost_tracked.push(stmt_with_semi!(
+                        span => #[verifier::proof_block] { #x = #tmp_id.get() }));
+                } else {
+                    unwrap_ghost_tracked.push(stmt_with_semi!(
+                        span => #[verifier::proof_block] { #x = #tmp_id.view() }));
+                }
+            }
+        }
+    }
+    unwrap_ghost_tracked
 }
 
 pub(crate) fn sig_specs_attr(
@@ -3764,7 +3869,8 @@ pub(crate) fn sig_specs_attr(
         rustdoc: env_rustdoc(),
     };
     let sig_span = sig.span().clone();
-    visitor.take_sig_specs(&mut spec, ret_pat, sig.constness.is_some(), sig_span)
+    let stmts = visitor.take_sig_specs(&mut spec, ret_pat, sig.constness.is_some(), sig_span);
+    stmts
 }
 
 // Unfortunately, the macro_rules tt tokenizer breaks tokens like &&& and ==> into smaller tokens.

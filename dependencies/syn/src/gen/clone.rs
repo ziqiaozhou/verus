@@ -2263,6 +2263,26 @@ impl Clone for Returns {
     }
 }
 #[cfg_attr(doc_cfg, doc(cfg(feature = "clone-impls")))]
+impl Clone for ReturnTracks {
+    fn clone(&self) -> Self {
+        ReturnTracks {
+            token: self.token.clone(),
+            paren: self.paren.clone(),
+            args: self.args.clone(),
+        }
+    }
+}
+#[cfg_attr(doc_cfg, doc(cfg(feature = "clone-impls")))]
+impl Clone for Tracks {
+    fn clone(&self) -> Self {
+        Tracks {
+            token: self.token.clone(),
+            paren: self.paren.clone(),
+            args: self.args.clone(),
+        }
+    }
+}
+#[cfg_attr(doc_cfg, doc(cfg(feature = "clone-impls")))]
 impl Clone for RevealHide {
     fn clone(&self) -> Self {
         RevealHide {
@@ -2330,6 +2350,8 @@ impl Clone for SignatureSpec {
             decreases: self.decreases.clone(),
             invariants: self.invariants.clone(),
             unwind: self.unwind.clone(),
+            tracks: self.tracks.clone(),
+            return_tracks: self.return_tracks.clone(),
         }
     }
 }

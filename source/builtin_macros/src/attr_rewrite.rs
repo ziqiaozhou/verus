@@ -33,7 +33,10 @@
 use core::convert::TryFrom;
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
-use syn::{parse2, spanned::Spanned, Attribute, AttributeArgs, Ident, Item};
+use syn::{
+    parse::Parse, parse::ParseStream, parse2, spanned::Spanned, Attribute, AttributeArgs, Expr,
+    Ident, Item, ReturnType, Stmt,
+};
 
 use crate::{
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
@@ -158,6 +161,168 @@ fn insert_spec_call(any_fn: &mut dyn AnyAttrBlock, call: &str, verus_expr: Token
     );
 }
 
+struct StmtOrExpr(pub Stmt);
+
+impl Parse for StmtOrExpr {
+    fn parse(input: ParseStream) -> syn::parse::Result<StmtOrExpr> {
+        use syn::parse::discouraged::Speculative;
+        let fork = input.fork();
+        if let Ok(stmt) = fork.parse() {
+            input.advance_to(&fork);
+            return Ok(StmtOrExpr(stmt));
+        }
+
+        let expr: Expr = input.parse().expect("Need stmt or expression");
+        return Ok(StmtOrExpr(Stmt::Expr(expr)));
+    }
+}
+
+pub(crate) fn verus_io(
+    erase: &EraseGhost,
+    attr_input: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> Result<proc_macro::TokenStream, syn::Error> {
+    if !erase.keep() {
+        return Ok(input);
+    }
+    let mut s = syn::parse::<StmtOrExpr>(input).expect("failed to parse StmtOrExpr").0;
+    let tracked_in_out = syn_verus::parse::<syn_verus::TrackedIO>(attr_input)
+        .expect("failed to parse syn_verus::TrackedIO");
+    tracks_stmt_in_out(&mut s, tracked_in_out).map(|t| t.into())
+}
+
+fn tracks_stmt_in_out(
+    s: &mut Stmt,
+    tracked_in_out: syn_verus::TrackedIO,
+) -> syn::Result<proc_macro::TokenStream> {
+    let mut pre_stmts = Vec::new();
+    let syn_verus::TrackedIO { input, out } = tracked_in_out;
+    if input.is_none() && out.is_none() {
+        return Ok(quote! {#s}.into());
+    }
+    let span = s.span();
+
+    let tracked_in_out = syn_verus::TrackedIO { input, out: None };
+    let mut x_assigns = Vec::new();
+    let tmp_var = Ident::new("_verus_tmp_var_", span);
+
+    let out_pat: Option<syn::Pat> = match out {
+        Some((_, out_vars)) => {
+            let out_vars = out_vars.into_iter();
+            let mut out_pat: syn_verus::Pat = syn_verus::parse2(quote_spanned!(
+                span => (#tmp_var #(, #out_vars)*)))
+            .expect("invalid Pat");
+            (_, x_assigns) = syntax::rewrite_exe_pat(&mut out_pat);
+            Some(parse2(quote! {#out_pat})?)
+        }
+        _ => None,
+    };
+    match s {
+        Stmt::Local(syn::Local { pat, init, .. }) => {
+            match init {
+                Some((_, expr)) => {
+                    pre_stmts.extend(tracks_expr_in_out(expr, tracked_in_out, None, &tmp_var)?);
+                }
+                _ => {}
+            }
+            match out_pat {
+                Some(p) => {
+                    *pat = p;
+                }
+                _ => {}
+            }
+        }
+        Stmt::Expr(e) => {
+            pre_stmts.extend(tracks_expr_in_out(e, tracked_in_out, out_pat, &tmp_var)?);
+            // s must be in the end.
+            return Ok(quote! {{#(#pre_stmts)* proof!{#(#x_assigns)*} #s}}.into());
+        }
+        Stmt::Semi(e, ..) => {
+            pre_stmts.extend(tracks_expr_in_out(e, tracked_in_out, out_pat, &tmp_var)?);
+        }
+        _ => {
+            unimplemented!("item not supported")
+        }
+    }
+    Ok(quote! {#(#pre_stmts)* #s proof!{#(#x_assigns)*}}.into())
+}
+
+fn tracks_expr_in_out(
+    e: &mut Expr,
+    tracked_in_out: syn_verus::TrackedIO,
+    out_pat: Option<syn::Pat>,
+    tmp_var: &Ident,
+) -> syn::Result<Vec<Stmt>> {
+    let mut pre_stmts = Vec::new();
+    let syn_verus::TrackedIO { input, out } = tracked_in_out;
+    if input.is_none() && out.is_none() {
+        return Ok(pre_stmts);
+    }
+    let erase = EraseGhost::Keep;
+    let extra_inputs: Vec<Expr> = match &input {
+        Some(i) => i
+            .into_iter()
+            .map(|c| {
+                let e = syntax::create_tracked_ghost_vars(
+                    &erase,
+                    syntax::is_tracked_or_ghost_call(&c).expect("Tracked or Ghost"),
+                    false,
+                    c.span(),
+                    c.args[0].clone(),
+                );
+                Expr::Verbatim(quote! {#e})
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    match e {
+        Expr::MethodCall(call) => {
+            call.args.extend(extra_inputs);
+            //insert_arguments_to_call(&mut call.args, inputs, true)?;
+            match out_pat {
+                Some(pat) => {
+                    pre_stmts.push(parse2(quote_spanned! {call.span() => let #pat = #call;})?);
+                    *e = Expr::Verbatim(quote_spanned! {
+                        call.span() => #tmp_var
+                    });
+                }
+                _ => {}
+            }
+        }
+        Expr::Call(call) => {
+            call.args.extend(extra_inputs);
+            match out_pat {
+                Some(pat) => {
+                    pre_stmts.push(parse2(quote_spanned! {call.span() => let #pat = #call;})?);
+                    *e = Expr::Verbatim(quote_spanned! {
+                        call.span() => #tmp_var
+                    });
+                }
+                _ => {}
+            }
+        }
+        Expr::Assign(syn::ExprAssign { left, right, .. }) => {
+            pre_stmts.extend(tracks_expr_in_out(
+                right,
+                syn_verus::TrackedIO { input, out: None },
+                None,
+                tmp_var,
+            )?);
+            match out_pat {
+                Some(pat) => {
+                    pre_stmts.push(parse2(quote_spanned! {right.span() =>  let #pat = #right;})?);
+                    *e = Expr::Verbatim(quote_spanned!(left.span() =>
+                        #left = #tmp_var
+                    ));
+                }
+                _ => {}
+            }
+        }
+        _ => return Err(syn::Error::new(e.span(), "expected ExprMethodCall or ExprCall")),
+    }
+    Ok(pre_stmts)
+}
+
 pub fn rewrite_verus_attribute(
     erase: &EraseGhost,
     attr_args: AttributeArgs,
@@ -192,6 +357,68 @@ pub fn rewrite_verus_attribute(
     }
 }
 
+pub fn rewrite_sig_verus_spec(
+    spec_attr: syn_verus::SignatureSpecAttr,
+    sig: &mut syn::Signature,
+) -> Vec<Stmt> {
+    let erase = EraseGhost::Keep;
+    // Note: trait default methods appear in this case,
+    // since they look syntactically like non-trait functions
+    let ret = if let Some(r) = &spec_attr.spec.return_tracks {
+        r.args
+            .iter()
+            .map(|arg| {
+                if let syn_verus::FnArgKind::Typed(p) = &arg.kind {
+                    p.ty.clone()
+                } else {
+                    panic!("Must be PatType")
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if ret.len() > 0 {
+        match &mut sig.output {
+            ReturnType::Default => {
+                if ret.len() > 0 {
+                    let ty = parse2(quote_spanned!(
+                        sig.output.span() => (() #(,#ret)*)
+                    ))
+                    .expect("failed parse new output type");
+                    sig.output = ReturnType::Type(syn::token::RArrow::default(), ty);
+                }
+            }
+            ReturnType::Type(_, ty) => {
+                if ret.len() > 0 {
+                    *ty = parse2(quote_spanned!(
+                        ty.span() => (#ty #(,#ret)*)
+                    ))
+                    .expect("failed parse new output type");
+                }
+            }
+        }
+    }
+    let mut spec_attr = spec_attr;
+    let tracks = spec_attr.spec.tracks;
+    spec_attr.spec.tracks = None;
+    let mut spec_stmts: Vec<syn_verus::Stmt> = Vec::new();
+    if let Some(syn_verus::Tracks { mut args, .. }) = tracks {
+        for arg in args.iter_mut() {
+            spec_stmts.extend(syntax::sig_update_track_ghost(&erase, arg, false));
+        }
+        sig.inputs.extend(
+            args.into_iter()
+                .map(|a| a.kind)
+                .map(|k| parse2::<syn::FnArg>(quote! { #k }).expect("takes more args")),
+        );
+    }
+    spec_stmts.extend(syntax::sig_specs_attr(erase, spec_attr, sig));
+    spec_stmts
+        .into_iter()
+        .map(|s| parse2(quote! { #s }).expect(format!("spec to new stmts {:?}", s).as_str()))
+        .collect()
+}
 pub fn rewrite_verus_spec(
     erase: EraseGhost,
     outer_attr_tokens: proc_macro::TokenStream,
@@ -211,20 +438,17 @@ pub fn rewrite_verus_spec(
     };
     let spec_attr =
         syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
+
     match f {
         AnyFnOrLoop::Fn(mut fun) => {
-            // Note: trait default methods appear in this case,
-            // since they look syntactically like non-trait functions
-            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &fun.sig);
-            let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
-            let _ = fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
+            let new_stmts = rewrite_sig_verus_spec(spec_attr, &mut fun.sig);
+            fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
             fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
             proc_macro::TokenStream::from(fun.to_token_stream())
         }
         AnyFnOrLoop::TraitMethod(mut method) => {
             // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
-            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &method.sig);
-            let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
+            let new_stmts = rewrite_sig_verus_spec(spec_attr, &mut method.sig);
             let mut spec_fun_opt = syntax::split_trait_method_syn(&method, erase.erase());
             let spec_fun = spec_fun_opt.as_mut().unwrap_or(&mut method);
             let _ = spec_fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
@@ -285,5 +509,48 @@ pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::Token
         .into()
     } else {
         proc_macro::TokenStream::new()
+    }
+}
+
+pub fn verus_out_rewrite(
+    erase: EraseGhost,
+    input: TokenStream,
+) -> syn::Result<proc_macro::TokenStream> {
+    let tracked_expr = syn_verus::parse2::<syn_verus::VerusOut>(input)
+        .expect("Tracked(..) or Ghost(...) => expr ");
+    let syn_verus::VerusOut { tracked, expr } = tracked_expr;
+    if !erase.keep() {
+        return match expr {
+            Some((e, _t)) => Ok(quote_spanned!(e.span() => #e).into()),
+            _ => Ok(quote!().into()),
+        };
+    }
+    let tracked_vars = tracked.into_iter().map(|e| {
+        if let syn_verus::Expr::Call(ref call) = e {
+            match syntax::is_tracked_or_ghost_call(&call) {
+                Some(is_tracked) => syntax::create_tracked_ghost_vars(
+                    &erase,
+                    is_tracked,
+                    false,
+                    call.span(),
+                    call.args[0].clone(),
+                ),
+                _ => e,
+            }
+        } else {
+            e
+        }
+    });
+    if expr.is_some() {
+        let (e, _t) = expr.unwrap();
+        Ok(quote! {
+            (#e #(, #tracked_vars)*)
+        }
+        .into())
+    } else {
+        Ok(quote! {
+            (() #(, #tracked_vars)*)
+        }
+        .into())
     }
 }

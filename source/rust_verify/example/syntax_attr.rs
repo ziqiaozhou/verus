@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-
+#![feature(proc_macro_hygiene)]
 use builtin::*;
 use builtin_macros::*;
 use vstd::{modes::*, prelude::*, seq::*, *};
@@ -20,8 +20,7 @@ fn main() {}
     ensures
         sum < 200,
 )]
-fn my_exec_fun(x: u32, y: u32) -> u32
-{
+fn my_exec_fun(x: u32, y: u32) -> u32 {
     x + y
 }
 
@@ -56,8 +55,7 @@ spec fn my_spec_fun(x: int, y: int) -> int
         x < 100,
         y < 100,
 )]
-fn test_my_funs(x: u32, y: u32)
-{
+fn test_my_funs(x: u32, y: u32) {
     // my_proof_fun(x, y); // not allowed in exec code
     // let u = my_spec_fun(x, y); // not allowed exec code
     proof! {
@@ -107,8 +105,7 @@ pub(crate) closed spec fn my_pub_spec_fun5(x: int, y: int) -> int {
         y < 100 - x,
     decreases x,
 )]
-fn test_rec(x: u64, y: u64)
-{
+fn test_rec(x: u64, y: u64) {
     if x > 1 {
         test_rec(x - 1, y + 1);
     }
@@ -183,11 +180,10 @@ proof fn dec0_decreases(a: int) {
         b < 100,
 )]
 fn test_my_funs2(
-    a: u32,  // exec variable
-    b: u32,  // exec variable
-)
-{
-    let s = a + b;  // s is an exec variable
+    a: u32, // exec variable
+    b: u32, // exec variable
+) {
+    let s = a + b; // s is an exec variable
     proof! {
         let u = a + b;  // u is a ghost variable
         my_proof_fun(u / 2, b as int);  // my_proof_fun(x, y) takes ghost parameters x and y
@@ -251,7 +247,7 @@ fn test_ghost(x: u32, y: u32)
 fn test_ghost_unwrap(
     x: u32,
     Ghost(y): Ghost<u32>,
-)  // unwrap so that y has typ u32, not Ghost<u32>
+) -> Ghost<u32> // unwrap so that y has typ u32, not Ghost<u32>
     requires
         x < 100,
         y < 100,
@@ -271,9 +267,82 @@ fn test_ghost_unwrap(
         },
     );
     assert(w == x + y + 4);
+    Ghost(y)
 }
 
 } // verus!
+
+#[verus_spec(ret =>
+    takes
+        (Ghost(y): Ghost<u32>) -> (z: Ghost<u32>)
+    requires
+        x < 100,
+        y < 100,
+)]
+fn test_ghost_unwrap2(x: u32) {
+    // Ghost(u) pattern unwraps Ghost<...> values and gives u and v type int:
+    verus_stmts! {
+        let Ghost(u): Ghost<int> = Ghost(my_spec_fun(x as int, y as int));
+        let Ghost(mut v): Ghost<int> = Ghost(u + 1);
+        assert(v == x + y + 1);
+        proof {
+            v = v + 1;  // assign directly to ghost mut v
+        }
+        let Ghost(w): Ghost<int> = Ghost(
+            {
+                // proof block that returns a ghost value
+                let temp = v + 1;
+                temp + 1
+            },
+        );
+        assert(w == x + y + 4);
+    }
+    verus_out!{
+        Ghost(y)
+    }
+}
+
+#[verus_verify]
+fn test_call_ghost_unwrap() {
+    verus_stmts! {
+        let tracked y: u32 = 0u32;
+        let ghost mut z: u32 = 0u32;
+        let ghost mut w: u32 = 0u32;
+    }
+    #[verus_io(Ghost(z) => Ghost(w))]
+    test_ghost_unwrap2(10)
+}
+
+#[verus_spec(ret =>
+    takes
+        (Tracked(y): Tracked<&mut u32>) -> (z: Ghost<u32>)
+    requires
+        x < 100,
+        *old(y) < 100,
+    ensures
+        *y == x,
+        ret.1 == x,
+)]
+fn test_mut_tracked(x: u32) {
+    proof!{
+        *y = x;
+    }
+    verus_out!(Ghost(x))
+}
+
+#[verus_verify]
+fn test_call_with_tracked2() {
+    verus_stmts! {
+        let tracked y: u32 = 0u32;
+        let ghost mut z: u32 = 0u32;
+        let ghost mut w: u32 = 0u32;
+    }
+    #[verus_io(Tracked(&mut y) => Ghost(w))]
+    test_mut_tracked(10);
+    proof!{
+        assert(y == 10);
+    }
+}
 
 /// Trait functions may have specifications
 trait T {

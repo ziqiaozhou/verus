@@ -584,4 +584,24 @@ proof fn uses_spec_has(s: Set<int>, ms: vstd::multiset::Multiset<int>)
     assert(ms has 4 == ms has 4);
 }
 
+#[verifier::opaque]
+        spec fn f() -> int { 1 }
+        proof fn e() -> (u: u64)
+            ensures
+                u == f(),
+                u == 1
+        {
+            reveal(f);
+            1
+        }
+        exec const E: u64 ensures E == f() {
+            proof {
+                let x = e();
+                assert(x == f());
+                assert(x == 1);
+            }
+            assert(1 == f());
+            1
+    }
 } // verus!
+
