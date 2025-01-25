@@ -72,6 +72,31 @@ pub(crate) fn pat_to_var<'tcx>(pat: &Pat) -> Result<VarIdent, VirErr> {
     Ok(name)
 }
 
+pub(crate) fn pat_extract_binds<'tcx>(pat: &Pat<'tcx>) -> Result<Vec<Pat<'tcx>>, VirErr> {
+    let Pat { hir_id: _, kind, span, default_binding_modes } = pat;
+    unsupported_err_unless!(default_binding_modes, *span, "default_binding_modes");
+    match *kind {
+        PatKind::Binding(..) => Ok(vec![pat.clone()]),
+        PatKind::Struct(_, fields, _) => {
+            let mut vars = Vec::new();
+            for f in fields {
+                vars.extend(pat_extract_binds(&f.pat)?);
+            }
+            Ok(vars)
+        }
+        PatKind::TupleStruct(_, pats, ..) => {
+            let mut vars = Vec::new();
+            for p in pats {
+                vars.extend(pat_extract_binds(p)?);
+            }
+            Ok(vars)
+        }
+        _ => {
+            unsupported_err!(*span, "limited support for pat_extract_binds")
+        }
+    }
+}
+
 pub(crate) fn extract_array<'tcx>(expr: &'tcx Expr<'tcx>) -> Vec<&'tcx Expr<'tcx>> {
     match &expr.kind {
         ExprKind::Array(fields) => fields.iter().collect(),
@@ -2024,36 +2049,13 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
             let cond = cond.peel_drop_temps();
             match cond.kind {
                 ExprKind::Let(LetExpr { pat, init: expr, ty: _, span: _, recovered: _ }) => {
-                    // if let
-                    let vir_expr = expr_to_vir(bctx, expr, modifier)?;
-                    let mut vir_arms: Vec<vir::ast::Arm> = Vec::new();
-                    /* lhs */
-                    {
-                        let pattern = pattern_to_vir(bctx, pat)?;
-                        let guard = mk_expr(ExprX::Const(Constant::Bool(true)))?;
-                        let body = expr_to_vir(bctx, &lhs, modifier)?;
-                        let vir_arm = ArmX { pattern, guard, body };
-                        vir_arms.push(bctx.spanned_new(lhs.span, vir_arm));
-                    }
-                    /* rhs */
-                    {
-                        let pat_typ = typ_of_node(bctx, pat.span, &pat.hir_id, false)?;
-                        let pattern =
-                            bctx.spanned_typed_new(cond.span, &pat_typ, PatternX::Wildcard(false));
-                        {
-                            let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
-                            erasure_info.hir_vir_ids.push((cond.hir_id, pattern.span.id));
-                        }
-                        let guard = mk_expr(ExprX::Const(Constant::Bool(true)))?;
-                        let body = if let Some(rhs) = rhs {
-                            expr_to_vir(bctx, &rhs, modifier)?
-                        } else {
-                            mk_expr(ExprX::Block(Arc::new(Vec::new()), None))?
-                        };
-                        let vir_arm = ArmX { pattern, guard, body };
-                        vir_arms.push(bctx.spanned_new(lhs.span, vir_arm));
-                    }
-                    mk_expr(ExprX::Match(vir_expr, Arc::new(vir_arms)))
+                    let lhs = expr_to_vir(bctx, &lhs, modifier)?;
+                    let rhs = if let Some(rhs) = rhs {
+                        expr_to_vir(bctx, &rhs, modifier)?
+                    } else {
+                        mk_expr(ExprX::Block(Arc::new(Vec::new()), None))?
+                    };
+                    let_else_expr_vir(bctx, pat, expr, mk_expr, lhs, rhs, modifier)
                 }
                 _ => {
                     let vir_cond = expr_to_vir(bctx, cond, modifier)?;
@@ -2485,16 +2487,103 @@ fn expr_assign_to_vir_innermost<'tcx>(
     })
 }
 
+fn let_else_expr_vir<'tcx>(
+    bctx: &BodyCtxt<'tcx>,
+    pat: &rustc_hir::Pat<'tcx>,
+    expr: &Expr<'tcx>,
+    mk_expr: impl Fn(ExprX) -> Result<vir::ast::Expr, vir::messages::Message>,
+    lhs: vir::ast::Expr,
+    rhs: vir::ast::Expr,
+    modifier: ExprModifier,
+) -> Result<vir::ast::Expr, VirErr> {
+    // if let
+    let vir_expr = expr_to_vir(bctx, expr, modifier)?;
+    let mut vir_arms: Vec<vir::ast::Arm> = Vec::new();
+    /* lhs */
+    {
+        let pattern = pattern_to_vir(bctx, pat)?;
+        let guard = mk_expr(ExprX::Const(Constant::Bool(true)))?;
+        let vir_arm = ArmX { pattern, guard, body: lhs };
+        vir_arms.push(bctx.spanned_new(expr.span, vir_arm));
+    }
+    /* rhs */
+    {
+        let pat_typ = typ_of_node(bctx, pat.span, &pat.hir_id, false)?;
+        let pattern = bctx.spanned_typed_new(pat.span, &pat_typ, PatternX::Wildcard(false));
+        let guard = mk_expr(ExprX::Const(Constant::Bool(true)))?;
+        let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+        erasure_info.hir_vir_ids.push((pat.hir_id, pattern.span.id));
+        let vir_arm = ArmX { pattern, guard, body: rhs };
+        vir_arms.push(bctx.spanned_new(expr.span, vir_arm));
+    }
+    let ret = mk_expr(ExprX::Match(vir_expr, Arc::new(vir_arms)));
+    let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+    erasure_info.hir_vir_ids.push((expr.hir_id, ret.clone().unwrap().span.id));
+    ret
+}
+
+fn let_stmt_with_else_to_vir<'tcx>(
+    bctx: &BodyCtxt<'tcx>,
+    pattern: &rustc_hir::Pat<'tcx>,
+    expr: &Expr<'tcx>,
+    els: &Block<'tcx>,
+) -> Result<(vir::ast::Pattern, vir::ast::Expr), VirErr> {
+    let binds = pat_extract_binds(pattern)?;
+    let mut vars = Vec::new();
+    for p in &binds {
+        let typ = typ_of_node(bctx, p.span, &p.hir_id, false).expect("pat type");
+        let var = bctx.spanned_typed_new(p.span, &typ, ExprX::Var(pat_to_var(&p).unwrap()));
+        let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+        erasure_info.hir_vir_ids.push((p.hir_id, var.span.id));
+        vars.push(var);
+    }
+    let n = binds.len();
+    let mut binders = Vec::new();
+    let mut typs = Vec::new();
+
+    for (i, p) in binds.iter().enumerate() {
+        let pat = pattern_to_vir(bctx, p)?;
+        binders.push(ident_binder(&positional_field_ident(i), &pat));
+        typs.push(typ_of_node(bctx, p.span, &p.hir_id, false)?);
+    }
+
+    let typ = mk_tuple_typ(&Arc::new(typs));
+    let variant_name = vir::def::prefix_tuple_variant(n);
+    let px = PatternX::Constructor(Dt::Tuple(n), variant_name, Arc::new(binders));
+    let pat = bctx.spanned_typed_new(expr.span, &typ, px);
+
+    let lhs = vir::ast_util::mk_tuple(&pattern_to_vir(bctx, pattern)?.span, &Arc::new(vars));
+    let els_typ = typ_of_node(bctx, els.span, &els.hir_id, false)?;
+    let rhs = block_to_vir(bctx, els, &els.span, &els_typ, ExprModifier::REGULAR)?;
+    let mk_expr = move |x: ExprX| Ok(bctx.spanned_typed_new(expr.span, &typ, x));
+    let init = let_else_expr_vir(bctx, pattern, expr, mk_expr, lhs, rhs, ExprModifier::REGULAR)?;
+
+    let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+    erasure_info.hir_vir_ids.push((pattern.hir_id, pat.span.id));
+
+    Ok((pat, init))
+}
 pub(crate) fn let_stmt_to_vir<'tcx>(
     bctx: &BodyCtxt<'tcx>,
     pattern: &rustc_hir::Pat<'tcx>,
     initializer: &Option<&Expr<'tcx>>,
+    els: &Option<&Block<'tcx>>,
     attrs: &[Attribute],
 ) -> Result<Vec<vir::ast::Stmt>, VirErr> {
     let mode = get_var_mode(bctx.mode, attrs);
     let infer_mode = parse_attrs_opt(attrs, None).contains(&Attr::InferMode);
-    let init = initializer.map(|e| expr_to_vir(bctx, e, ExprModifier::REGULAR)).transpose()?;
-
+    let mut new_vir_pat = None;
+    let init = if let Some(expr) = initializer {
+        if let Some(els) = els {
+            let (pat, init) = let_stmt_with_else_to_vir(bctx, pattern, expr, els)?;
+            new_vir_pat = Some(pat);
+            Some(init)
+        } else {
+            Some(expr_to_vir(bctx, expr, ExprModifier::REGULAR)?)
+        }
+    } else {
+        None
+    };
     if parse_attrs_opt(attrs, Some(&mut *bctx.ctxt.diagnostics.borrow_mut()))
         .contains(&Attr::UnwrappedBinding)
     {
@@ -2521,7 +2610,7 @@ pub(crate) fn let_stmt_to_vir<'tcx>(
         }
     }
 
-    let vir_pattern = pattern_to_vir(bctx, pattern)?;
+    let vir_pattern = if let Some(p) = new_vir_pat { p } else { pattern_to_vir(bctx, pattern)? };
     let mode = if infer_mode { None } else { Some(mode) };
     Ok(vec![bctx.spanned_new(pattern.span, StmtX::Decl { pattern: vir_pattern, mode, init })])
 }
@@ -2659,11 +2748,8 @@ pub(crate) fn stmt_to_vir<'tcx>(
                 unsupported_err!(stmt.span, "internal item statements", stmt)
             }
         }
-        StmtKind::Let(LetStmt { pat, ty: _, init, els: None, hir_id: _, span: _, source: _ }) => {
-            let_stmt_to_vir(bctx, pat, init, bctx.ctxt.tcx.hir().attrs(stmt.hir_id))
-        }
-        StmtKind::Let(LetStmt { els: Some(_), .. }) => {
-            unsupported_err!(stmt.span, "let-else", stmt)
+        StmtKind::Let(LetStmt { pat, ty: _, init, els, hir_id: _, span: _, source: _ }) => {
+            let_stmt_to_vir(bctx, pat, init, els, bctx.ctxt.tcx.hir().attrs(stmt.hir_id))
         }
     }
 }

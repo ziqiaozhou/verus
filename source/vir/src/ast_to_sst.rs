@@ -943,6 +943,14 @@ fn if_to_stm(
     }
 }
 
+fn expr_ret_never(expr: &Expr) -> bool {
+    if let TypX::Decorate(crate::ast::TypDecoration::Never, ..) = expr.typ.as_ref() {
+        true
+    } else {
+        false
+    }
+}
+
 /// Convert a VIR Expr to a SST (Vec<Stm>, ReturnValue), i.e., instructions of the form,
 /// "run these statements, then return this side-effect-free expression".
 ///
@@ -950,8 +958,16 @@ fn if_to_stm(
 ///  * Some(e) - means the expression e was returned
 ///  * Unit - for the implicit unit case
 ///  * Never - the expression can never return (e.g., after a return value or break)
-
 pub(crate) fn expr_to_stm_opt(
+    ctx: &Ctx,
+    state: &mut State,
+    expr: &Expr,
+) -> Result<(Vec<Stm>, ReturnValue), VirErr> {
+    let (stms, ret) = expr_to_stm_opt_inner(ctx, state, expr)?;
+    if expr_ret_never(expr) { Ok((stms, ReturnValue::Never)) } else { Ok((stms, ret)) }
+}
+
+fn expr_to_stm_opt_inner(
     ctx: &Ctx,
     state: &mut State,
     expr: &Expr,
