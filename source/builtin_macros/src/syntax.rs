@@ -4030,6 +4030,30 @@ pub(crate) fn rewrite_items(
     proc_macro::TokenStream::from(new_stream)
 }
 
+pub(crate) fn rewrite_expr(
+    erase_ghost: EraseGhost,
+    inside_ghost: bool,
+    stream: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let stream = rejoin_tokens(stream);
+    let mut expr: Expr = parse_macro_input!(stream as Expr);
+    let mut new_stream = TokenStream::new();
+    let mut visitor = Visitor {
+        erase_ghost,
+        use_spec_traits: true,
+        inside_ghost: if inside_ghost { 1 } else { 0 },
+        inside_type: 0,
+        inside_external_code: 0,
+        inside_const: false,
+        inside_arith: InsideArith::None,
+        assign_to: false,
+        rustdoc: env_rustdoc(),
+    };
+    visitor.visit_expr_mut(&mut expr);
+    expr.to_tokens(&mut new_stream);
+    proc_macro::TokenStream::from(new_stream)
+}
+
 struct Stmts(Vec<Stmt>);
 
 impl Parse for Stmts {
@@ -4052,7 +4076,7 @@ impl ToTokens for Stmts {
 
 pub(crate) fn rewrite_stmt(
     erase_ghost: EraseGhost,
-    inside_ghost: bool,
+    inside_const: bool,
     stream: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let stream = rejoin_tokens(stream);
@@ -4061,10 +4085,10 @@ pub(crate) fn rewrite_stmt(
     let mut visitor = Visitor {
         erase_ghost,
         use_spec_traits: true,
-        inside_ghost: if inside_ghost { 1 } else { 0 },
+        inside_ghost: 0,
         inside_type: 0,
         inside_external_code: 0,
-        inside_const: true,
+        inside_const: inside_const,
         inside_arith: InsideArith::None,
         assign_to: false,
         rustdoc: env_rustdoc(),
@@ -4082,30 +4106,6 @@ pub(crate) fn rewrite_stmt(
         visitor.visit_stmt_mut(ss);
     }
     Stmts(stmts).to_tokens(&mut new_stream);
-    proc_macro::TokenStream::from(new_stream)
-}
-
-pub(crate) fn rewrite_expr(
-    erase_ghost: EraseGhost,
-    inside_ghost: bool,
-    stream: proc_macro::TokenStream,
-) -> proc_macro::TokenStream {
-    let stream = rejoin_tokens(stream);
-    let mut expr: Expr = parse_macro_input!(stream as Expr);
-    let mut new_stream = TokenStream::new();
-    let mut visitor = Visitor {
-        erase_ghost,
-        use_spec_traits: true,
-        inside_ghost: if inside_ghost { 1 } else { 0 },
-        inside_type: 0,
-        inside_external_code: 0,
-        inside_const: false,
-        inside_arith: InsideArith::None,
-        assign_to: false,
-        rustdoc: env_rustdoc(),
-    };
-    visitor.visit_expr_mut(&mut expr);
-    expr.to_tokens(&mut new_stream);
     proc_macro::TokenStream::from(new_stream)
 }
 

@@ -294,4 +294,29 @@ pub fn verus_io(
     //println!("{}", ret);
     ret
 }
+
+#[proc_macro]
+pub fn verus_extra_stmts(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let erase = cfg_erase();
+    if erase.keep() {
+        syntax::rewrite_stmt(cfg_erase(), false, input.into())
+    } else {
+        proc_macro::TokenStream::new()
+    }
+}
+
+#[proc_macro]
+pub fn verus_extra_expr(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let erase = cfg_erase();
+    if erase.keep() {
+        syntax::rewrite_expr(cfg_erase(), false, input.into())
+    } else {
+        proc_macro::TokenStream::new()
+    }
+}
+
+#[proc_macro]
+pub fn verus_exec_stmts(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    syntax::rewrite_stmt(cfg_erase(), false, input.into())
+}
 /*** End of verus small macro definition for executable items ***/
