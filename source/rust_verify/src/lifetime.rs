@@ -212,6 +212,8 @@ const PROOF_FN_SEND: u8 = 5;
 const PROOF_FN_SYNC: u8 = 6;
 
 const PRELUDE: &str = "\
+#![feature(f128)]
+#![feature(f16)]
 #![feature(negative_impls)]
 #![feature(with_negative_coherence)]
 #![feature(box_patterns)]
