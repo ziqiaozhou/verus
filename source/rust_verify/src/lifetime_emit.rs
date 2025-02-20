@@ -761,8 +761,15 @@ fn emit_generic_param(param: &GenericParam) -> String {
 fn emit_generic_params(state: &mut EmitState, generics: &Vec<GenericParam>) {
     if generics.len() > 0 {
         state.write("<");
+        let mut params = vec![];
         for gparam in generics.iter() {
-            state.write(emit_generic_param(gparam));
+            let buf = emit_generic_param(gparam);
+            // Avoid rewrite the same generic param.
+            if params.contains(&buf) {
+                continue;
+            }
+            state.write(buf.clone());
+            params.push(buf);
             state.write(", ");
         }
         state.write(">");
@@ -862,6 +869,7 @@ fn emit_generic_bounds(
     state: &mut EmitState,
     params: &Vec<GenericParam>,
     bounds: &Vec<GenericBound>,
+    check_unsized: bool,
 ) {
     use std::collections::HashSet;
     let mut printed_where = false;
@@ -882,11 +890,16 @@ fn emit_generic_bounds(
             }
         }
     }
-    for param in params {
-        print_where(state, &mut printed_where);
-        if param.const_typ.is_none() && param.name.is_typ_param() && !sized.contains(&param.name) {
-            state.write(param.name.to_string());
-            state.write(" : ?Sized, ");
+    if check_unsized {
+        for param in params {
+            print_where(state, &mut printed_where);
+            if param.const_typ.is_none()
+                && param.name.is_typ_param()
+                && !sized.contains(&param.name)
+            {
+                state.write(param.name.to_string());
+                state.write(" : ?Sized, ");
+            }
         }
     }
 }
@@ -925,7 +938,7 @@ pub(crate) fn emit_fun_decl(state: &mut EmitState, f: &FunDecl) {
         }
     }
     state.end_span(f.sig_span);
-    emit_generic_bounds(state, &f.generic_params, &f.generic_bounds);
+    emit_generic_bounds(state, &f.generic_params, &f.generic_bounds, f.check_unsized);
     match &*f.body {
         (_, ExpX::Block(..)) => {
             emit_exp(state, &f.body);
@@ -966,13 +979,48 @@ fn emit_fields(state: &mut EmitState, fields: &Fields, suffix: &str) {
     }
 }
 
+fn emit_copy_clone(
+    state: &mut EmitState,
+    d: &DatatypeDecl,
+    copy_bounds: &Vec<bool>,
+    bound: &Bound,
+    bound_name: &str,
+    body: &str,
+) {
+    // impl<A: Clone, B> Clone for S<A, B> { fn clone(&self) -> Self { panic!() } }
+    // impl<A: Copy, B> Copy for S<A, B> {}
+    assert!(d.generic_params.len() == copy_bounds.len());
+    state.newdecl();
+    state.newline();
+    state.write("impl");
+    let mut copy_generics: Vec<GenericParam> = Vec::new();
+    let mut generic_args: Vec<GenericParam> = Vec::new();
+    let mut generic_bounds: Vec<GenericBound> = Vec::new();
+    for (gparam, copy_bound) in d.generic_params.iter().zip(copy_bounds.iter()) {
+        if *copy_bound {
+            let typ = Box::new(TypX::TypParam(gparam.name.clone()));
+            let generic_bound = GenericBound { typ, bound_vars: vec![], bound: bound.clone() };
+            generic_bounds.push(generic_bound);
+        }
+        copy_generics.push(gparam.clone());
+        generic_args.push(GenericParam { name: gparam.name.clone(), const_typ: None });
+    }
+    emit_generic_params(state, &copy_generics);
+    state.write(format!(" {bound_name} for "));
+    state.write(d.name.to_string());
+    emit_generic_params(state, &generic_args);
+    emit_generic_bounds(state, &vec![], &generic_bounds, true);
+    state.write(" ");
+    state.write(body);
+}
+
 pub(crate) fn emit_trait_decl(state: &mut EmitState, t: &TraitDecl) {
     state.newdecl();
     state.newline();
     state.write("trait ");
     state.write(&t.name.to_string());
     emit_generic_params(state, &t.generic_params);
-    emit_generic_bounds(state, &t.generic_params, &t.generic_bounds);
+    emit_generic_bounds(state, &t.generic_params, &t.generic_bounds, true);
     state.write(" {");
     state.push_indent();
     for (a, params, bounds) in &t.assoc_typs {
@@ -991,7 +1039,7 @@ pub(crate) fn emit_trait_decl(state: &mut EmitState, t: &TraitDecl) {
                 .chain(unsize.into_iter())
                 .collect();
             state.write(bounds_strs.join("+"));
-            emit_generic_bounds(state, &vec![], &wheres);
+            emit_generic_bounds(state, &vec![], &wheres, true);
         }
         state.write(";");
     }
@@ -1014,7 +1062,7 @@ pub(crate) fn emit_datatype_decl(state: &mut EmitState, d: &DatatypeDecl) {
     let suffix_where = match &*d.datatype {
         Datatype::Struct(Fields::Pos(..)) => true,
         _ => {
-            emit_generic_bounds(state, &d.generic_params, &d.generic_bounds);
+            emit_generic_bounds(state, &d.generic_params, &d.generic_bounds, true);
             false
         }
     };
@@ -1023,7 +1071,7 @@ pub(crate) fn emit_datatype_decl(state: &mut EmitState, d: &DatatypeDecl) {
             let suffix = if suffix_where { "" } else { ";" };
             emit_fields(state, fields, suffix);
             if suffix_where {
-                emit_generic_bounds(state, &d.generic_params, &d.generic_bounds);
+                emit_generic_bounds(state, &d.generic_params, &d.generic_bounds, true);
                 state.write(";");
             }
         }
@@ -1066,7 +1114,7 @@ pub(crate) fn emit_trait_impl(state: &mut EmitState, t: &TraitImpl) {
     state.write(&trait_as_datatype.to_string());
     state.write(" for ");
     state.write(&self_typ.to_string());
-    emit_generic_bounds(state, &generic_params, &generic_bounds);
+    emit_generic_bounds(state, &generic_params, &generic_bounds, true);
     state.write(" {");
     state.push_indent();
     for (name, params, typ) in assoc_typs {
