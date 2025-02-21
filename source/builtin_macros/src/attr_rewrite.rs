@@ -87,7 +87,7 @@ pub fn rewrite_verus_attribute(
         return input;
     }
 
-    let item = syn::parse_macro_input!(input as Item);
+    let mut item = syn::parse_macro_input!(input as Item);
     let args = syn::parse_macro_input!(attr_args with syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated);
 
     let mut attributes = Vec::new();
@@ -138,6 +138,7 @@ pub fn rewrite_verus_attribute(
         _ => {}
     }
 
+    rewrite_derive(&mut item);
     quote_spanned! {item.span()=>
         #(#attributes)*
         #item
@@ -556,4 +557,53 @@ fn rewrite_unverified_func(
     let x = &fun.sig.ident;
     fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
     unverified_fun
+}
+
+fn visit_derive_attribute_mut(attr: &mut syn::Attribute) {
+    let mut is_derive = false;
+    if let Some(ident) = attr.path().get_ident() {
+        if ident.to_string().as_str() == "derive" {
+            is_derive = true;
+        }
+    }
+    if !is_derive {
+        return;
+    }
+    let Ok(parsed) = attr.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    ) else {
+        return;
+    };
+    let mut spec_derives = vec![];
+    for m in parsed {
+        let spec_trait = match m.path().get_ident().unwrap().to_string().as_str() {
+            "PartialEq" => Some(quote_spanned! {m.span() => SpecPartialEqOp }),
+            "PartialOrd" => Some(quote_spanned! {m.span() => SpecPartialOrdOp }),
+            _ => None,
+        };
+        if let Some(spec_trait) = spec_trait {
+            spec_derives.push(spec_trait);
+        }
+    }
+    if spec_derives.len() == 0 {
+        return;
+    }
+    match &mut attr.meta {
+        syn::Meta::List(mlist) => {
+            let tokens = &mlist.tokens;
+            mlist.tokens = quote! {#(#spec_derives,)* #tokens}
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_derive(item: &mut Item) {
+    match item {
+        Item::Struct(s) => {
+            for attr in &mut s.attrs {
+                visit_derive_attribute_mut(attr);
+            }
+        }
+        _ => {}
+    }
 }
