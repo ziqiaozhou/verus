@@ -554,13 +554,13 @@ mod verus;
 pub use crate::verus::{
     Assert, AssertForall, Assume, AssumeSpecification, BigAnd, BigAndExpr, BigOr, BigOrExpr,
     BroadcastUse, Closed, DataMode, Decreases, Ensures, ExprGetField, ExprHas, ExprIs, ExprMatches,
-    FnMode, Global, GlobalInner, GlobalLayout, GlobalSizeOf, Invariant, InvariantEnsures,
-    InvariantExceptBreak, InvariantNameSet, InvariantNameSetAny, InvariantNameSetList,
-    InvariantNameSetNone, ItemBroadcastGroup, LoopSpec, MatchesOpExpr, MatchesOpToken, Mode,
-    ModeExec, ModeGhost, ModeProof, ModeSpec, ModeSpecChecked, ModeTracked, Open, OpenRestricted,
-    Prover, Publish, Recommends, Requires, Returns, RevealHide, SignatureDecreases,
-    SignatureInvariants, SignatureSpec, SignatureSpecAttr, SignatureUnwind, Specification,
-    TypeFnSpec, View,
+    FnMode, FnWithSpec, Global, GlobalInner, GlobalLayout, GlobalSizeOf, Invariant,
+    InvariantEnsures, InvariantExceptBreak, InvariantNameSet, InvariantNameSetAny,
+    InvariantNameSetList, InvariantNameSetNone, ItemBroadcastGroup, LoopSpec, MatchesOpExpr,
+    MatchesOpToken, Mode, ModeExec, ModeGhost, ModeProof, ModeSpec, ModeSpecChecked, ModeTracked,
+    Open, OpenRestricted, Prover, Publish, Recommends, Requires, Returns, RevealHide,
+    SignatureDecreases, SignatureInvariants, SignatureSpec, SignatureSpecAttr, SignatureUnwind,
+    Specification, TypeFnSpec, View,
 };
 
 #[rustfmt::skip] // https://github.com/rust-lang/rustfmt/issues/6176

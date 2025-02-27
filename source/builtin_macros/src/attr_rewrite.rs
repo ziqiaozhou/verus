@@ -97,7 +97,7 @@ pub fn rewrite_verus_spec(
                 syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
             // Note: trait default methods appear in this case,
             // since they look syntactically like non-trait functions
-            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &fun.sig);
+            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut fun.sig);
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let _ = fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
             fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
@@ -108,7 +108,7 @@ pub fn rewrite_verus_spec(
             let spec_attr =
                 syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
             // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
-            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &method.sig);
+            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig);
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let mut spec_fun_opt = syntax::split_trait_method_syn(&method, erase.erase());
             let spec_fun = spec_fun_opt.as_mut().unwrap_or(&mut method);

@@ -220,6 +220,31 @@ ast_struct! {
 }
 
 ast_struct! {
+    // #[verus_spec(with {...})] or #[verus_spec(with (...))]
+    pub struct StructWithSpec {
+        pub with: Token![with],
+        pub input: Fields,
+    }
+}
+
+ast_struct! {
+    // #[verus_spec(with(Tracked(&mut y)) -> Tracked(o)))]foo(x)
+    pub struct CallWithSpec {
+        pub with: Token![with],
+        pub input: Option<Punctuated<Expr, Token![,]>>,
+        pub out: Option<(Token![->], Punctuated<Expr, Token![,]>)>,
+    }
+}
+
+ast_struct! {
+    pub struct FnWithSpec {
+        pub with: Token![with],
+        pub inputs: Punctuated<FnArg , Token![,]>,
+        pub outputs: Option<(Token![->], Punctuated<PatType, Token![,]>)>,
+    }
+}
+
+ast_struct! {
     pub struct SignatureSpec {
         // When adding Verus fields here, update erase_spec_fields:
         pub prover: Option<Prover>,
@@ -230,6 +255,7 @@ ast_struct! {
         pub decreases: Option<SignatureDecreases>,
         pub invariants: Option<SignatureInvariants>,
         pub unwind: Option<SignatureUnwind>,
+        pub with: Option<FnWithSpec>,
     }
 }
 
@@ -977,6 +1003,7 @@ pub mod parsing {
     impl Parse for SignatureSpec {
         fn parse(input: ParseStream) -> Result<Self> {
             let prover: Option<Prover> = input.parse()?;
+            let with: Option<FnWithSpec> = input.parse()?;
             let requires: Option<Requires> = input.parse()?;
             let recommends: Option<Recommends> = input.parse()?;
             let ensures: Option<Ensures> = input.parse()?;
@@ -994,6 +1021,7 @@ pub mod parsing {
                 decreases,
                 invariants,
                 unwind,
+                with,
             })
         }
     }
@@ -2079,6 +2107,52 @@ impl parse::Parse for LoopSpec {
             invariant_except_breaks,
             ensures,
             decreases,
+        })
+    }
+}
+
+#[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+impl parse::Parse for Option<FnWithSpec> {
+    fn parse(input: ParseStream) -> Result<Self> {
+        if input.peek(Token![with]) {
+            input.parse().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+#[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+impl parse::Parse for FnWithSpec {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let with = input.parse()?;
+        let mut inputs = Punctuated::new();
+        loop {
+            let expr = input.parse()?;
+            inputs.push(expr);
+            if !input.peek(Token![,]) {
+                break;
+            }
+            let _comma: Token![,] = input.parse()?;
+        }
+        let outputs = if input.peek(Token![->]) {
+            let token = input.parse()?;
+            let mut outs = Punctuated::new();
+            loop {
+                let expr = input.parse()?;
+                outs.push(expr);
+                if !input.peek(Token![,]) {
+                    break;
+                }
+                let _comma: Token![,] = input.parse()?;
+            }
+            Some((token, outs))
+        } else {
+            None
+        };
+        Ok(FnWithSpec {
+            with,
+            inputs,
+            outputs,
         })
     }
 }

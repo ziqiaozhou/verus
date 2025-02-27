@@ -287,3 +287,21 @@ trait T {
     )]
     fn my_uninterpreted_fun2(&self, i: u8, j: u8) -> u8;
 }
+
+#[verus_spec(ret =>
+    with
+        Tracked(y): Tracked<&mut u32> -> z: Ghost<u32>
+    requires
+        x < 100,
+        *old(y) < 100,
+    ensures
+        *y == x,
+        ret.1 == x,
+)]
+fn test_mut_tracked(x: u32) {
+    proof!{
+        *y = x;
+    }
+    
+    verus_exec_expr!{#[cfg(verus_keep_ghost_body)]((), Ghost(x))}
+}
