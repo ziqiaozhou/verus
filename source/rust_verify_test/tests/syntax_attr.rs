@@ -274,3 +274,40 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    #[test] test_with code!{
+        #[verus_spec(ret =>
+            with
+                Tracked(y): Tracked<&mut u32>,
+                Ghost(w): Ghost<u32>,
+                -> z: Ghost<u32>
+            requires
+                x < 100,
+                *old(y) < 100,
+            ensures
+                *y == x,
+                ret.0 == x,
+                ret.1@ == x,
+        )]
+        fn test_mut_tracked(x: u32) -> u32 {
+            proof!{
+                *y = x;
+            }
+            #[verus_io(with @Ghost(x))]
+            x
+        }
+
+        fn test_cal_mut_tracked(x: u32) {
+            verus_extra_stmts!{
+                let ghost mut z;
+                let tracked mut y = 0u32;
+            }
+            proof!{
+                z = 0u32;
+            }
+            #[verus_io(with Tracked(&mut y), Ghost(0) => Ghost(z))]
+            let _ = test_mut_tracked(0u32);
+        }
+    } => Ok(())
+}

@@ -32,7 +32,7 @@
 /// - Refer to `example/syntax_attr.rs`.
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
-use syn::{parse2, spanned::Spanned, Expr, ExprCall, Ident, Item, Pat, Stmt, Token};
+use syn::{parse2, spanned::Spanned, Expr, ExprCall, Item, Stmt};
 
 use crate::{
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
@@ -160,6 +160,22 @@ pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::Token
     }
 }
 
+struct StmtOrExpr(pub Stmt);
+
+impl syn::parse::Parse for StmtOrExpr {
+    fn parse(input: syn::parse::ParseStream) -> syn::parse::Result<StmtOrExpr> {
+        use syn::parse::discouraged::Speculative;
+        let fork = input.fork();
+        if let Ok(stmt) = fork.parse() {
+            input.advance_to(&fork);
+            return Ok(StmtOrExpr(stmt));
+        }
+
+        let expr: Expr = input.parse().expect("Need stmt or expression");
+        return Ok(StmtOrExpr(Stmt::Expr(expr, None)));
+    }
+}
+
 pub(crate) fn verus_io(
     erase: &EraseGhost,
     attr_input: proc_macro::TokenStream,
@@ -168,10 +184,13 @@ pub(crate) fn verus_io(
     if !erase.keep() {
         return Ok(input);
     }
-    let mut s = syn::parse::<Stmt>(input).expect("failed to parse Stmt");
+    println!("{}", input);
+    let StmtOrExpr(s) = syn::parse::<StmtOrExpr>(input).expect("failed to parse Stmt verusio");
     let with_in_out = syn_verus::parse::<syn_verus::CallWithSpec>(attr_input)
         .expect("failed to parse syn_verus::TrackedIO");
-    Ok(call_with_in_out(erase, s, with_in_out).into())
+    let ret = call_with_in_out(erase, s, with_in_out).into();
+    println!("{}", ret);
+    Ok(ret)
 }
 
 // Return some pre-statements
@@ -216,15 +235,18 @@ fn call_with_in_out(
     s: Stmt,
     with_in_out: syn_verus::CallWithSpec,
 ) -> TokenStream {
-    let syn_verus::CallWithSpec { inputs, outputs, .. } = with_in_out;
-    if inputs.len() == 0 && outputs.is_none() {
+    let syn_verus::CallWithSpec { inputs, outputs, follows, .. } = with_in_out;
+    if inputs.len() == 0 && outputs.is_none() && follows.is_none() {
         return s.into_token_stream();
     }
+    let follows: Option<TokenStream> = follows.map(|(_, f)| {
+        syntax::rewrite_expr(erase.clone(), false, f.into_token_stream().into()).into()
+    });
     let tmp_pat = syn_verus::Pat::Ident(syn_verus::PatIdent {
         attrs: vec![],
         by_ref: None,
         mutability: None,
-        ident: syn_verus::Ident::new("_verus_tmp_var_", s.span()),
+        ident: syn_verus::Ident::new("__verus_tmp_var_", s.span()),
         subpat: None,
     });
     let mk_new_pat = |old_pat: syn_verus::Pat| {
@@ -246,6 +268,11 @@ fn call_with_in_out(
     match &mut s {
         Stmt::Local(syn::Local { pat, init, .. }) => match init {
             Some(syn::LocalInit { expr, .. }) => {
+                if follows.is_some() {
+                    return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
+                        compile_error!("with attribute is misused");
+                    ));
+                }
                 let mut new_pat = mk_new_pat(syn_verus::Pat::Verbatim(pat.into_token_stream()));
                 let (x_declares, x_assigns) = syntax::rewrite_exe_pat(&mut new_pat);
                 *pat = syn::Pat::Verbatim(new_pat.into_token_stream());
@@ -265,10 +292,16 @@ fn call_with_in_out(
         },
         Stmt::Expr(expr, _) => {
             let mut pat = mk_new_pat(tmp_pat.clone());
-            expr_call_with_inputs(erase, expr, inputs, Some((pat, tmp_pat)));
+            if matches!(expr, Expr::Call(_) | Expr::MethodCall(_)) {
+                expr_call_with_inputs(erase, expr, inputs, Some((pat, tmp_pat)));
+            }
+            if let Some(follow) = follows {
+                *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr, #follow)));
+            }
             s.into_token_stream()
         }
         _ => {
+            println!("here2");
             return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
                 compile_error!("with attribute cannot be applied here");
             ));

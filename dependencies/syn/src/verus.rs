@@ -220,19 +220,12 @@ ast_struct! {
 }
 
 ast_struct! {
-    // #[verus_spec(with {...})] or #[verus_spec(with (...))]
-    pub struct StructWithSpec {
-        pub with: Token![with],
-        pub input: Fields,
-    }
-}
-
-ast_struct! {
-    // #[verus_spec(with(Tracked(&mut y)) -> Tracked(o)))]foo(x)
     pub struct CallWithSpec {
         pub with: Token![with],
         pub inputs: Punctuated<Expr, Token![,]>,
-        pub outputs: Option<(Token![->], Pat)>,
+        pub outputs: Option<(Token![=>], Pat)>,
+        pub follows: Option<(Token![@], Pat)>,
+
     }
 }
 
@@ -2126,7 +2119,7 @@ impl parse::Parse for FnWithSpec {
     fn parse(input: ParseStream) -> Result<Self> {
         let with = input.parse()?;
         let mut inputs = Punctuated::new();
-        loop {
+        while !input.peek(Token![->]) {
             let expr = input.parse()?;
             inputs.push(expr);
             if !input.peek(Token![,]) {
@@ -2162,7 +2155,7 @@ impl parse::Parse for CallWithSpec {
     fn parse(input: ParseStream) -> Result<Self> {
         let with = input.parse()?;
         let mut inputs = Punctuated::new();
-        loop {
+        while !input.peek(Token![=>]) && !input.peek(Token![@]) {
             let expr = input.parse()?;
             inputs.push(expr);
             if !input.peek(Token![,]) {
@@ -2170,7 +2163,14 @@ impl parse::Parse for CallWithSpec {
             }
             let _comma: Token![,] = input.parse()?;
         }
-        let outputs = if input.peek(Token![->]) {
+        let outputs = if input.peek(Token![=>]) {
+            let token = input.parse()?;
+            let outs = Pat::parse_single(&input)?;
+            Some((token, outs))
+        } else {
+            None
+        };
+        let follows = if input.peek(Token![@]) {
             let token = input.parse()?;
             let outs = Pat::parse_single(&input)?;
             Some((token, outs))
@@ -2181,6 +2181,7 @@ impl parse::Parse for CallWithSpec {
             with,
             inputs,
             outputs,
+            follows,
         })
     }
 }
