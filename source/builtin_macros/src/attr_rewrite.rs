@@ -32,7 +32,7 @@
 /// - Refer to `example/syntax_attr.rs`.
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
-use syn::{parse2, spanned::Spanned, Item};
+use syn::{parse2, spanned::Spanned, Expr, ExprCall, Ident, Item, Pat, Stmt, Token};
 
 use crate::{
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
@@ -157,5 +157,121 @@ pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::Token
         .into()
     } else {
         proc_macro::TokenStream::new()
+    }
+}
+
+pub(crate) fn verus_io(
+    erase: &EraseGhost,
+    attr_input: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> Result<proc_macro::TokenStream, syn::Error> {
+    if !erase.keep() {
+        return Ok(input);
+    }
+    let mut s = syn::parse::<Stmt>(input).expect("failed to parse Stmt");
+    let with_in_out = syn_verus::parse::<syn_verus::CallWithSpec>(attr_input)
+        .expect("failed to parse syn_verus::TrackedIO");
+    Ok(call_with_in_out(erase, s, with_in_out).into())
+}
+
+// Return some pre-statements
+fn expr_call_with_inputs<ExtraArgs: IntoIterator<Item = syn_verus::Expr>>(
+    erase: &EraseGhost,
+    e: &mut Expr,
+    extra_args: ExtraArgs,
+    pat: Option<(syn_verus::Pat, syn_verus::Pat)>, // new_pat, old_pat
+) {
+    match e {
+        Expr::Call(ExprCall { args, .. }) => {
+            for arg in extra_args {
+                let arg =
+                    syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
+                args.push(syn::Expr::Verbatim(arg.into()));
+            }
+        }
+        Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
+            for arg in extra_args {
+                let arg =
+                    syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
+                args.push(syn::Expr::Verbatim(arg.into()));
+            }
+        }
+        _ => {
+            panic!("(with ...) cannot be applied to non-call expr")
+        }
+    }
+
+    if let Some((mut pat, out_pat)) = pat {
+        let (_, x_assigns) = syntax::rewrite_exe_pat(&mut pat);
+        *e = syn::Expr::Verbatim(quote_spanned! {e.span() => {
+            let #pat = #e;
+            proof!{#(#x_assigns)*}
+            #out_pat
+        }})
+    }
+}
+
+fn call_with_in_out(
+    erase: &EraseGhost,
+    s: Stmt,
+    with_in_out: syn_verus::CallWithSpec,
+) -> TokenStream {
+    let syn_verus::CallWithSpec { inputs, outputs, .. } = with_in_out;
+    if inputs.len() == 0 && outputs.is_none() {
+        return s.into_token_stream();
+    }
+    let tmp_pat = syn_verus::Pat::Ident(syn_verus::PatIdent {
+        attrs: vec![],
+        by_ref: None,
+        mutability: None,
+        ident: syn_verus::Ident::new("_verus_tmp_var_", s.span()),
+        subpat: None,
+    });
+    let mk_new_pat = |old_pat: syn_verus::Pat| {
+        if let Some((_, extra_pat)) = outputs {
+            let mut elems =
+                syn_verus::punctuated::Punctuated::<syn_verus::Pat, syn_verus::Token![,]>::new();
+            elems.push(old_pat);
+            elems.push(extra_pat);
+            syn_verus::Pat::Tuple(syn_verus::PatTuple {
+                attrs: vec![],
+                paren_token: syn_verus::token::Paren::default(),
+                elems,
+            })
+        } else {
+            old_pat
+        }
+    };
+    let mut s = s;
+    match &mut s {
+        Stmt::Local(syn::Local { pat, init, .. }) => match init {
+            Some(syn::LocalInit { expr, .. }) => {
+                let mut new_pat = mk_new_pat(syn_verus::Pat::Verbatim(pat.into_token_stream()));
+                let (x_declares, x_assigns) = syntax::rewrite_exe_pat(&mut new_pat);
+                *pat = syn::Pat::Verbatim(new_pat.into_token_stream());
+                expr_call_with_inputs(erase, expr, inputs, None);
+                quote! {
+                    #(#x_declares)*
+                    #s
+                    proof!{#(#x_assigns)*}
+                }
+                .into()
+            }
+            _ => {
+                return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
+                    compile_error!("with attribute cannot be applied to a local without init");
+                ));
+            }
+        },
+        Stmt::Expr(expr, _) => {
+            let mut pat = mk_new_pat(tmp_pat.clone());
+            expr_call_with_inputs(erase, expr, inputs, Some((pat, tmp_pat)));
+            s.into_token_stream()
+        }
+        _ => {
+            return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
+                compile_error!("with attribute cannot be applied here");
+            ));
+        }
     }
 }

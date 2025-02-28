@@ -231,8 +231,8 @@ ast_struct! {
     // #[verus_spec(with(Tracked(&mut y)) -> Tracked(o)))]foo(x)
     pub struct CallWithSpec {
         pub with: Token![with],
-        pub input: Option<Punctuated<Expr, Token![,]>>,
-        pub out: Option<(Token![->], Punctuated<Expr, Token![,]>)>,
+        pub inputs: Punctuated<Expr, Token![,]>,
+        pub outputs: Option<(Token![->], Pat)>,
     }
 }
 
@@ -2150,6 +2150,34 @@ impl parse::Parse for FnWithSpec {
             None
         };
         Ok(FnWithSpec {
+            with,
+            inputs,
+            outputs,
+        })
+    }
+}
+
+#[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+impl parse::Parse for CallWithSpec {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let with = input.parse()?;
+        let mut inputs = Punctuated::new();
+        loop {
+            let expr = input.parse()?;
+            inputs.push(expr);
+            if !input.peek(Token![,]) {
+                break;
+            }
+            let _comma: Token![,] = input.parse()?;
+        }
+        let outputs = if input.peek(Token![->]) {
+            let token = input.parse()?;
+            let outs = Pat::parse_single(&input)?;
+            Some((token, outs))
+        } else {
+            None
+        };
+        Ok(CallWithSpec {
             with,
             inputs,
             outputs,

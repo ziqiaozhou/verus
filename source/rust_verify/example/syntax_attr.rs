@@ -1,3 +1,4 @@
+#![feature(proc_macro_hygiene)]
 #![allow(unused_imports)]
 
 use builtin::*;
@@ -304,4 +305,12 @@ fn test_mut_tracked(x: u32) {
     }
     
     verus_exec_expr!{#[cfg(verus_keep_ghost_body)]((), Ghost(x))}
+}
+
+fn test_cal_mut_tracked(x: u32) {
+    let y = verus_exec_expr!{Tracked(0u32)};
+    #[verus_io(
+        with Tracked(&mut y) -> Ghost(z)
+    )]
+    test_mut_tracked(0u32);
 }
