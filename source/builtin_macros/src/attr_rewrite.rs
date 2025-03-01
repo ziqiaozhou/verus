@@ -184,12 +184,10 @@ pub(crate) fn verus_io(
     if !erase.keep() {
         return Ok(input);
     }
-    println!("{}", input);
     let StmtOrExpr(s) = syn::parse::<StmtOrExpr>(input).expect("failed to parse Stmt verusio");
     let with_in_out = syn_verus::parse::<syn_verus::CallWithSpec>(attr_input)
         .expect("failed to parse syn_verus::TrackedIO");
     let ret = call_with_in_out(erase, s, with_in_out).into();
-    println!("{}", ret);
     Ok(ret)
 }
 
@@ -242,13 +240,6 @@ fn call_with_in_out(
     let follows: Option<TokenStream> = follows.map(|(_, f)| {
         syntax::rewrite_expr(erase.clone(), false, f.into_token_stream().into()).into()
     });
-    let tmp_pat = syn_verus::Pat::Ident(syn_verus::PatIdent {
-        attrs: vec![],
-        by_ref: None,
-        mutability: None,
-        ident: syn_verus::Ident::new("__verus_tmp_var_", s.span()),
-        subpat: None,
-    });
     let mk_new_pat = |old_pat: syn_verus::Pat| {
         if let Some((_, extra_pat)) = outputs {
             let mut elems =
@@ -291,7 +282,14 @@ fn call_with_in_out(
             }
         },
         Stmt::Expr(expr, _) => {
-            let mut pat = mk_new_pat(tmp_pat.clone());
+            let tmp_pat = syn_verus::Pat::Ident(syn_verus::PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: None,
+                ident: syn_verus::Ident::new("__verus_tmp_expr_var__", expr.span()),
+                subpat: None,
+            });
+            let pat = mk_new_pat(tmp_pat.clone());
             if matches!(expr, Expr::Call(_) | Expr::MethodCall(_)) {
                 expr_call_with_inputs(erase, expr, inputs, Some((pat, tmp_pat)));
             }
@@ -301,7 +299,6 @@ fn call_with_in_out(
             s.into_token_stream()
         }
         _ => {
-            println!("here2");
             return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
                 compile_error!("with attribute cannot be applied here");
             ));

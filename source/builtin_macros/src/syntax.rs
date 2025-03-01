@@ -220,22 +220,6 @@ macro_rules! parse_quote_spanned_vstd {
     }
 }
 
-fn is_tracked_or_ghost_call(call: &ExprCall) -> Option<bool> {
-    let ExprCall { func, args, .. } = call;
-    match func.as_ref() {
-        Expr::Path(path) if path.qself.is_none() && args.len() == 1 => {
-            if path_is_ident(&path.path, "Ghost") {
-                Some(false)
-            } else if path_is_ident(&path.path, "Tracked") {
-                Some(true)
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    }
-}
-
 pub(crate) fn rewrite_exe_pat(pat: &mut Pat) -> (Vec<Stmt>, Vec<Stmt>) {
     let mut visit_pat = ExecGhostPatVisitor {
         inside_ghost: 0,
@@ -250,35 +234,7 @@ pub(crate) fn rewrite_exe_pat(pat: &mut Pat) -> (Vec<Stmt>, Vec<Stmt>) {
     return (x_decls, x_assigns);
 }
 
-pub fn create_tracked_ghost_vars<T: ToTokens>(
-    erase: &EraseGhost,
-    is_tracked: bool,
-    is_inside_ghost: bool,
-    span: Span,
-    inner: T,
-) -> Expr {
-    if is_tracked {
-        // Tracked(...)
-        Expr::Verbatim(if erase.erase() {
-            quote_spanned!(span => Tracked::assume_new_fallback(|| unreachable!()))
-        } else if is_inside_ghost {
-            quote_spanned_builtin!(builtin, span => #builtin::Tracked::new(#inner))
-        } else {
-            quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::tracked_exec(#[verifier::tracked_block_wrapped] /* vattr */ #inner))
-        })
-    } else {
-        // Ghost(...)
-        Expr::Verbatim(if erase.erase() {
-            quote_spanned!(span => Ghost::assume_new_fallback(|| unreachable!()))
-        } else if is_inside_ghost {
-            quote_spanned_builtin!(builtin, span => #builtin::Ghost::new(#inner))
-        } else {
-            quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::ghost_exec(#[verifier::ghost_block_wrapped] /* vattr */ #inner))
-        })
-    }
-}
-
-fn take_sig_with_inarg(erase_ghost: &EraseGhost, arg: &mut FnArg, is_wrapped: bool) -> Vec<Stmt> {
+fn take_sig_with_arg(erase_ghost: &EraseGhost, arg: &mut FnArg) -> Vec<Stmt> {
     // Check for Ghost(x) or Tracked(x) argument
     let mut unwrap_ghost_tracked = Vec::new();
     if let FnArgKind::Typed(PatType { pat, .. }) = &mut arg.kind {
@@ -618,48 +574,7 @@ impl Visitor {
             }
 
             // Check for Ghost(x) or Tracked(x) argument
-            unwrap_ghost_tracked.extend(take_sig_with_inarg(&self.erase_ghost, arg, true));
-            /*if let FnArgKind::Typed(PatType { pat, .. }) = &mut arg.kind {
-                let pat = &mut **pat;
-                let mut tracked_wrapper = false;
-                let mut wrapped_pat_id = None;
-                if let Pat::TupleStruct(tup) = &*pat {
-                    let ghost_wrapper = path_is_ident(&tup.path, "Ghost");
-                    tracked_wrapper = path_is_ident(&tup.path, "Tracked");
-                    if ghost_wrapper || tracked_wrapper || tup.elems.len() == 1 {
-                        if let Pat::Ident(id) = &tup.elems[0] {
-                            wrapped_pat_id = Some(id.clone());
-                        }
-                    }
-                }
-                if let Some(mut wrapped_pat_id) = wrapped_pat_id {
-                    // Change
-                    //   fn f(x: Tracked<T>) {
-                    // to
-                    //   fn f(verus_tmp_x: Tracked<T>) {
-                    //       #[verus::internal(header_unwrap_parameter)] let t;
-                    //       #[verifier::proof_block] { t = verus_tmp_x.get() };
-                    let span = pat.span();
-                    let x = wrapped_pat_id.ident;
-                    let tmp_id = Ident::new(
-                        &format!("verus_tmp_{x}"),
-                        Span::mixed_site().located_at(pat.span()),
-                    );
-                    wrapped_pat_id.ident = tmp_id.clone();
-                    *pat = Pat::Ident(wrapped_pat_id);
-                    if self.erase_ghost.keep() {
-                        unwrap_ghost_tracked.push(stmt_with_semi!(
-                            span => #[verus::internal(header_unwrap_parameter)] let #x));
-                        if tracked_wrapper {
-                            unwrap_ghost_tracked.push(stmt_with_semi!(
-                                span => #[verifier::proof_block] { #x = #tmp_id.get() }));
-                        } else {
-                            unwrap_ghost_tracked.push(stmt_with_semi!(
-                                span => #[verifier::proof_block] { #x = #tmp_id.view() }));
-                        }
-                    }
-                }
-            }*/
+            unwrap_ghost_tracked.extend(take_sig_with_arg(&self.erase_ghost, arg));
 
             arg.tracked = None;
         }
@@ -2670,14 +2585,27 @@ impl Visitor {
         if let Expr::Call(call) = expr {
             let (_, is_tracked) = mode_block;
             let span = call.span();
-            let inner = take_expr(&mut call.args[0]);
-            *expr = create_tracked_ghost_vars(
-                &self.erase_ghost,
-                is_tracked,
-                is_inside_ghost,
-                span,
-                inner,
-            );
+            if is_tracked {
+                // Tracked(...)
+                let inner = take_expr(&mut call.args[0]);
+                *expr = Expr::Verbatim(if self.erase_ghost.erase() {
+                    quote_spanned!(span => Tracked::assume_new_fallback(|| unreachable!()))
+                } else if is_inside_ghost {
+                    quote_spanned_builtin!(builtin, span => #builtin::Tracked::new(#inner))
+                } else {
+                    quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::tracked_exec(#[verifier::tracked_block_wrapped] /* vattr */ #inner))
+                });
+            } else {
+                // Ghost(...)
+                let inner = take_expr(&mut call.args[0]);
+                *expr = Expr::Verbatim(if self.erase_ghost.erase() {
+                    quote_spanned!(span => Ghost::assume_new_fallback(|| unreachable!()))
+                } else if is_inside_ghost {
+                    quote_spanned_builtin!(builtin, span => #builtin::Ghost::new(#inner))
+                } else {
+                    quote_spanned_builtin!(builtin, span => #[verifier::ghost_wrapper] /* vattr */ #builtin::ghost_exec(#[verifier::ghost_block_wrapped] /* vattr */ #inner))
+                });
+            }
         } else if let Expr::Unary(unary) = expr {
             let span = unary.span();
             match (is_inside_ghost, mode_block, &*unary.expr) {
@@ -4135,7 +4063,7 @@ fn take_sig_with_spec(
     // ret.1 is the tracked/ghost returns.
     if inputs.len() > 0 {
         for arg in inputs.iter_mut() {
-            spec_stmts.extend(take_sig_with_inarg(&erase_ghost, arg, false));
+            spec_stmts.extend(take_sig_with_arg(&erase_ghost, arg));
             sig.inputs.push(syn::parse_quote_spanned! { arg.span() => #arg })
         }
     }
