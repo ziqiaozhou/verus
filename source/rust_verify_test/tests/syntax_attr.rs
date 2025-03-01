@@ -319,13 +319,76 @@ test_verify_one_file! {
                 assert(z == 1);
             }
         }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_trait_signature code!{
+        trait X {
+            #[verus_spec(ret =>
+                with
+                    Tracked(y): Tracked<&mut u32>,
+                    Ghost(w): Ghost<u32>,
+                    -> z: Ghost<u32>
+            )]
+            fn f(&self, x: u32) -> bool;
+        }
+    } => Err(e) => assert_any_vir_error_msg(e, "`with` does not support trait")
+}
+
+test_verify_one_file! {
+    #[test] test_unverified_code_signature code!{
+        #[verus_spec(ret =>
+            with
+                Tracked(y): Tracked<&mut u32>,
+                Ghost(w): Ghost<u32>,
+                -> z: Ghost<u32>
+        )]
+        fn test_mut_tracked(x: u32) -> u32 {
+            proof!{
+                *y = x;
+            }
+            #[verus_io(with @Ghost(x))]
+            x
+        }
 
         #[verifier::external]
-        fn external_call(x: u32) -> u32 {
+        fn external_call_with_dummy(x: u32) -> u32 {
             #[verus_io(with Tracked::assume_new(), Ghost::assume_new() => _)]
             test_mut_tracked(0)
         }
+
+        #[verifier::external]
+        fn external_call_untouched(x: u32) -> u32 {
+            test_mut_tracked(0)
+        }
     } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_verified_call_unverified_signature code!{
+        #[verus_spec(ret =>
+            with
+                Tracked(y): Tracked<&mut u32>,
+                Ghost(w): Ghost<u32>,
+                -> z: Ghost<u32>
+        )]
+        fn test_mut_tracked(x: u32) -> u32 {
+            proof!{
+                *y = x;
+            }
+            #[verus_io(with @Ghost(x))]
+            x
+        }
+
+        #[verus_spec]
+        fn verified_call_unverified(x: u32) {
+            test_mut_tracked(0); // FAILS
+        }
+    } => Err(e) => {
+        assert!(e.errors[0].rendered.contains("with"));
+        assert_one_fails(e)
+    }
 }
 
 test_verify_one_file! {

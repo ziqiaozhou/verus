@@ -289,11 +289,8 @@ pub fn verus_io(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    print!("input: {}\n", input);
-    let ret = attr_rewrite::verus_io(&cfg_erase(), attr, input)
-        .expect("Misuse of #[verus_io()]. Must used on ExprCall");
-    print!("output: {}\n\n\n", ret);
-    ret
+    attr_rewrite::verus_io(&cfg_erase(), attr, input)
+        .expect("Misuse of #[verus_io()]. Must used on ExprCall")
 }
 
 #[proc_macro]

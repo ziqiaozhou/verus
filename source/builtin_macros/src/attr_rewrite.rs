@@ -11,8 +11,9 @@
 /// - To apply `ensures`, `invariant`, `decreases` in `exec`,
 ///   developers should call the corresponding macros at the beginning of the loop
 /// - To use proof block, add proof!{...} inside function body.
-/// - To Add tracked/ghost in signature, use #[verus_spec(with ...)] in function definition
-/// - To pass and get tracked/ghost from function call, use #[verus_io(with ...)] in call expr or local statement.
+/// - To Add tracked/ghost in signature, use #[verus_spec(with ...)] in function definition.
+///   To pass and get tracked/ghost from function call, use #[verus_io(with ...)] in
+///   call expr or local statement. Unverified code does not need to change arguments or outputs.
 ///
 /// Rationale:
 /// - This approach avoids introducing new syntax into existing Rust executable
@@ -22,6 +23,7 @@
 ///   For developers who do not understand verification, they can easily ignore
 ///   verus code via feature/cfg selection and use standard rust tools like
 ///   `rustfmt` and `rust-analyzer`.
+/// - Unverified code does not need additional annotation to interact with verified.
 ///
 /// Limitations:
 /// - #[verus_verify] does not support all `verus` syntax, particularly
@@ -42,6 +44,8 @@ use crate::{
     syntax::mk_verus_attr_syn,
     EraseGhost,
 };
+
+pub const VERIFIED: &str = "_VERUS_VERIFIED";
 
 pub fn rewrite_verus_attribute(
     erase: &EraseGhost,
@@ -75,6 +79,31 @@ pub fn rewrite_verus_attribute(
     }
 }
 
+fn rewrite_unverified_func(fun: &mut syn::ItemFn, span: proc_macro2::Span) -> syn::ItemFn {
+    let mut unverified_fun = fun.clone();
+    let stmts = vec![
+        syn::Stmt::Expr(
+            syn::Expr::Verbatim(
+                quote_spanned_builtin!(builtin, span => #builtin::requires([false])),
+            ),
+            Some(syn::token::Semi { spans: [span] }),
+        ),
+        syn::Stmt::Expr(
+            syn::Expr::Verbatim(quote_spanned! {span => unimplemented!()}),
+            Some(syn::token::Semi { spans: [span] }),
+        ),
+    ];
+    unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
+    if let Some(block) = unverified_fun.block_mut() {
+        block.stmts.clear();
+        block.stmts.extend(stmts);
+    }
+    // change name to verified_{fname}
+    let x = &fun.sig.ident;
+    fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+    unverified_fun
+}
+
 pub fn rewrite_verus_spec(
     erase: EraseGhost,
     outer_attr_tokens: proc_macro::TokenStream,
@@ -95,28 +124,50 @@ pub fn rewrite_verus_spec(
 
     match f {
         AnyFnOrLoop::Fn(mut fun) => {
-            let spec_attr =
-                syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
             // Note: trait default methods appear in this case,
             // since they look syntactically like non-trait functions
+            let spec_attr =
+                syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
+
+            fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
+
+            // Create a copy of unverified function.
+            // To avoid misuse of the unverified function,
+            // we add `requires false` and thus prevent verified function to use it.
+            // Allow unverified code to use the function without changing in/output.
+            let mut new_stream = TokenStream::new();
+            if let Some(with) = &spec_attr.spec.with {
+                let unverified_fun = rewrite_unverified_func(&mut fun, with.with.span());
+                unverified_fun.to_tokens(&mut new_stream);
+            }
             let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut fun.sig);
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let _ = fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
-            fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
-
-            proc_macro::TokenStream::from(fun.to_token_stream())
+            fun.to_tokens(&mut new_stream);
+            proc_macro::TokenStream::from(new_stream)
         }
         AnyFnOrLoop::TraitMethod(mut method) => {
+            // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
             let spec_attr =
                 syn_verus::parse_macro_input!(outer_attr_tokens as syn_verus::SignatureSpecAttr);
-            // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
+            let mut new_stream = TokenStream::new();
+
+            if let Some(with) = &spec_attr.spec.with {
+                // Trait method requires can only be inherited from the trait declaration
+                // However, we cannot distinguish trait function impl vs other function impl.
+                // let unverified_method = rewrite_unverified_func(&mut method, with.with.span());
+                // unverified_method.to_tokens(&mut new_stream);
+                return proc_macro::TokenStream::from(
+                    quote_spanned!(with.with.span() => compile_error!("`with` does not support trait");),
+                );
+            }
+
             let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig);
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let mut spec_fun_opt = syntax::split_trait_method_syn(&method, erase.erase());
             let spec_fun = spec_fun_opt.as_mut().unwrap_or(&mut method);
             let _ = spec_fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
             method.attrs.push(mk_verus_attr_syn(method.span(), quote! { verus_macro }));
-            let mut new_stream = TokenStream::new();
             spec_fun_opt.to_tokens(&mut new_stream);
             method.to_tokens(&mut new_stream);
             proc_macro::TokenStream::from(new_stream)
@@ -266,6 +317,23 @@ fn rewrite_with_expr(
     call_with_spec: syn_verus::CallWithSpec,
 ) -> Vec<syn_verus::Stmt> {
     let syn_verus::CallWithSpec { inputs, outputs, follows, .. } = call_with_spec;
+    if outputs.is_some() || inputs.len() > 0 {
+        match expr {
+            syn::Expr::Call(syn::ExprCall { func, .. }) => {
+                if let Expr::Path(path) = func.as_mut() {
+                    let x = &path.path.segments.last().unwrap().ident;
+                    path.path.segments.last_mut().unwrap().ident =
+                        syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+                }
+            }
+            syn::Expr::MethodCall(syn::ExprMethodCall { method, .. }) => {
+                let x = &method;
+                *method = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+            }
+            _ => {}
+        }
+    }
+
     match expr {
         syn::Expr::Call(syn::ExprCall { args, .. })
         | syn::Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
@@ -277,7 +345,6 @@ fn rewrite_with_expr(
         }
         _ => {}
     };
-
     let x_declares = if let Some((_, extra_pat)) = outputs {
         // The expected pat.
         let tmp_pat =
