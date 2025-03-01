@@ -79,31 +79,6 @@ pub fn rewrite_verus_attribute(
     }
 }
 
-fn rewrite_unverified_func(fun: &mut syn::ItemFn, span: proc_macro2::Span) -> syn::ItemFn {
-    let mut unverified_fun = fun.clone();
-    let stmts = vec![
-        syn::Stmt::Expr(
-            syn::Expr::Verbatim(
-                quote_spanned_builtin!(builtin, span => #builtin::requires([false])),
-            ),
-            Some(syn::token::Semi { spans: [span] }),
-        ),
-        syn::Stmt::Expr(
-            syn::Expr::Verbatim(quote_spanned! {span => unimplemented!()}),
-            Some(syn::token::Semi { spans: [span] }),
-        ),
-    ];
-    unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
-    if let Some(block) = unverified_fun.block_mut() {
-        block.stmts.clear();
-        block.stmts.extend(stmts);
-    }
-    // change name to verified_{fname}
-    let x = &fun.sig.ident;
-    fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
-    unverified_fun
-}
-
 pub fn rewrite_verus_spec(
     erase: EraseGhost,
     outer_attr_tokens: proc_macro::TokenStream,
@@ -232,6 +207,31 @@ impl syn::parse::Parse for VerusIOTarget {
         let expr: Expr = input.parse().expect("Need stmt local or expr");
         return Ok(VerusIOTarget::Expr(expr));
     }
+}
+
+fn rewrite_unverified_func(fun: &mut syn::ItemFn, span: proc_macro2::Span) -> syn::ItemFn {
+    let mut unverified_fun = fun.clone();
+    let stmts = vec![
+        syn::Stmt::Expr(
+            syn::Expr::Verbatim(
+                quote_spanned_builtin!(builtin, span => #builtin::requires([false])),
+            ),
+            Some(syn::token::Semi { spans: [span] }),
+        ),
+        syn::Stmt::Expr(
+            syn::Expr::Verbatim(quote_spanned! {span => unimplemented!()}),
+            Some(syn::token::Semi { spans: [span] }),
+        ),
+    ];
+    unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
+    if let Some(block) = unverified_fun.block_mut() {
+        block.stmts.clear();
+        block.stmts.extend(stmts);
+    }
+    // change name to verified_{fname}
+    let x = &fun.sig.ident;
+    fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+    unverified_fun
 }
 
 /// The `verus_io(with)` annotation can be applied to either a local statement or an expression.
