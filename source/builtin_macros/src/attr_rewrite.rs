@@ -11,6 +11,8 @@
 /// - To apply `ensures`, `invariant`, `decreases` in `exec`,
 ///   developers should call the corresponding macros at the beginning of the loop
 /// - To use proof block, add proof!{...} inside function body.
+/// - To Add tracked/ghost in signature, use #[verus_spec(with ...)] in function definition
+/// - To pass and get tracked/ghost from function call, use #[verus_io(with ...)] in call expr or local statement.
 ///
 /// Rationale:
 /// - This approach avoids introducing new syntax into existing Rust executable
@@ -32,7 +34,7 @@
 /// - Refer to `example/syntax_attr.rs`.
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
-use syn::{parse2, spanned::Spanned, Expr, ExprCall, Item, Stmt};
+use syn::{parse2, spanned::Spanned, Expr, Item};
 
 use crate::{
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
@@ -160,22 +162,69 @@ pub fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro::Token
     }
 }
 
-struct StmtOrExpr(pub Stmt);
+enum VerusIOTarget {
+    Local(syn::Local),
+    Expr(syn::Expr),
+}
 
-impl syn::parse::Parse for StmtOrExpr {
-    fn parse(input: syn::parse::ParseStream) -> syn::parse::Result<StmtOrExpr> {
+impl syn::parse::Parse for VerusIOTarget {
+    fn parse(input: syn::parse::ParseStream) -> syn::parse::Result<VerusIOTarget> {
         use syn::parse::discouraged::Speculative;
         let fork = input.fork();
         if let Ok(stmt) = fork.parse() {
-            input.advance_to(&fork);
-            return Ok(StmtOrExpr(stmt));
+            if let syn::Stmt::Local(local) = stmt {
+                input.advance_to(&fork);
+                return Ok(VerusIOTarget::Local(local));
+            }
         }
 
-        let expr: Expr = input.parse().expect("Need stmt or expression");
-        return Ok(StmtOrExpr(Stmt::Expr(expr, None)));
+        let expr: Expr = input.parse().expect("Need stmt local or expr");
+        return Ok(VerusIOTarget::Expr(expr));
     }
 }
 
+/// The `verus_io(with)` annotation can be applied to either a local statement or an expression.
+///
+/// - When applied to an expression (`expr`), the trailing semicolon (`;`) is ignored due to limitations of the procedure macro.
+///   To include the semicolon, developers must use the following syntax:
+///   ```rust
+///   {#[verus_io] expr};
+///   ```
+///
+/// - When used with an expression, developers must explicitly declare the returned ghost or tracked patterns.
+///   This is because the additional declarations cannot be automatically added in a meaningful way.
+///
+/// Example:
+/// ```rust
+/// if #[verus_io(with Tracked(arg1), Ghost(arg2) => Tracked(out) @ Tracked(extra))]
+/// call(arg0) == something {
+/// }
+/// ```
+/// This will be transformed to the following:
+/// ```rust
+/// {
+///     let (tmp, tmp_out) = call(arg0, Tracked(arg1), Tracked(arg2));
+///     proof!{out = tmp_out.get();}  // Ensuring `out` is properly assigned.
+///     (tmp, Tracked(extra))  // Returning the transformed values.
+/// }
+/// ```
+///
+/// The recommended approach for handling returned ghost/tracked outputs is to use a local statement:
+///
+/// Example:
+/// ```rust
+/// #[verus_io(with Tracked(arg1), Ghost(arg2) => Tracked(out) @ Tracked(extra))]
+/// let out0 = call(arg0);
+/// ```
+/// This will be transformed to:
+/// ```rust
+/// let tracked mut out;
+/// let out0 = {
+///     let (tmp, tmp_out) = call(arg0, Tracked(arg1), Tracked(arg2));
+///     proof!{out = tmp_out.get();}  // Ensure proper assignment of the ghost value.
+///     (tmp, Tracked(extra))  // Returning the transformed values.
+/// };
+/// ```
 pub(crate) fn verus_io(
     erase: &EraseGhost,
     attr_input: proc_macro::TokenStream,
@@ -184,124 +233,82 @@ pub(crate) fn verus_io(
     if !erase.keep() {
         return Ok(input);
     }
-    let StmtOrExpr(s) = syn::parse::<StmtOrExpr>(input).expect("failed to parse Stmt verusio");
-    let with_in_out = syn_verus::parse::<syn_verus::CallWithSpec>(attr_input)
-        .expect("failed to parse syn_verus::TrackedIO");
-    let ret = call_with_in_out(erase, s, with_in_out).into();
-    Ok(ret)
+    let mut target = syn::parse::<VerusIOTarget>(input).expect("failed to parse Stmt verusio");
+    let call_with_spec = syn_verus::parse::<syn_verus::CallWithSpec>(attr_input)
+        .expect("failed to parse CallWithSpec");
+    let tokens = match &mut target {
+        VerusIOTarget::Local(local) => {
+            let syn::Local { init, .. } = local;
+            if let Some(syn::LocalInit { expr, .. }) = init {
+                let x_declares = rewrite_with_expr(erase, expr, call_with_spec);
+                quote! {
+                    #(#x_declares)*
+                    #local
+                }
+            } else {
+                proc_macro2::TokenStream::from(quote_spanned!(local.span() =>
+                    compile_error!("with attribute cannot be applied to a local without init");
+                ))
+            }
+        }
+        VerusIOTarget::Expr(e) => {
+            rewrite_with_expr(erase, e, call_with_spec);
+            e.into_token_stream().into()
+        }
+    };
+    Ok(tokens.into())
 }
 
 // Return some pre-statements
-fn expr_call_with_inputs<ExtraArgs: IntoIterator<Item = syn_verus::Expr>>(
+fn rewrite_with_expr(
     erase: &EraseGhost,
-    e: &mut Expr,
-    extra_args: ExtraArgs,
-    pat: Option<(syn_verus::Pat, syn_verus::Pat)>, // new_pat, old_pat
-) {
-    match e {
-        Expr::Call(ExprCall { args, .. }) => {
-            for arg in extra_args {
+    expr: &mut Expr,
+    call_with_spec: syn_verus::CallWithSpec,
+) -> Vec<syn_verus::Stmt> {
+    let syn_verus::CallWithSpec { inputs, outputs, follows, .. } = call_with_spec;
+    match expr {
+        syn::Expr::Call(syn::ExprCall { args, .. })
+        | syn::Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
+            for arg in inputs {
                 let arg =
                     syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
                 args.push(syn::Expr::Verbatim(arg.into()));
             }
         }
-        Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
-            for arg in extra_args {
-                let arg =
-                    syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
-                args.push(syn::Expr::Verbatim(arg.into()));
-            }
-        }
-        _ => {
-            panic!("(with ...) cannot be applied to non-call expr")
-        }
-    }
-
-    if let Some((mut pat, out_pat)) = pat {
-        let (_, x_assigns) = syntax::rewrite_exe_pat(&mut pat);
-        *e = syn::Expr::Verbatim(quote_spanned! {e.span() => {
-            let #pat = #e;
-            proof!{#(#x_assigns)*}
-            #out_pat
-        }})
-    }
-}
-
-fn call_with_in_out(
-    erase: &EraseGhost,
-    s: Stmt,
-    with_in_out: syn_verus::CallWithSpec,
-) -> TokenStream {
-    let syn_verus::CallWithSpec { inputs, outputs, follows, .. } = with_in_out;
-    if inputs.len() == 0 && outputs.is_none() && follows.is_none() {
-        return s.into_token_stream();
-    }
-    let follows: Option<TokenStream> = follows.map(|(_, f)| {
-        syntax::rewrite_expr(erase.clone(), false, f.into_token_stream().into()).into()
-    });
-    let mk_new_pat = |old_pat: syn_verus::Pat| {
-        if let Some((_, extra_pat)) = outputs {
-            let mut elems =
-                syn_verus::punctuated::Punctuated::<syn_verus::Pat, syn_verus::Token![,]>::new();
-            elems.push(old_pat);
-            elems.push(extra_pat);
-            syn_verus::Pat::Tuple(syn_verus::PatTuple {
-                attrs: vec![],
-                paren_token: syn_verus::token::Paren::default(),
-                elems,
-            })
-        } else {
-            old_pat
-        }
+        _ => {}
     };
-    let mut s = s;
-    match &mut s {
-        Stmt::Local(syn::Local { pat, init, .. }) => match init {
-            Some(syn::LocalInit { expr, .. }) => {
-                if follows.is_some() {
-                    return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
-                        compile_error!("with attribute is misused");
-                    ));
-                }
-                let mut new_pat = mk_new_pat(syn_verus::Pat::Verbatim(pat.into_token_stream()));
-                let (x_declares, x_assigns) = syntax::rewrite_exe_pat(&mut new_pat);
-                *pat = syn::Pat::Verbatim(new_pat.into_token_stream());
-                expr_call_with_inputs(erase, expr, inputs, None);
-                quote! {
-                    #(#x_declares)*
-                    #s
-                    proof!{#(#x_assigns)*}
-                }
-                .into()
+
+    let x_declares = if let Some((_, extra_pat)) = outputs {
+        // The expected pat.
+        let tmp_pat =
+            syn_verus::Pat::Verbatim(quote_spanned! {expr.span() => __verus_tmp_expr_var__});
+        let mut elems =
+            syn_verus::punctuated::Punctuated::<syn_verus::Pat, syn_verus::Token![,]>::new();
+        elems.push(tmp_pat.clone());
+        elems.push(extra_pat);
+        // The actual pat.
+        let mut pat = syn_verus::Pat::Tuple(syn_verus::PatTuple {
+            attrs: vec![],
+            paren_token: syn_verus::token::Paren::default(),
+            elems,
+        });
+        let (x_declares, x_assigns) = syntax::rewrite_exe_pat(&mut pat);
+        *expr = syn::Expr::Verbatim(quote_spanned! {expr.span() => {
+            let #pat = #expr;
+            proof!{
+                #(#x_assigns)*
             }
-            _ => {
-                return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
-                    compile_error!("with attribute cannot be applied to a local without init");
-                ));
-            }
-        },
-        Stmt::Expr(expr, _) => {
-            let tmp_pat = syn_verus::Pat::Ident(syn_verus::PatIdent {
-                attrs: vec![],
-                by_ref: None,
-                mutability: None,
-                ident: syn_verus::Ident::new("__verus_tmp_expr_var__", expr.span()),
-                subpat: None,
-            });
-            let pat = mk_new_pat(tmp_pat.clone());
-            if matches!(expr, Expr::Call(_) | Expr::MethodCall(_)) {
-                expr_call_with_inputs(erase, expr, inputs, Some((pat, tmp_pat)));
-            }
-            if let Some(follow) = follows {
-                *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr, #follow)));
-            }
-            s.into_token_stream()
+            #tmp_pat
         }
-        _ => {
-            return proc_macro2::TokenStream::from(quote_spanned!(s.span() =>
-                compile_error!("with attribute cannot be applied here");
-            ));
-        }
+        });
+        x_declares
+    } else {
+        vec![]
+    };
+    if let Some((_, follow)) = follows {
+        let follow: TokenStream =
+            syntax::rewrite_expr(erase.clone(), false, follow.into_token_stream().into()).into();
+        *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr, #follow)));
     }
+    x_declares
 }

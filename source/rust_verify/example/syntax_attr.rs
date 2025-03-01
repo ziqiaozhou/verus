@@ -318,4 +318,9 @@ fn test_cal_mut_tracked(x: u32) {
     }
     #[verus_io(with Tracked(&mut y), Ghost(0) => Ghost(z))]
     let _ = test_mut_tracked(0u32);
+
+    (#[verus_io(with Tracked(&mut y), Ghost(0))]
+    test_mut_tracked(0u32));
+
+    return;
 }
