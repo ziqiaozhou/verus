@@ -10,6 +10,7 @@ pub struct ExOrdering(Ordering);
 
 pub broadcast group group_cmp_axioms {
     axiom_partial_eq,
+    axiom_partial_eq2,
     axiom_partial_cmp,
     axiom_obey_cmp_model,
 }
@@ -90,6 +91,18 @@ pub broadcast proof fn axiom_partial_eq<T1: ?Sized + SpecPartialEqOp<T2>, T2: ?S
 {
     admit()
 }
+
+pub broadcast proof fn axiom_partial_eq2<T1: ?Sized + PartialEq<T2> + SpecPartialEqOp<T2>, T2: ?Sized>(
+    v: &T1,
+    rhs: &T2,
+    ret: bool
+)
+    ensures
+        #[trigger]call_ensures(T1::eq, (v, rhs), ret) <==> (v.spec_partial_eq(rhs) == ret)
+{
+    admit()
+}
+
 
 #[verifier::external_trait_specification]
 pub trait ExPartialEq<Rhs: ?Sized> {
@@ -197,7 +210,7 @@ macro_rules! def_partial_eq_for {
 
                 pub assume_specification[ <$ty as PartialEq>::eq ](a: &$ty, b: &$ty) -> (ret: bool)
                 ensures
-                    ret == spec_partial_eq(a, b),
+                    ret == (a == b),
                 ;
             )*
         }
