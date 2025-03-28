@@ -456,7 +456,12 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
 
             let candidate = tcx.codegen_select_candidate((param_env, trait_refs));
             let candidate = candidate.or_else(|_| {
-                let trait_refs = tcx.normalize_erasing_regions(param_env, trait_refs);
+                let trait_refs = if let Ok(trait_refs) = tcx.try_normalize_erasing_regions(param_env, trait_refs)
+                {
+                    trait_refs
+                } else {
+                    trait_refs
+                };
                 tcx.codegen_select_candidate((param_env, trait_refs))
             });
             if let Ok(impl_source) = candidate {
