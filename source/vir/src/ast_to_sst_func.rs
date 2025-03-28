@@ -766,6 +766,10 @@ pub fn func_def_to_sst(
     }
     if let Some(lo_inheritance) = &lo_inheritance {
         for expr in lo_inheritance.function.x.ensure.clone().iter() {
+            if matches!(&expr.x, ExprX::Unary(UnaryOp::DefaultEnsures, _)) {
+                // We're overriding req_ens_function, so we only inherit the non-default-ensures
+                continue;
+            }
             let exp = lo_inheritance.lower_pure(
                 ctx,
                 &mut state,
@@ -782,6 +786,23 @@ pub fn func_def_to_sst(
     if check_api_safety {
         let exps = crate::safe_api::axioms_for_default_spec_fns(ctx, diagnostics, function)?;
         reqs.extend(exps);
+    }
+    for e in function.x.ensure.iter() {
+        // Turn our own default_ensures into normal ensures,
+        // so that they are checked in the body of the default implementation.
+        let e = match &e.x {
+            ExprX::Unary(UnaryOp::DefaultEnsures, e) => e.clone(),
+            _ => e.clone(),
+        };
+        if ctx.checking_spec_preconditions() {
+            ens_spec_precondition_stms
+                .extend(crate::ast_to_sst::check_pure_expr(ctx, &mut state, &e)?);
+        } else {
+            // skip checks because we call expr_to_pure_exp_check above
+            let exp = expr_to_exp_skip_checks(ctx, diagnostics, &ens_pars, &e)?;
+            let exp = crate::heuristics::maybe_insert_auto_ext_equal(ctx, &exp, |x| x.ensures);
+            enss.push(exp);
+        }
     }
 
     // AST --> SST
