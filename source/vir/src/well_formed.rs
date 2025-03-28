@@ -337,6 +337,7 @@ fn check_one_expr(
                         &expr.span,
                     )?;
                 }
+                CallTargetKind::ExternalTraitDefault => {}
             }
             if f.x.attrs.is_decrease_by {
                 // a decreases_by function isn't a real function;
