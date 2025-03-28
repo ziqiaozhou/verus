@@ -148,6 +148,7 @@ pub(crate) enum Bound {
     Pointee,
     Id(Id),
     Trait { trait_path: Id, args: Vec<Typ>, equality: Option<(Id, Vec<Id>, Typ)> },
+    Into { trait_path: vir::ast::Path, args: Vec<Typ> }, // Unknown until gen_check_trait_impl_conflicts
     Fn(ClosureKind, Typ, Typ),
 }
 

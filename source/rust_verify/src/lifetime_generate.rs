@@ -1833,6 +1833,9 @@ fn erase_mir_bound<'a, 'tcx>(
         let (args, _) = erase_generic_args(ctxt, state, args, true);
         let trait_path = state.trait_name(&trait_path);
         Some(Bound::Trait { trait_path, args, equality: None })
+    } else if Some(RustItem::Into) == rust_item {
+        let (args, _) = erase_generic_args(ctxt, state, args, true);
+        Some(Bound::Into { trait_path, args})
     } else {
         None
     }

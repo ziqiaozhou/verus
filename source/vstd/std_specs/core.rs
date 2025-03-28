@@ -42,6 +42,7 @@ pub trait ExDebug {
 #[verifier::external_trait_specification]
 pub trait ExFrom<T>: Sized {
     type ExternalTraitSpecificationFor: core::convert::From<T>;
+    fn from(v: T) -> (ret: Self);
 }
 
 #[verifier::external_trait_specification]
@@ -235,4 +236,69 @@ pub assume_specification[ core::hint::unreachable_unchecked ]() -> !
         false,
 ;
 
+#[verifier::external_trait_specification]
+pub trait ExTryInto<T>: Sized {
+    type Error;
+    type ExternalTraitSpecificationFor: core::convert::TryInto<T>;
+    fn try_into(self) -> (ret: core::result::Result<T, core::convert::Infallible>);
+}
+
+#[verifier::external_trait_specification]
+pub trait ExTryFrom<T>: Sized {
+    type Error;
+    type ExternalTraitSpecificationFor: core::convert::TryFrom<T>;
+    fn try_from(v: T) -> (ret: core::result::Result<Self, core::convert::Infallible>);
+}
+
+#[verifier::external_trait_specification]
+pub trait ExInto<T>: Sized {
+    type ExternalTraitSpecificationFor: core::convert::Into<T>;
+
+    fn into(self) -> (ret: T);
+}
+
+pub assume_specification<T, U: From<T>>[ T::into ](a: T) -> (ret: U)
+    ensures
+        call_ensures(U::from, (a,), ret)
+;
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExTryFromIntError(pub core::num::TryFromIntError);
+
 } // verus!
+
+macro_rules! impl_from_spec {
+    ($from: ty => [$($to: ty)*]) => {verus!{
+        $(
+        pub assume_specification[ <$to as core::convert::From<$from>>::from ](a: $from) -> (ret: $to)
+            ensures
+                ret == a as $to,
+        ;
+        )*
+        }
+    }
+}
+
+impl_from_spec!{u8 => [u16 u32 u64 usize u128]}
+impl_from_spec!{u16 => [u32 u64 usize u128]}
+impl_from_spec!{u32 => [u64 u128]}
+impl_from_spec!{u64 => [u128]}
+
+macro_rules! impl_try_from_spec {
+    ($from: ty => [$($to: ty)*]) => {verus!{
+        $(
+        pub assume_specification[ <$to as core::convert::TryFrom<$from>>::try_from ](a: $from) -> (ret: Result<$to, <$to as core::convert::TryFrom<$from>>::Error>)
+            ensures
+                ret.is_ok() ==> ret.unwrap() == a as $to,
+                ret.is_ok() == (a <= $to::MAX),
+        ;
+        )*
+        }
+    }
+}
+
+impl_try_from_spec!{u16 => [u8]}
+impl_try_from_spec!{u32 => [u8 u16 usize]}
+impl_try_from_spec!{u64 => [u8 u16 u32 usize]}
+impl_try_from_spec!{u128 => [u8 u16 u32 u64 usize]}

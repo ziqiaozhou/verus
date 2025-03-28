@@ -281,6 +281,7 @@ pub(crate) fn gen_check_trait_impl_conflicts(
         let decl =
             TraitDecl { name, generic_params: t_params, generic_bounds: t_bounds, assoc_typs };
         state.trait_decls.push(decl);
+        state.trait_decl_set.insert(t.x.name.clone());
     }
 
     let mut impl_path_to_assoc_typs: HashMap<Path, Vec<AssocTypeImpl>> = HashMap::new();
@@ -293,6 +294,23 @@ pub(crate) fn gen_check_trait_impl_conflicts(
             entry.push(a.clone());
         }
     }
+
+    // Update trait bound Into
+    // If we put core::convert::Into directly in lifetime checking,
+    // TryFrom trait implementations would cause conflicts.
+    let mut trait_impls: Vec<_> = state.trait_impls.drain(..).collect();
+    for decls in &mut trait_impls  {
+        for bound in &mut decls.generic_bounds {
+            if let Bound::Into{trait_path, args} = &bound.bound {
+                if !state.trait_decl_set.contains(trait_path.as_ref()) {
+                    panic!("Not found in trait_decl_set");
+                }
+                let trait_path = state.trait_name(&trait_path);
+                bound.bound = Bound::Trait { trait_path, args: args.clone(), equality: None };
+            }
+        }
+    }
+    state.trait_impls = trait_impls;
 
     for i in &vir_crate.trait_impls {
         if !used_traits.contains(&i.x.trait_path) {

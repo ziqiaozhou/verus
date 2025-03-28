@@ -820,6 +820,11 @@ fn emit_generic_bound(bound: &GenericBound, bare: bool) -> String {
             buf += " -> ";
             buf += &ret.to_string();
         }
+        Bound::Into { args, .. } => {
+            buf += "Into<";
+            buf += &args[0].to_string();
+            buf += ">";
+        }
     }
     buf
 }

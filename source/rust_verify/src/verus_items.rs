@@ -620,6 +620,7 @@ pub(crate) enum RustItem {
     IntIntrinsic(RustIntIntrinsicItem),
     AllocGlobal,
     Allocator,
+    Into,
     TryTraitBranch,
     ResidualTraitFromResidual,
     IntoIterFn,
@@ -735,6 +736,9 @@ pub(crate) fn get_rust_item_str(rust_path: Option<&str>) -> Option<RustItem> {
     }
     if rust_path == Some("core::alloc::Allocator") {
         return Some(RustItem::Allocator);
+    }
+    if rust_path == Some("core::convert::Into") {
+        return Some(RustItem::Into);
     }
     if rust_path == Some("core::slice::index::private_slice_index::Sealed") {
         return Some(RustItem::SliceSealed);
