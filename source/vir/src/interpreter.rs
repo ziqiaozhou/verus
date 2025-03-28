@@ -1127,6 +1127,7 @@ fn eval_expr_internal(ctx: &Ctx, state: &mut State, exp: &Exp) -> Result<Exp, Vi
                         | HeightTrigger
                         | Trigger(_)
                         | CoerceMode { .. }
+                        | DefaultEnsures
                         | StrLen
                         | StrIsAscii
                         | InferSpecForLoopIter { .. } => ok,
@@ -1240,6 +1241,7 @@ fn eval_expr_internal(ctx: &Ctx, state: &mut State, exp: &Exp) -> Result<Exp, Vi
                         | HeightTrigger
                         | Trigger(_)
                         | CoerceMode { .. }
+                        | DefaultEnsures
                         | StrLen
                         | StrIsAscii
                         | InferSpecForLoopIter { .. } => ok,
