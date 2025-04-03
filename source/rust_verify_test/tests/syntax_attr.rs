@@ -421,7 +421,7 @@ test_verify_one_file! {
             )]
             fn f(&self, x: u32) -> bool;
         }
-    } => Err(e) => assert_any_vir_error_msg(e, "`with` does not support trait")
+    } => Ok(())
 }
 
 test_verify_one_file! {
@@ -471,12 +471,9 @@ test_verify_one_file! {
 
         #[verus_spec]
         fn verified_call_unverified(x: u32) {
-            test_mut_tracked(0); // FAILS
+            test_mut_tracked(0);
         }
-    } => Err(e) => {
-        assert!(e.errors[0].rendered.contains("with"));
-        assert_one_fails(e)
-    }
+    } => Err(e) => assert_vir_error_msg(e, "cannot use function `crate::test_mut_tracked` which is ignored because it is either declared outside the verus! macro or it is marked as `external`")
 }
 
 test_verify_one_file! {
