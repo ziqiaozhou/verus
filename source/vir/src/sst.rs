@@ -51,6 +51,7 @@ pub enum InternalFun {
     ClosureReq,
     ClosureEns,
     DefaultEns,
+    StrongTraitEns,
     CheckDecreaseInt,
     CheckDecreaseHeight,
     OpenInvariantMask(Fun, usize),
