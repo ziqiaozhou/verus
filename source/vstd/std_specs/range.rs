@@ -52,8 +52,16 @@ pub fn ex_range_contains<Idx: PartialOrd<Idx>, U>(range: &Range<Idx>, i: &U) -> 
     U: ?Sized + PartialOrd<Idx>,
 
     ensures
-        call_ensures(<U as PartialOrd<Idx>>::lt, (i, &range.end), true) && call_ensures(<Idx as PartialOrd<U>>::le, (&range.start, i), true)<==> r,
-        call_ensures(<U as PartialOrd<Idx>>::lt, (i, &range.end), false) && call_ensures(<Idx as PartialOrd<U>>::le, (&range.start, i), false) <==> !r
+        call_ensures(<U as PartialOrd<Idx>>::lt, (i, &range.end), true) && call_ensures(
+            <Idx as PartialOrd<U>>::le,
+            (&range.start, i),
+            true,
+        ) <==> r,
+        call_ensures(<U as PartialOrd<Idx>>::lt, (i, &range.end), false) && call_ensures(
+            <Idx as PartialOrd<U>>::le,
+            (&range.start, i),
+            false,
+        ) <==> !r,
 {
     range.contains(i)
 }
