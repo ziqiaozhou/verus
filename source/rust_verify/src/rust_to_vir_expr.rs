@@ -1444,6 +1444,8 @@ fn operator_overload_to_vir<'tcx>(
     } else {
         None
     };
+
+    let mut has_default = false;
     let (fun, typ_args, args) = if let Some((op, lhs, rhs)) = bexpr {
         let do_replace = match op.node {
             BinOpKind::Eq | BinOpKind::Ne => {
@@ -1464,6 +1466,8 @@ fn operator_overload_to_vir<'tcx>(
             | BinOpKind::Gt => !is_smt_arith(bctx, lhs.span, rhs.span, &lhs.hir_id, &rhs.hir_id)?,
             _ => false,
         };
+        has_default =
+            matches!(op.node, BinOpKind::Le | BinOpKind::Lt | BinOpKind::Ge | BinOpKind::Gt);
         if !do_replace {
             return Ok(None);
         }
@@ -1471,6 +1475,29 @@ fn operator_overload_to_vir<'tcx>(
         else {
             crate::internal_err!(span, "operator needs an accessible trait");
         };
+        let mut is_default = false;
+        if has_default {
+            let lhs_ty = bctx.types.node_type(lhs.hir_id); //tcx.type_of(lhs.hir_id.owner.to_def_id()).skip_binder();
+            let rhs_ty = bctx.types.node_type(rhs.hir_id); //tcx.type_of(rhs.hir_id.owner.to_def_id()).skip_binder();
+            let param_env = tcx.param_env(bctx.fun_id);
+            let Some(assoc_fn) = tcx
+                .associated_items(trait_ref)
+                .filter_by_name_unhygienic(fun_sym)
+                .find(|item| item.kind == rustc_middle::ty::AssocKind::Fn)
+            else {
+                panic!("could not find function");
+            };
+            let substs = tcx.mk_args(&[lhs_ty.into(), rhs_ty.into()]);
+            if let Ok(Some(instance)) =
+                tcx.resolve_instance_raw(param_env.and((assoc_fn.def_id, substs)))
+            {
+                let assoc = tcx.associated_item(instance.def_id());
+                is_default =
+                    matches!(assoc.container, rustc_middle::ty::AssocItemContainer::TraitContainer);
+                dbg! {instance};
+                println!("is_default: {is_default}");
+            }
+        }
         let fun = Arc::new(FunX {
             path: trait_method_path(tcx, tcx.def_path(trait_ref), fun_sym.to_ident_string()),
         });
@@ -1513,7 +1540,11 @@ fn operator_overload_to_vir<'tcx>(
     };
     let ret_type = &expr_typ(expr)?;
     let call_target = CallTarget::Fun(
-        vir::ast::CallTargetKind::Static,
+        if has_default {
+            vir::ast::CallTargetKind::ExternalTraitDefault
+        } else {
+            vir::ast::CallTargetKind::Static
+        },
         fun.clone(),
         typ_args,
         Arc::new(vec![ImplPath::FnDefImplPath(fun)]),
