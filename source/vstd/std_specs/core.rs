@@ -157,15 +157,24 @@ pub trait ExOrd: Eq + PartialOrd {
     type ExternalTraitSpecificationFor: Ord;
 
     #[verifier::strong_call_ensures]
-    fn cmp(
-        &self,
-        other: &Self,
-    ) -> core::cmp::Ordering;
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering;
+
     // TODO: specs for max, min, clamp.
     // Note that the semantics of the default max/min changed very recently (Jan 30, 2025)
     // from being based on cmp to being based on lt.
     // Since we're still on an older version, we might want to wait to define these specs.
-
+    fn min(self, other: Self) -> (ret: Self) where Self: Sized
+        ensures
+            default_ensures(
+                exists|o|
+                    {
+                        &&& #[trigger] call_ensures(Self::cmp, (&self, &other), o)
+                        &&& (o == core::cmp::Ordering::Greater) <==> ret == other
+                        &&& (o == core::cmp::Ordering::Less || o == core::cmp::Ordering::Equal)
+                            <==> ret == self
+                    },
+            ),
+    ;
 }
 
 #[verifier::external_trait_specification]
