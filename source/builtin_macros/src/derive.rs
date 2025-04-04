@@ -55,11 +55,11 @@ pub(crate) fn spec_trait_expand_for_struct<Crate: ToTokens>(
     let spec_func_def =
         gen_spec_fun(span, &closed_or_open, fields.iter().map(|v| v as &dyn ToTokens).collect());
     let expand = quote_spanned! { span =>
-        verus!{
+        /*verus!{
             impl #impl_generics #crat::#spec_trait<#name #ty_generics> for #name #ty_generics #where_clause {
                 #spec_func_def
             }
-        }
+        }*/
     };
     proc_macro::TokenStream::from(expand)
 }
