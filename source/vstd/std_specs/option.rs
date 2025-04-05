@@ -58,11 +58,11 @@ pub trait OptionAdditionalFns<T>: Sized {
     ;
 
     proof fn tracked_take(tracked &mut self) -> (tracked t: T)
-    requires
-        old(self).is_Some(),
-    ensures
-        t == old(self).get_Some_0(),
-        self.is_None()
+        requires
+            old(self).is_Some(),
+        ensures
+            t == old(self).get_Some_0(),
+            self.is_None(),
     ;
 }
 
