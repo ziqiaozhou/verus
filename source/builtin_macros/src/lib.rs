@@ -280,6 +280,14 @@ pub fn is_trait_impl(
     input
 }
 
+/// This is a placeholder to add ghost input/output to the next function call.
+/// In stable rust, we cannot add attribute-based macro to expr/statement.
+/// Using verus_with! to tell verus to add ghost input/output.
+#[proc_macro]
+pub fn verus_with(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    proc_macro::TokenStream::new()
+}
+
 /// Add a verus proof block.
 #[proc_macro]
 pub fn proof(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
