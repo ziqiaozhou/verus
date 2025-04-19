@@ -392,7 +392,6 @@ fn gather_terms(ctxt: &mut Ctxt, ctx: &Ctx, exp: &Exp, depth: u64) -> (bool, Ter
             let depth = match op {
                 UnaryOp::Not
                 | UnaryOp::CoerceMode { .. }
-                | UnaryOp::DefaultEnsures
                 | UnaryOp::MustBeFinalized
                 | UnaryOp::MustBeElaborated
                 | UnaryOp::CastToInteger => 0,

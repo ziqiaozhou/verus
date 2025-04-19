@@ -294,7 +294,9 @@ pub fn func_decl_to_sst(
     function: &Function,
 ) -> Result<FuncDeclSst, VirErr> {
     let (pars, reqs) = req_ens_to_sst(ctx, diagnostics, function, &function.x.require, true)?;
-    let (ens_pars, enss) = req_ens_to_sst(ctx, diagnostics, function, &function.x.ensure, false)?;
+    let (ens_pars, enss0) =
+        req_ens_to_sst(ctx, diagnostics, function, &function.x.ensure.0, false)?;
+    let (_, enss1) = req_ens_to_sst(ctx, diagnostics, function, &function.x.ensure.1, false)?;
     let post_pars = params_to_pre_post_pars(&function.x.params, false);
 
     let mut inv_masks: Vec<Exps> = Vec::new();
@@ -381,7 +383,7 @@ pub fn func_decl_to_sst(
         ens_pars,
         post_pars,
         reqs: Arc::new(reqs),
-        enss: Arc::new(enss),
+        enss: (Arc::new(enss0), Arc::new(enss1)),
         inv_masks: Arc::new(inv_masks),
         unwind_condition,
         fndef_axioms: Arc::new(fndef_axiom_exps),
@@ -429,7 +431,8 @@ pub fn func_axioms_to_sst(
                 reqs.extend(crate::traits::trait_bounds_to_ast(ctx, span, &function.x.typ_bounds));
                 reqs.extend((*function.x.require).clone());
                 let req = crate::ast_util::conjoin(span, &reqs);
-                let ens = crate::ast_util::conjoin(span, &*function.x.ensure);
+                assert!(function.x.ensure.1.len() == 0);
+                let ens = crate::ast_util::conjoin(span, &*function.x.ensure.0);
                 let req_ens = crate::ast_util::mk_implies(span, &req, &ens);
                 let params = params_to_pre_post_pars(&function.x.params, false);
                 // Use expr_to_bind_decls_exp_skip_checks, skipping checks on req_ens,
@@ -757,7 +760,7 @@ pub fn func_def_to_sst(
     }
 
     // Ensures: combine from both sources
-    for expr in lo_current.function.x.ensure.iter() {
+    for expr in lo_current.function.x.ensure.0.iter().chain(function.x.ensure.1.iter()) {
         let exp = lo_current.lower_pure(ctx, &mut state, expr, &mut ens_spec_precondition_stms)?;
         if !ctx.checking_spec_preconditions() {
             let exp = crate::heuristics::maybe_insert_auto_ext_equal(ctx, &exp, |x| x.ensures);
@@ -765,11 +768,7 @@ pub fn func_def_to_sst(
         }
     }
     if let Some(lo_inheritance) = &lo_inheritance {
-        for expr in lo_inheritance.function.x.ensure.clone().iter() {
-            if matches!(&expr.x, ExprX::Unary(UnaryOp::DefaultEnsures, _)) {
-                // We're overriding req_ens_function, so we only inherit the non-default-ensures
-                continue;
-            }
+        for expr in lo_inheritance.function.x.ensure.0.clone().iter() {
             let exp = lo_inheritance.lower_pure(
                 ctx,
                 &mut state,
@@ -786,23 +785,6 @@ pub fn func_def_to_sst(
     if check_api_safety {
         let exps = crate::safe_api::axioms_for_default_spec_fns(ctx, diagnostics, function)?;
         reqs.extend(exps);
-    }
-    for e in function.x.ensure.iter() {
-        // Turn our own default_ensures into normal ensures,
-        // so that they are checked in the body of the default implementation.
-        let e = match &e.x {
-            ExprX::Unary(UnaryOp::DefaultEnsures, e) => e.clone(),
-            _ => e.clone(),
-        };
-        if ctx.checking_spec_preconditions() {
-            ens_spec_precondition_stms
-                .extend(crate::ast_to_sst::check_pure_expr(ctx, &mut state, &e)?);
-        } else {
-            // skip checks because we call expr_to_pure_exp_check above
-            let exp = expr_to_exp_skip_checks(ctx, diagnostics, &ens_pars, &e)?;
-            let exp = crate::heuristics::maybe_insert_auto_ext_equal(ctx, &exp, |x| x.ensures);
-            enss.push(exp);
-        }
     }
 
     // AST --> SST
@@ -936,7 +918,7 @@ pub fn function_to_sst(
     let has = FunctionSstHas {
         has_body: function.x.body.is_some(),
         has_requires: function.x.require.len() > 0,
-        has_ensures: function.x.ensure.len() > 0,
+        has_ensures: function.x.ensure.0.len() + function.x.ensure.1.len() > 0,
         has_decrease: function.x.decrease.len() > 0,
         has_mask_spec: function.x.mask_spec.is_some(),
         has_return_name: function.x.ens_has_return,
