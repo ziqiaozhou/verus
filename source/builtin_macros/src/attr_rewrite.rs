@@ -217,9 +217,9 @@ impl VisitMut for ExecReplacer {
         }
     }
 
-    /// convert verus_with macro to functin with ghost/tracked argumemts.
+    /// convert proof_with macro to functin with ghost/tracked argumemts.
     /// In order to apply `with` to expr/stmt without using unstable feature.
-    /// verus_with!(Tracked(x), Ghost(y);
+    /// proof_with!(Tracked(x), Ghost(y);
     /// f(a);
     fn visit_block_mut(&mut self, block: &mut syn::Block) {
         syn::visit_mut::visit_block_mut(self, block);
@@ -231,7 +231,7 @@ impl VisitMut for ExecReplacer {
         let mut with_args: TokenStream = TokenStream::new();
         for stmt in &mut block.stmts {
             match stmt {
-                syn::Stmt::Macro(syn::StmtMacro { mac, .. }) if mac.path.is_ident("verus_with") => {
+                syn::Stmt::Macro(syn::StmtMacro { mac, .. }) if mac.path.is_ident("proof_with") => {
                     syn_verus::Token![with](mac.span()).to_tokens(&mut with_args);
                     mac.tokens.to_tokens(&mut with_args);
                 }
@@ -243,7 +243,7 @@ impl VisitMut for ExecReplacer {
                 }
                 syn::Stmt::Expr(expr, _) if !with_args.is_empty() => {
                     let call_with_spec =
-                        syn_verus::parse2(with_args).expect("Failed to parse verus_with");
+                        syn_verus::parse2(with_args).expect("Failed to parse proof_with");
                     rewrite_with_expr(self.erase.clone(), expr, call_with_spec);
                     with_args = TokenStream::new();
                 }
@@ -251,7 +251,7 @@ impl VisitMut for ExecReplacer {
                     // do nothing
                 }
                 _ => {
-                    panic!("Expected a function call after verus_with! macro");
+                    panic!("Expected a function call after proof_with! macro");
                 }
             };
         }
@@ -259,7 +259,7 @@ impl VisitMut for ExecReplacer {
 }
 
 fn is_verus_proof_macro_stmt(stmt: &syn::Stmt) -> bool {
-    pub const VERUS_MACROS: [&str; 3] = ["verus_with", "proof", "proof_decl"];
+    pub const VERUS_MACROS: [&str; 3] = ["proof_with", "proof", "proof_decl"];
     if let syn::Stmt::Macro(mac_stmt) = stmt {
         let syn::Macro { path, .. } = &mac_stmt.mac;
         if let Some(ident) = path.get_ident() {
