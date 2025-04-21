@@ -93,7 +93,9 @@ pub fn rewrite_verus_attribute(
     let mut attributes = Vec::new();
     let mut contains_non_external = false;
     let mut contains_external = false;
+    let mut spec_fun = None;
     const VERIFY_ATTRS: [&str; 2] = ["rlimit", "spinoff_prover"];
+    const DUAL_ATTRS: [&str; 1] = ["dual"];
     const IGNORE_VERIFY_ATTRS: [&str; 2] = ["external", "external_body"];
 
     for arg in &args {
@@ -104,6 +106,30 @@ pub fn rewrite_verus_attribute(
         } else if VERIFY_ATTRS.contains(&path.to_string().as_str()) {
             contains_non_external = true;
             attributes.push(quote_spanned!(arg.span() => #[verifier::#arg]));
+        } else if DUAL_ATTRS.contains(&path.to_string().as_str())
+            && matches!(item, syn::Item::Fn(_))
+        {
+            if let syn::Item::Fn(f) = &mut item {
+                let mut spec_f = f.clone();
+                let ident = if let syn::Meta::List(list) = arg {
+                    syn::parse2(list.tokens.clone())
+                        .expect("unsupported tokens in verus_verify(dual(...))")
+                } else {
+                    syn::Ident::new(
+                        &format!("spec_{}", f.sig.ident.to_string()),
+                        f.sig.ident.span(),
+                    )
+                };
+                spec_f.sig.ident = ident.clone();
+                spec_f.attrs = vec![mk_verus_attr_syn(f.span(), quote! { spec })];
+                // remove proof-related macros
+                spec_f.block.as_mut().stmts.retain(|stmt| !is_verus_proof_macro_stmt(stmt));
+
+                let ident = &spec_f.sig.ident;
+                attributes
+                    .push(quote_spanned!(arg.span() => #[verifier::when_used_as_spec(#ident)]));
+                spec_fun = Some(spec_f);
+            }
         } else {
             let span = arg.span();
             return proc_macro::TokenStream::from(quote_spanned!(span =>
@@ -137,12 +163,12 @@ pub fn rewrite_verus_attribute(
         }
         _ => {}
     }
-
-    quote_spanned! {item.span()=>
+    let mut new_stream = quote_spanned! {item.span()=>
         #(#attributes)*
         #item
-    }
-    .into()
+    };
+    spec_fun.map(|f| f.to_tokens(&mut new_stream));
+    new_stream.into()
 }
 
 use syn::visit_mut::VisitMut;
@@ -230,6 +256,17 @@ impl VisitMut for ExecReplacer {
             };
         }
     }
+}
+
+fn is_verus_proof_macro_stmt(stmt: &syn::Stmt) -> bool {
+    pub const VERUS_MACROS: [&str; 3] = ["verus_with", "proof", "proof_decl"];
+    if let syn::Stmt::Macro(mac_stmt) = stmt {
+        let syn::Macro { path, .. } = &mac_stmt.mac;
+        if let Some(ident) = path.get_ident() {
+            return VERUS_MACROS.contains(&ident.to_string().as_str());
+        }
+    }
+    false
 }
 
 // We need to replace some macros/attributes.
