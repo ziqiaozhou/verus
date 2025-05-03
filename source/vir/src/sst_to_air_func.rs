@@ -83,7 +83,7 @@ pub(crate) fn func_bind(
 
 // arguments for function call f(typ_args, params)
 fn func_def_typs_args(
-    ctx: &Ctx, 
+    ctx: &Ctx,
     trait_default_ensures: Option<Expr>,
     typ_args: &Typs,
     params: &Pars,
