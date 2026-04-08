@@ -132,12 +132,10 @@ analysis that treats enums like normal structs.
 For the most part, we ignore the concept of a scope entirely in our CFG, so we don't
 include specific instructions for 'dropping' a place at the ends of its scope.
 Our analysis will simply detect that a given place isn't modified outside the scope.
-However, we *do* need to set variables back to uninitialized when we go back to the beginning
-of a loop.
 
-When handling loops, at the beginning or end of a loop, we always insert all possible
-resolution assumptions (since the structure of our AIR queries wouldn't otherwise contain
-that information, at least not when loop_isolation=true). When inserting an assumption
+For each loop, we always insert all possible resolution assumptions
+at the beginning of each loop, since the structure of our AIR queries wouldn't otherwise contain
+that information, at least not when loop_isolation=true. When inserting an assumption
 into the expression, we always check that the local variable it refers to is actually
 in scope, so, e.g., we won't end up resolving any variables declared inside a loop from
 outside the loop. In all other cases, this check shouldn't matter.
@@ -250,8 +248,7 @@ use crate::patterns::pattern_has_mut;
 use crate::sst_util::subst_typ_for_datatype;
 use air::ast_util::str_ident;
 use air::scope_map::ScopeMap;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// Updates the given function body to include AssumeResolved nodes at the appropriate places.
@@ -475,8 +472,6 @@ struct LoopEntry {
     break_bb: BBIndex,
     /// BB to jump to on 'continue'
     continue_bb: BBIndex,
-    /// Vars that should be dropped before returning to the beginning
-    drops: Rc<Vec<FlattenedPlace>>,
 }
 
 /// Represents the scope for either the top-level fn or for any closure inside it
@@ -965,12 +960,10 @@ impl<'a> Builder<'a> {
                 let outer_body_bb = self.new_bb(outer_body_bb_pos, true);
                 let post_bb = self.new_bb(AstPosition::After(expr.span.id), true);
 
-                let drops = self.loop_drops(&expr);
                 self.loops.push(LoopEntry {
                     label: label.clone(),
                     break_bb: post_bb,
                     continue_bb: outer_body_bb,
-                    drops: Rc::new(drops),
                 });
 
                 self.basic_blocks[bb].successors.push(outer_body_bb);
@@ -1015,16 +1008,11 @@ impl<'a> Builder<'a> {
 
                 let end_bb = self.build(body, inner_body_bb);
 
-                let loop_entry = self.loops.pop().unwrap();
+                let _loop_entry = self.loops.pop().unwrap();
 
                 match end_bb {
                     Err(()) => {}
                     Ok(end_bb) => {
-                        self.push_drops(
-                            end_bb,
-                            AstPosition::After(body.span.id),
-                            &loop_entry.drops,
-                        );
                         self.basic_blocks[end_bb].successors.push(outer_body_bb);
                     }
                 }
@@ -1079,7 +1067,6 @@ impl<'a> Builder<'a> {
                 if *is_break {
                     self.basic_blocks[bb].successors.push(entry.break_bb);
                 } else {
-                    self.push_drops(bb, AstPosition::Before(expr.span.id), &entry.drops);
                     self.basic_blocks[bb].successors.push(entry.continue_bb);
                 }
                 Err(())
@@ -1214,6 +1201,15 @@ impl<'a> Builder<'a> {
             StmtX::Decl { pattern, mode: _, init: None, els: None } => {
                 self.push_scope();
                 self.scope_insert_pattern(pattern);
+
+                // If declaring a variable without initializing it, then we "drop" it.
+                // This probably isn't really necessary, but it
+                // makes it easy to confirm that the usage of a variable in one loop
+                // can't be confused with its value in the next iteration of the loop.
+                if self.loops.len() > 0 {
+                    let fps = self.pattern_flattened_places(pattern);
+                    self.push_drops(bb, AstPosition::After(stmt.span.id), &fps);
+                }
 
                 Ok(bb)
             }
@@ -1421,11 +1417,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Get the local vars that should be dropped when returning to the beginning
-    /// of the the loop.
-    fn loop_drops(&mut self, loop_expr: &Expr) -> Vec<FlattenedPlace> {
-        // TODO(new_mut_ref): (blocking) should get temps? Actually, is this even necessary at all?
-        expr_all_bound_vars_with_ownership(loop_expr, &self.locals.var_modes)
+    /// Get the local vars from this pattern that should be dropped
+    fn pattern_flattened_places(&mut self, pat: &Pattern) -> Vec<FlattenedPlace> {
+        pattern_all_bound_vars_with_ownership(pat, &self.locals.var_modes)
             .iter()
             .map(|bv| {
                 let fpt = FlattenedPlaceTyped {
@@ -1916,45 +1910,6 @@ fn get_typ_inv_fun_dt(datatypes: &HashMap<Path, Datatype>, dt: &Dt) -> Option<Fu
 pub struct BoundVar {
     pub name: VarIdent,
     pub typ: Typ,
-}
-
-/// Get all locals which are bound in this expression for which we care about
-/// ownership tracking (i.e., exec and proof mode).
-pub fn expr_all_bound_vars_with_ownership(
-    expr: &Expr,
-    modes: &HashMap<VarIdent, Mode>,
-) -> Vec<BoundVar> {
-    let mut out = vec![];
-    let mut names = HashSet::<VarIdent>::new();
-    crate::ast_visitor::ast_visitor_check::<(), _, _, _, _, _, _>(
-        expr,
-        &mut (),
-        &mut |_env, _scope_map, _expr| Ok(()),
-        &mut |_env, _scope_map, _stmt| Ok(()),
-        &mut |_env, _scope_map, pattern| {
-            match &pattern.x {
-                PatternX::Var(PatternBinding { name, user_mut: _, by_ref: _, typ, copy: _ })
-                | PatternX::Binding {
-                    binding: PatternBinding { name, user_mut: _, by_ref: _, typ, copy: _ },
-                    sub_pat: _,
-                } => {
-                    let spec = matches!(&modes[name], Mode::Spec);
-                    if !spec {
-                        if !names.contains(name) {
-                            names.insert(name.clone());
-                            out.push(BoundVar { name: name.clone(), typ: typ.clone() });
-                        }
-                    }
-                }
-                _ => {}
-            }
-            Ok(())
-        },
-        &mut |_env, _scope_map, _typ, _span| Ok(()),
-        &mut |_env, _scope_map, _place| Ok(()),
-    )
-    .unwrap();
-    out
 }
 
 /// Same as above, but takes a Pattern as input
