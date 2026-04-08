@@ -1,6 +1,7 @@
 use super::super::prelude::*;
 use super::super::view::View;
 use super::cmp::{PartialOrdIs, PartialOrdSpec};
+use core::iter::Rev;
 use core::ops::{Range, RangeInclusive};
 
 verus! {
@@ -13,6 +14,11 @@ pub struct ExRange<Idx>(Range<Idx>);
 #[verifier::external_body]
 #[verifier::reject_recursive_types_in_ground_variants(Idx)]
 pub struct ExRangeInclusive<Idx>(RangeInclusive<Idx>);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[verifier::reject_recursive_types_in_ground_variants(I)]
+pub struct ExRev<I>(Rev<I>);
 
 pub struct RangeInclusiveView<Idx> {
     pub start: Idx,
@@ -127,6 +133,74 @@ impl<A: StepSpec> super::super::pervasive::ForLoopGhostIteratorNew for Range<A> 
 
     open spec fn ghost_iter(&self) -> RangeGhostIterator<A> {
         RangeGhostIterator { start: self.start, cur: self.start, end: self.end }
+    }
+}
+
+pub struct RevRangeInclusiveGhostIterator<A> {
+    pub start: A,
+    pub cur: A,
+    pub end: A,
+}
+
+impl<A> View for Rev<RangeInclusive<A>> {
+    type V = RangeInclusiveView<A>;
+
+    uninterp spec fn view(&self) -> Self::V;
+}
+
+impl<A: StepSpec> super::super::pervasive::ForLoopGhostIteratorNew for Rev<RangeInclusive<A>> {
+    type GhostIter = RevRangeInclusiveGhostIterator<A>;
+
+    open spec fn ghost_iter(&self) -> RevRangeInclusiveGhostIterator<A> {
+        RevRangeInclusiveGhostIterator { start: self@.start, cur: self@.end, end: self@.start }
+    }
+}
+
+impl<A: StepSpec> super::super::pervasive::ForLoopGhostIterator for RevRangeInclusiveGhostIterator<
+    A,
+> {
+    type ExecIter = Rev<RangeInclusive<A>>;
+
+    type Item = A;
+
+    type Decrease = int;
+
+    open spec fn exec_invariant(&self, exec_iter: &Self::ExecIter) -> bool {
+        &&& self.start == exec_iter@.start
+        &&& self.end == exec_iter@.end
+    }
+
+    open spec fn ghost_invariant(&self, init: Option<&Self>) -> bool {
+        &&& self.cur.spec_is_lt(self.end) || self.cur == self.end
+        &&& self.start.spec_is_lt(self.cur) || self.cur
+            == self.start
+        // TODO (not important): use new "matches ==>" syntax here
+        &&& if let Some(init) = init {
+            &&& init.end == init.cur
+            &&& init.start == self.start
+            &&& init.end == self.end
+        } else {
+            true
+        }
+    }
+
+    open spec fn ghost_ensures(&self) -> bool {
+        !self.cur.spec_is_lt(self.end)
+    }
+
+    open spec fn ghost_decrease(&self) -> Option<int> {
+        Some(self.cur.spec_steps_between_int(self.end))
+    }
+
+    open spec fn ghost_peek_next(&self) -> Option<A> {
+        Some(self.cur)
+    }
+
+    open spec fn ghost_advance(
+        &self,
+        _exec_iter: &Rev<RangeInclusive<A>>,
+    ) -> RevRangeInclusiveGhostIterator<A> {
+        RevRangeInclusiveGhostIterator { cur: self.cur.spec_backward_checked(1).unwrap(), ..*self }
     }
 }
 
