@@ -2097,9 +2097,12 @@ impl<'a> LocalCollection<'a> {
                 // head-normalized, so use that instead.
                 //
                 // We can skip over Box and Tracked modifiers.
-                // We also skip over shared reference modifiers to avoid panicking,
-                // though those shouldn't show up in well-formed code.
-                // (If there are any, they will show up in lifetime-checking.)
+                //
+                // We also skip over shared reference modifiers.
+                // These should not actually appear in well-formed code;
+                // however, this will only be caught by lifetime-checking,
+                // which hasn't run yet.
+                // Thus, we just skip over them to avoid panicking.
                 let typ = undecorate_box_trk_shr_decorations(&cur_typ);
 
                 match &**typ {
@@ -2149,9 +2152,7 @@ impl<'a> LocalCollection<'a> {
                         }
                     },
                     _ => {
-                        // TODO(new_mut_ref) (blocking) I think this case can actually happen since
-                        // lifetime-checking hasn't run yet?
-                        panic!("Verus internal internal: unexpected type from projections")
+                        panic!("Verus internal error: unexpected type from projections")
                     }
                 }
             }
