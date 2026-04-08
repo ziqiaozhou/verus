@@ -1270,3 +1270,16 @@ test_verify_one_file_with_options! {
         }
     } => Err(err) => assert_spec_borrowed(err, "a")
 }
+
+// TODO(new_mut_ref) (blocking): fix if-let with move test case
+test_verify_one_file_with_options! {
+    #[ignore] #[test] test_if_let_with_move ["new-mut-ref"] => verus_code! {
+        fn test_if_let_move(s: Option<String>) {
+            if let Some(a) = s {
+                let t1 = a;
+            } else {
+                let t2 = s;
+            }
+        }
+    } => Ok(())
+}
