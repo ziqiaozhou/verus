@@ -13,6 +13,7 @@ pub struct MockPackage {
     bin_names: Vec<String>,
     example_names: Vec<String>,
     deps: Vec<(DepKind, Option<String>, MockDep)>,
+    features: Vec<String>,
     verus_verify: Option<bool>,
 }
 
@@ -121,6 +122,7 @@ impl MockPackage {
             bin_names: vec![],
             example_names: vec![],
             deps: vec![],
+            features: vec![],
             verus_verify: None,
         }
     }
@@ -142,6 +144,11 @@ impl MockPackage {
 
     pub fn example(mut self, name: &str) -> Self {
         self.example_names.push(name.to_owned());
+        self
+    }
+
+    pub fn features(mut self, names: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.features.extend(names.into_iter().map(|n| n.as_ref().to_owned()));
         self
     }
 
@@ -248,6 +255,13 @@ impl MockPackage {
             manifest_lines.extend(entries);
             manifest_lines.push("".to_owned());
         }
+
+        manifest_lines.push("[features]".to_owned());
+        for feature in &self.features {
+            manifest_lines.push(feature.to_owned());
+            manifest_lines.push("".to_owned());
+        }
+        manifest_lines.push("".to_owned());
 
         if let Some(verus_verify) = self.verus_verify {
             manifest_lines.push("[package.metadata.verus]".to_owned());
