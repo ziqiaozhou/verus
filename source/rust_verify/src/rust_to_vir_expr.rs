@@ -4440,7 +4440,6 @@ pub(crate) fn deref_mut(bctx: &BodyCtxt, span: Span, place: &Place) -> Result<Pl
         if let Some(local_place) = vir::ast_util::place_get_local(place) {
             let PlaceX::Local(name) = &local_place.x else { unreachable!() };
             if bctx.is_param_for_innermost_fn_or_non_spec_closure(name) {
-                // TODO(new_mut_ref): link to documentation or something
                 return Err(vir::messages::error(
                     &place.span,
                     "to dereference a mutable reference parameter in a postcondition, disambiguate by wrapping it in either `old` or `final`",
