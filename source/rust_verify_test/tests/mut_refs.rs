@@ -2567,9 +2567,8 @@ test_verify_one_file_with_options! {
     } => Err(err) => assert_fails(err, 2)
 }
 
-// TODO(new_mut_ref): (blocking) fix this issue with nested field of Drop type
 test_verify_one_file_with_options! {
-    #[ignore] #[test] has_resolved_field_of_struct_with_drop_impl ["new-mut-ref"] => verus_code! {
+    #[test] has_resolved_field_of_struct_with_drop_impl ["new-mut-ref"] => verus_code! {
         struct X {
             s: &'static mut u64,
         }
