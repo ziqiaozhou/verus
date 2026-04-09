@@ -490,14 +490,18 @@ enum ComputedPlaceTyped {
     Exact(FlattenedPlaceTyped),
     /// Exec-mode subplace of some local, at a granularity that we don't track
     /// The place given here is the most-specific non-spec place that we might do analysis over.
-    /// e.g. if the place is like `x.g[i].f` then we'd return Partial(x.g).
+    /// Note that we don't track indices, and we don't track fields of datatypes with Drop impls.
+    /// Examples:
+    ///  * If the place is like `x.g[i].f` then we'd return Partial(x.g).
+    ///  * if the place is like `w.f` where `w` has a Drop impl, then we'd return Partial(w).
     Partial(FlattenedPlaceTyped),
-    /// Spec-mode place. This is the most specific exec-mode place that we can provide,
-    /// or None for a local.
+    /// Spec-mode place.
+    /// The field is the most specific exec-mode place that we can track,
+    /// or None if the local itself is ghost.
     /// Examples:
     ///   * If the user writes x.foo.bar, and `x.foo` is proof-mode but `x.foo.bar`
     ///     is spec-mode, then return the place `x.foo`.
-    ///   * If the local var itself is spec-mode, then None.
+    ///   * If the user writes x.foo.bar and `x` is spec-mode, then None.
     ///   * If the user writes `x.foo[i].y` where `x.foo` is exec/proof and
     ///     `y` is a ghost place then return `x.foo`
     Ghost(Option<FlattenedPlaceTyped>),
@@ -1311,9 +1315,11 @@ impl<'a> Builder<'a> {
                 }
                 match inner {
                     ComputedPlaceTyped::Exact(mut fpt) => {
-                        let mode = field_opr_to_mode(field_opr, &self.locals.datatypes);
+                        let (mode, dtor) = field_opr_to_mode(field_opr, &self.locals.datatypes);
                         if mode == Mode::Spec {
                             Ok((ComputedPlaceTyped::Ghost(Some(fpt)), bb))
+                        } else if dtor {
+                            Ok((ComputedPlaceTyped::Partial(fpt), bb))
                         } else {
                             fpt.projections.push(ProjectionTyped::StructField(
                                 FieldOpr { check: VariantCheck::None, ..field_opr.clone() },
@@ -1323,7 +1329,7 @@ impl<'a> Builder<'a> {
                         }
                     }
                     ComputedPlaceTyped::Partial(fpt) => {
-                        let mode = field_opr_to_mode(field_opr, &self.locals.datatypes);
+                        let (mode, _dtor) = field_opr_to_mode(field_opr, &self.locals.datatypes);
                         if mode == Mode::Spec {
                             Ok((ComputedPlaceTyped::Ghost(Some(fpt)), bb))
                         } else {
@@ -2331,14 +2337,18 @@ fn field_opr_to_indices(
     }
 }
 
-fn field_opr_to_mode(field_opr: &FieldOpr, datatypes: &HashMap<Path, Datatype>) -> Mode {
+/// Return:
+///  - Mode: mode of the field,
+///  - bool: does the datatype implement Drop?
+fn field_opr_to_mode(field_opr: &FieldOpr, datatypes: &HashMap<Path, Datatype>) -> (Mode, bool) {
     match &field_opr.datatype {
-        Dt::Tuple(_) => Mode::Exec,
+        Dt::Tuple(_) => (Mode::Exec, false),
         Dt::Path(path) => {
             let datatype = &datatypes[path];
             let variant = crate::ast_util::get_variant(&datatype.x.variants, &field_opr.variant);
             let field = crate::ast_util::get_field(&variant.fields, &field_opr.field);
-            field.a.1
+            let mode = field.a.1;
+            (mode, datatype.x.destructor)
         }
     }
 }
