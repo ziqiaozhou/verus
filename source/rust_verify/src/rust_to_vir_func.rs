@@ -2969,8 +2969,13 @@ pub(crate) fn check_item_const_or_static<'tcx>(
     if header.require.len() + header.recommend.len() > 0 {
         return err_span(span, "consts cannot have requires/recommends");
     }
-    if ret_mode == Mode::Spec && (header.ensure.0.len() > 0 || header.ensure.1.len() > 0) {
-        return err_span(span, "spec consts cannot have ensures");
+
+    let spec_or_dual = ret_mode == Mode::Spec || func_mode == Mode::Spec;
+    if spec_or_dual && (header.ensure.0.len() > 0 || header.ensure.1.len() > 0) {
+        return err_span(span, "const cannot have `ensures` unless it is `exec const`");
+    }
+    if spec_or_dual && header.returns.is_some() {
+        return err_span(span, "const cannot have `returns` unless it is `exec const`");
     }
 
     let ret_name = air_unique_var(RETURN_VALUE);
