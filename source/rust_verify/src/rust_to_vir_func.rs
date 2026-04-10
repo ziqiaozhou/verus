@@ -291,11 +291,10 @@ pub(crate) fn body_id_to_types<'tcx>(
     tcx.typeck(id.hir_id.owner.def_id)
 }
 
-fn body_to_vir<'tcx>(
+fn mk_bctx<'tcx>(
     ctxt: &Context<'tcx>,
     fun_id: DefId,
-    id: &BodyId,
-    body: &Body<'tcx>,
+    body_id: &BodyId,
     mode: Mode,
     external_body: bool,
     external_trait_from_to: &Option<(vir::ast::Path, vir::ast::Path, Option<vir::ast::Path>)>,
@@ -303,11 +302,10 @@ fn body_to_vir<'tcx>(
     migrate_postcondition_vars: Option<HashSet<VarIdent>>,
     param_names: Vec<VarIdent>,
     external_opaque_type_map: Option<HashMap<Path, Path>>,
-) -> Result<vir::ast::Expr, VirErr> {
-    let types = body_id_to_types(ctxt.tcx, id);
-    let bctx = BodyCtxt {
+) -> BodyCtxt<'tcx> {
+    BodyCtxt {
         ctxt: ctxt.clone(),
-        types,
+        types: body_id_to_types(ctxt.tcx, body_id),
         fun_id,
         external_trait_from_to: external_trait_from_to.as_ref().map(|e| Arc::new(e.clone())),
         mode,
@@ -324,8 +322,38 @@ fn body_to_vir<'tcx>(
         header_setting: HeaderSetting::Fn,
         unwrap_param_map: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
         external_opaque_type_map,
-    };
-    let e = expr_to_vir_consume(&bctx, &body.value, ExprModifier::REGULAR)?;
+    }
+}
+
+fn body_to_vir<'tcx>(
+    ctxt: &Context<'tcx>,
+    fun_id: DefId,
+    id: &BodyId,
+    body: &Body<'tcx>,
+    mode: Mode,
+    external_body: bool,
+    external_trait_from_to: &Option<(vir::ast::Path, vir::ast::Path, Option<vir::ast::Path>)>,
+    new_mut_ref: bool,
+    migrate_postcondition_vars: Option<HashSet<VarIdent>>,
+    param_names: Vec<VarIdent>,
+    external_opaque_type_map: Option<HashMap<Path, Path>>,
+    is_async: bool,
+) -> Result<vir::ast::Expr, VirErr> {
+    let bctx = mk_bctx(
+        ctxt,
+        fun_id,
+        id,
+        mode,
+        external_body,
+        external_trait_from_to,
+        new_mut_ref,
+        migrate_postcondition_vars,
+        param_names,
+        external_opaque_type_map,
+    );
+    let body_expr =
+        if is_async { extract_desugared_async_body(&bctx.ctxt, body)? } else { &body.value };
+    let e = expr_to_vir_consume(&bctx, body_expr, ExprModifier::REGULAR)?;
 
     if external_body {
         match &e.x {
@@ -384,59 +412,6 @@ pub(crate) fn extract_desugared_async_body<'tcx>(
     };
 
     Ok(async_body_expr)
-}
-
-pub(crate) fn async_body_to_vir<'tcx>(
-    ctxt: &Context<'tcx>,
-    fun_id: DefId,
-    id: &BodyId,
-    body: &Body<'tcx>,
-    mode: Mode,
-    external_body: bool,
-    external_trait_from_to: &Option<(vir::ast::Path, vir::ast::Path, Option<vir::ast::Path>)>,
-    new_mut_ref: bool,
-    migrate_postcondition_vars: Option<HashSet<VarIdent>>,
-    param_names: Vec<VarIdent>,
-    external_opaque_type_map: Option<HashMap<Path, Path>>,
-) -> Result<vir::ast::Expr, VirErr> {
-    let types = body_id_to_types(ctxt.tcx, id);
-    let bctx = BodyCtxt {
-        ctxt: ctxt.clone(),
-        types,
-        fun_id,
-        external_trait_from_to: external_trait_from_to.as_ref().map(|e| Arc::new(e.clone())),
-        mode,
-        external_body,
-        in_ghost: mode != Mode::Exec,
-        loop_isolation: false,
-        new_mut_ref,
-        migrate_postcondition_vars,
-        in_fn_sig: false,
-        in_postcondition: false,
-        in_old: false,
-        in_explicit_prophecy_node: false,
-        params: std::rc::Rc::new(vec![param_names]),
-        header_setting: HeaderSetting::Fn,
-        unwrap_param_map: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
-        external_opaque_type_map,
-    };
-
-    let async_body_expr = extract_desugared_async_body(&bctx.ctxt, body)?;
-
-    let e = crate::rust_to_vir_expr::expr_to_vir_consume(
-        &bctx,
-        async_body_expr,
-        ExprModifier::REGULAR,
-    )?;
-
-    if external_body {
-        match &e.x {
-            vir::ast::ExprX::NeverToAny(e) => Ok(e.clone()),
-            _ => Ok(e),
-        }
-    } else {
-        Ok(e)
-    }
 }
 
 fn check_fn_decl<'tcx>(
@@ -1817,8 +1792,12 @@ pub(crate) fn check_item_fn<'tcx>(
 
     let n_params = vir_params.len();
 
-    let (vir_body, header, body_hir_id) = match (&body_id, sig.asyncness()) {
-        (CheckItemFnEither::BodyId(body_id), rustc_hir::IsAsync::NotAsync) => {
+    let (vir_body, header, body_hir_id) = match &body_id {
+        CheckItemFnEither::BodyId(body_id) => {
+            let is_async = match sig.asyncness() {
+                rustc_hir::IsAsync::NotAsync => false,
+                rustc_hir::IsAsync::Async(..) => true,
+            };
             let body = find_body(ctxt, body_id);
             let external_body = vattrs.external_body || vattrs.external_fn_specification;
             let param_names = vir_params.iter().map(|p| p.0.x.name.clone()).collect::<Vec<_>>();
@@ -1834,33 +1813,13 @@ pub(crate) fn check_item_fn<'tcx>(
                 migrate_postcondition_vars.clone(),
                 param_names,
                 assume_specification_opaque_type_map.clone(),
+                is_async,
             )?;
             let header =
                 vir::headers::read_header(&mut vir_body, &vir::headers::HeaderAllows::All)?;
             (Some(vir_body), header, Some(body.value.hir_id))
         }
-        (CheckItemFnEither::BodyId(body_id), rustc_hir::IsAsync::Async(..)) => {
-            let body = find_body(ctxt, body_id);
-            let external_body = vattrs.external_body || vattrs.external_fn_specification;
-            let param_names = vir_params.iter().map(|p| p.0.x.name.clone()).collect::<Vec<_>>();
-            let mut vir_body = async_body_to_vir(
-                ctxt,
-                id,
-                body_id,
-                body,
-                mode,
-                external_body,
-                &external_trait_from_to,
-                new_mut_ref,
-                migrate_postcondition_vars.clone(),
-                param_names,
-                assume_specification_opaque_type_map.clone(),
-            )?;
-            let header =
-                vir::headers::read_header(&mut vir_body, &vir::headers::HeaderAllows::All)?;
-            (Some(vir_body), header, Some(body.value.hir_id))
-        }
-        (CheckItemFnEither::ParamNames(_params), _) => {
+        CheckItemFnEither::ParamNames(_params) => {
             let header =
                 vir::headers::read_header_block(&mut vec![], &vir::headers::HeaderAllows::All)?;
             (None, header, None)
@@ -2424,57 +2383,18 @@ fn handle_async_func<'tcx>(
     param_names: Vec<VarIdent>,
     assume_specification_opaque_type_map: Option<HashMap<Path, Path>>,
 ) -> Result<FunctionX, VirErr> {
-    let types = body_id_to_types(ctxt.tcx, body_id);
-    let bctx = BodyCtxt {
-        ctxt: ctxt.clone(),
-        types,
+    let bctx = mk_bctx(
+        ctxt,
         fun_id,
-        external_trait_from_to: external_trait_from_to.as_ref().map(|e| Arc::new(e.clone())),
+        body_id,
         mode,
-        external_body: false,
-        in_ghost: mode != Mode::Exec,
-        loop_isolation: false,
+        false,
+        external_trait_from_to,
         new_mut_ref,
-        migrate_postcondition_vars: migrate_postcondition_vars,
-        header_setting: HeaderSetting::Fn,
-        in_fn_sig: false,
-        in_postcondition: false,
-        in_old: false,
-        in_explicit_prophecy_node: false,
-        params: std::rc::Rc::new(vec![param_names]),
-        unwrap_param_map: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
-        external_opaque_type_map: assume_specification_opaque_type_map,
-    };
-
-    let FunctionX {
-        name,
-        proxy,
-        kind,
-        visibility,
-        body_visibility,
-        opaqueness,
-        owning_module,
-        mode,
-        typ_params,
-        typ_bounds,
-        mut params,
-        ret,
-        ens_has_return,
-        require,
-        ensure,
-        returns,
-        decrease,
-        decrease_when,
-        decrease_by,
-        fndef_axioms,
-        mask_spec,
-        unwind_spec,
-        item_kind,
-        attrs,
-        body,
-        extra_dependencies,
-        async_ret,
-    } = func;
+        migrate_postcondition_vars,
+        param_names,
+        assume_specification_opaque_type_map,
+    );
 
     // Each async function body is desugared into a closure.
     // At the beginning of the async function
@@ -2525,7 +2445,7 @@ fn handle_async_func<'tcx>(
     }
 
     let mut rewitten_params = vec![];
-    for param in params.iter() {
+    for param in func.params.iter() {
         rewitten_params.push(Spanned::new(
             param.span.clone(),
             ParamX {
@@ -2538,37 +2458,9 @@ fn handle_async_func<'tcx>(
             },
         ));
     }
-    params = Arc::new(rewitten_params);
+    let params = Arc::new(rewitten_params);
 
-    Ok(FunctionX {
-        name,
-        proxy,
-        kind,
-        visibility,
-        body_visibility,
-        opaqueness,
-        owning_module,
-        mode,
-        typ_params,
-        typ_bounds,
-        params,
-        ret,
-        ens_has_return,
-        require,
-        ensure,
-        returns,
-        decrease,
-        decrease_when,
-        decrease_by,
-        fndef_axioms,
-        mask_spec,
-        unwind_spec,
-        item_kind,
-        attrs,
-        body,
-        extra_dependencies,
-        async_ret,
-    })
+    Ok(FunctionX { params, ..func })
 }
 
 fn check_generics_for_invariant_fn<'tcx>(
@@ -3068,6 +2960,7 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         None,
         vec![],
         None,
+        false,
     )?;
     let header = vir::headers::read_header(
         &mut vir_body,
