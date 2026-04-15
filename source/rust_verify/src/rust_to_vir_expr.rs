@@ -1631,22 +1631,12 @@ enum OpKind {
     AssignOp(rustc_hir::AssignOp),
 }
 
-/// Get the type of an operator operand after applying only pointer coercions
-/// (e.g., *mut T -> *const T), without applying other adjustments like auto-borrow.
-/// This is needed because expr_ty_adjusted applies all adjustments including
-/// auto-borrow, which would give &T instead of T for trait resolution.
-fn operand_type_for_trait<'tcx>(
-    types: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
-    operand: &Expr<'tcx>,
-) -> rustc_middle::ty::Ty<'tcx> {
-    let mut ty = types.node_type(operand.hir_id);
-    for adj in types.expr_adjustments(operand) {
-        match adj.kind {
-            rustc_middle::ty::adjustment::Adjust::Pointer(_) => ty = adj.target,
-            _ => {}
-        }
+/// If `ty` is a reference type, return the referent; otherwise return `ty` unchanged.
+fn strip_ref<'tcx>(ty: rustc_middle::ty::Ty<'tcx>) -> rustc_middle::ty::Ty<'tcx> {
+    match ty.kind() {
+        TyKind::Ref(_, inner_ty, _) => *inner_ty,
+        _ => ty,
     }
-    ty
 }
 
 // Add lang_item_for_op from rust/compiler/rustc_hir_typeck/src/op.rs
@@ -1784,11 +1774,12 @@ fn operator_overload_to_vir<'tcx>(
         let (fun_sym, Some(trait_id)) = lang_item_for_op(tcx, op, span)? else {
             crate::internal_err!(span, "operator needs an accessible trait");
         };
-        // When constructing the substs for trait resolution, we need to account
-        // for pointer coercions (e.g., *mut T -> *const T), but not other
-        // adjustments like auto-borrow (which would give &T instead of T).
-        let lhs_ty = operand_type_for_trait(bctx.types, lhs);
-        let rhs_ty = operand_type_for_trait(bctx.types, rhs);
+        // When constructing the substs for trait resolution, we use
+        // expr_ty_adjusted to account for all adjustments (e.g., pointer
+        // coercions like *mut T -> *const T), then strip off any Ref
+        // since auto-borrow adds a reference we don't want here.
+        let lhs_ty = strip_ref(bctx.types.expr_ty_adjusted(lhs));
+        let rhs_ty = strip_ref(bctx.types.expr_ty_adjusted(rhs));
         let substs = tcx.mk_args(&[lhs_ty.into(), rhs_ty.into()]);
 
         let args = vec![lhs, rhs];
@@ -1799,7 +1790,7 @@ fn operator_overload_to_vir<'tcx>(
         };
 
         let args = vec![arg];
-        let arg_ty = operand_type_for_trait(bctx.types, arg);
+        let arg_ty = strip_ref(bctx.types.expr_ty_adjusted(arg));
         let substs = tcx.mk_args(&[arg_ty.into()]);
         (trait_id, fun_sym, args, substs)
     } else {
