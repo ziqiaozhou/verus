@@ -1,4 +1,4 @@
-use crate::ast::{Dt, Fun, FunX, InvAtomicity, Path, PathX, VarIdent};
+use crate::ast::{ClosureKind, Dt, Fun, FunX, InvAtomicity, Path, PathX, VarIdent};
 use crate::ast_util::air_unique_var;
 use crate::messages::Span;
 use crate::util::vec_map;
@@ -47,6 +47,7 @@ const PREFIX_FUEL_ID: &str = "fuel%";
 const PREFIX_FUEL_NAT: &str = "fuel_nat%";
 const PREFIX_REQUIRES: &str = "req%";
 const PREFIX_ENSURES: &str = "ens%";
+const PREFIX_ENSURES_ASYNC_RET: &str = "VERUS_ASYNC_FUNC_RETURN_VALUE_";
 const PREFIX_OPEN_INV: &str = "openinv%";
 const PREFIX_NO_UNWIND_WHEN: &str = "no_unwind_when%";
 const PREFIX_RECURSIVE: &str = "rec%";
@@ -66,6 +67,7 @@ const PREFIX_TUPLE_PARAM: &str = "T%";
 const PREFIX_SPEC_FN_TYPE: &str = "fun%";
 const PREFIX_IMPL_IDENT: &str = "impl&%";
 pub(crate) const PREFIX_IMPL_TUPLE: &str = "impl_tuple&%";
+pub(crate) const PREFIX_IMPL_CLOSURE: &str = "impl_closure&%";
 const PREFIX_PROJECT: &str = "proj%";
 const PREFIX_PROJECT_DECORATION: &str = "proj%%";
 pub(crate) const PREFIX_DEFAULT_TYP_PARAM: &str = "def_typ_param%";
@@ -203,7 +205,6 @@ pub const AS_TYPE: &str = "as_type";
 pub const MK_FUN: &str = "mk_fun";
 pub const CONST_INT: &str = "const_int";
 pub const CONST_BOOL: &str = "const_bool";
-pub const CHECK_DECREASE_INT: &str = "check_decrease_int";
 pub const CHECK_DECREASE_HEIGHT: &str = "check_decrease_height";
 pub const HEIGHT: &str = "height";
 pub const HEIGHT_LT: &str = "height_lt";
@@ -565,6 +566,10 @@ pub(crate) fn impl_tuple(trait_suffix: &str, arity: usize) -> Ident {
     Arc::new(format!("{}{}{}", PREFIX_IMPL_TUPLE, trait_suffix, arity))
 }
 
+pub(crate) fn impl_closure(kind: ClosureKind, id: usize) -> Ident {
+    Arc::new(format!("{}{}{}", PREFIX_IMPL_CLOSURE, kind, id))
+}
+
 pub fn projection(decoration: bool, trait_path: &Path, name: &Ident) -> Ident {
     let proj = if decoration { PREFIX_PROJECT_DECORATION } else { PREFIX_PROJECT };
     Arc::new(format!("{}{}{}{}", proj, path_to_string(trait_path), PROJECT_SEPARATOR, name))
@@ -620,6 +625,10 @@ pub fn prefix_requires(ident: &Ident) -> Ident {
 
 pub fn prefix_ensures(ident: &Ident) -> Ident {
     Arc::new(PREFIX_ENSURES.to_string() + ident)
+}
+
+pub fn prefix_ensures_async_ret(ident: &Ident) -> Ident {
+    Arc::new(PREFIX_ENSURES_ASYNC_RET.to_string() + ident)
 }
 
 pub fn prefix_open_inv(ident: &Ident, i: usize) -> Ident {
@@ -1140,6 +1149,16 @@ pub fn unique_var_name(
         }
     }
     out
+}
+
+pub fn exec_await_path(vstd_crate_name: &Option<Ident>) -> Path {
+    Arc::new(PathX {
+        krate: vstd_crate_name.clone(),
+        segments: Arc::new(vec![
+            Arc::new("future".to_string()),
+            Arc::new("exec_await".to_string()),
+        ]),
+    })
 }
 
 pub fn nonstatic_call_fun(vstd_crate_name: &Ident, is_proof: bool) -> Fun {

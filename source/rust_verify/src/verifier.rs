@@ -94,9 +94,18 @@ impl air::messages::Diagnostics for Reporter<'_> {
 
         let mut multispan = MultiSpan::from_spans(v);
 
-        for MessageLabel { note, span: sp, is_proof_note } in &msg.labels {
+        let mut replacement_error_note: Option<String> = None;
+        for MessageLabel { note, span: sp, is_proof_note, is_custom_err } in &msg.labels {
+            let span = self.spans.from_air_span(&sp, Some(self.source_map));
+            if *is_custom_err {
+                if replacement_error_note.is_none() {
+                    replacement_error_note = Some(note.clone());
+                }
+                continue;
+            }
+
             let note = if *is_proof_note { format!("note: {}", note) } else { note.clone() };
-            if let Some(span) = self.spans.from_air_span(&sp, Some(self.source_map)) {
+            if let Some(span) = span {
                 multispan.push_span_label(span, note);
             } else {
                 dbg!(&note, &sp.as_string);
@@ -127,7 +136,9 @@ impl air::messages::Diagnostics for Reporter<'_> {
                 &msg.help,
             ),
             MessageLevel::Error => emit_with_diagnostic_details(
-                self.compiler_diagnostics.handle().struct_err(msg.note.clone()),
+                self.compiler_diagnostics
+                    .handle()
+                    .struct_err(replacement_error_note.clone().unwrap_or_else(|| msg.note.clone())),
                 multispan,
                 &msg.help,
             ),
@@ -911,7 +922,7 @@ impl Verifier {
                     // Collect `proof_note` labels related to this failure.
                     let mut proof_notes = HashSet::new();
                     for label in &error.labels {
-                        if label.is_proof_note {
+                        if label.is_proof_note && !label.is_custom_err {
                             proof_notes.insert(label.note.clone());
                         }
                     }
@@ -962,7 +973,7 @@ impl Verifier {
                 }
                 ValidityResult::UnexpectedOutput(err) => {
                     util::PANIC_ON_DROP_VEC.store(false, std::sync::atomic::Ordering::SeqCst);
-                    panic!("unexpected output from solver: {}", err);
+                    panic!("unexpected output from solver: {} {}", &context.span.as_string, err);
                 }
             }
         }
@@ -3102,7 +3113,6 @@ pub(crate) struct VerifierCallbacksEraseMacro {
     pub(crate) tc_start_time: Option<Instant>,
     /// end time of lifetime analysys
     pub(crate) tc_end_time: Option<Instant>,
-    pub(crate) rustc_args: Vec<String>,
     pub(crate) verus_externs: Option<VerusExterns>,
     pub(crate) spans: Option<SpanContext>,
 }
@@ -3324,18 +3334,6 @@ impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
                 Ok(msgs) => {
                     if msgs.len() > 0 {
                         self.verifier.encountered_vir_error = true;
-                        // We found lifetime errors.
-                        // We could print them immediately, but instead,
-                        // let's first run rustc's standard lifetime checking
-                        // because the error messages are likely to be better.
-                        let compile_status = crate::driver::run_with_erase_macro_compile(
-                            self.rustc_args.clone(),
-                            false,
-                            self.verifier.args.vstd,
-                        );
-                        if compile_status.is_err() {
-                            return rustc_driver::Compilation::Stop;
-                        }
                         for msg in &msgs {
                             reporter.report(&msg.clone().to_any());
                         }

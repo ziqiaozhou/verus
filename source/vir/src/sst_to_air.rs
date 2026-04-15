@@ -1,8 +1,8 @@
 use crate::ast::{
     ArithOp, ArrayKind, AssertQueryMode, BinaryOp, BitwiseOp, Dt, FieldOpr, Fun, GenericBoundX,
     Ident, Idents, InequalityOp, IntRange, IntegerTypeBitwidth, IntegerTypeBoundKind, Mode, Path,
-    PathX, Primitive, SpannedTyped, Typ, TypDecoration, TypDecorationArg, TypX, Typs, UnaryOp,
-    UnaryOpr, UnwindSpec, VarAt, VarIdent, VariantCheck, VirErr, Visibility,
+    PathX, Primitive, ProofNoteLabel, SpannedTyped, Typ, TypDecoration, TypDecorationArg, TypX,
+    Typs, UnaryOp, UnaryOpr, UnwindSpec, VarAt, VarIdent, VariantCheck, VirErr, Visibility,
 };
 use crate::ast_util::{
     LowerUniqueVar, fun_as_friendly_rust_name, get_field, get_variant, typ_args_for_datatype_typ,
@@ -52,7 +52,7 @@ pub struct PostConditionInfo {
     pub dest: Option<VarIdent>,
     /// Post-conditions (only used in non-recommends-checking mode)
     /// Each entry carries the span, the AIR expression, and an optional `proof_note` label.
-    pub ens_exprs: Vec<(Span, Expr, Option<Arc<String>>)>,
+    pub ens_exprs: Vec<(Span, Expr, Option<ProofNoteLabel>)>,
     /// Recommends checks (only used in recommends-checking mode)
     pub ens_spec_precondition_stms: Stms,
     /// Extra info about PostCondition for error reporting
@@ -934,7 +934,6 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                     InternalFun::ClosureReq => str_ident(crate::def::CLOSURE_REQ),
                     InternalFun::ClosureEns => str_ident(crate::def::CLOSURE_ENS),
                     InternalFun::DefaultEns => str_ident(crate::def::DEFAULT_ENS),
-                    InternalFun::CheckDecreaseInt => str_ident(crate::def::CHECK_DECREASE_INT),
                     InternalFun::CheckDecreaseHeight => {
                         str_ident(crate::def::CHECK_DECREASE_HEIGHT)
                     }
@@ -1773,7 +1772,7 @@ fn assume_other_fields_unchanged(
     snapshot_name: &str,
     stm_span: &Span,
     base: &UniqueIdent,
-    mutated_fields: &LocFieldInfo<Vec<Vec<FieldOpr>>>,
+    mutated_fields: &LocFieldInfo<Vec<Vec<(FieldOpr, Typ)>>>,
     expr_ctxt: &ExprCtxt,
 ) -> Result<Option<Stmt>, VirErr> {
     let LocFieldInfo { base_typ, base_span, a: updates } = mutated_fields;
@@ -1795,18 +1794,18 @@ fn assume_other_fields_unchanged_inner(
     snapshot_name: &str,
     stm_span: &Span,
     base: &Exp,
-    updates: &Vec<Vec<FieldOpr>>,
+    updates: &Vec<Vec<(FieldOpr, Typ)>>,
     expr_ctxt: &ExprCtxt,
 ) -> Result<Vec<Expr>, VirErr> {
     match &updates[..] {
         [f] if f.len() == 0 => Ok(vec![]),
         _ => {
             let mut updated_fields: BTreeMap<_, Vec<_>> = BTreeMap::new();
-            let FieldOpr { datatype: dt, variant, field: _, get_variant: _, check: _ } =
+            let (FieldOpr { datatype: dt, variant, field: _, get_variant: _, check: _ }, _) =
                 &updates[0][0];
             for u in updates {
-                assert!(u[0].datatype == *dt && u[0].variant == *variant);
-                updated_fields.entry(&u[0].field).or_insert(Vec::new()).push(u[1..].to_vec());
+                assert!(u[0].0.datatype == *dt && u[0].0.variant == *variant);
+                updated_fields.entry(&u[0].0.field).or_insert(Vec::new()).push(u[1..].to_vec());
             }
             let datatype = &ctx.datatype_map[dt];
             let datatype_fields = &get_variant(&datatype.x.variants, variant).fields;
@@ -1840,8 +1839,28 @@ fn assume_other_fields_unchanged_inner(
                         base.clone()
                     };
 
-                    let typ_args = typ_args_for_datatype_typ(&base_exp.typ);
-                    let typ = subst_typ_for_datatype(&datatype.x.typ_params, typ_args, &field.a.0);
+                    let typ = if let Some(first_update) =
+                        updates.iter().find(|u| u[0].0.field == field.name)
+                    {
+                        // Mutated fields need a precise type for `field_exp` because
+                        // `assume_other_fields_unchanged_inner` recurses into them.
+                        // The AST already contains the correct normalized type for this
+                        // field (typeck has resolved any projections), so we use it
+                        // directly instead of trying to reconstruct it from `base_exp.typ`.
+                        first_update[0].1.clone()
+                    } else {
+                        // Unmodified fields only need a type to emit an equality
+                        // `old == new`; they are never recursed into, so `field_exp.typ`
+                        // does not need to be fully normalized.
+                        //
+                        // `base_exp.typ` is guaranteed to be a concrete datatype here:
+                        // - at the top level it is the variable's declared type;
+                        // - inside a recursive call it is the normalized type taken from
+                        //   `updates` for the mutated parent field.
+                        // Hence `typ_args_for_datatype_typ` will not panic.
+                        let typ_args = typ_args_for_datatype_typ(&base_exp.typ);
+                        subst_typ_for_datatype(&datatype.x.typ_params, typ_args, &field.a.0)
+                    };
                     let typ = if crate::poly::typ_is_poly(ctx, &field.a.0) {
                         crate::poly::coerce_typ_to_poly(ctx, &typ)
                     } else {
@@ -2045,7 +2064,12 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                         .entry(base_var)
                         .or_insert(LocFieldInfo { base_typ, base_span, a: Vec::new() })
                         .a
-                        .push(fields.iter().map(|o| o.opr.expect_field().clone()).collect());
+                        .push(
+                            fields
+                                .iter()
+                                .map(|o| (o.opr.expect_field().clone(), o.field_typ.clone()))
+                                .collect(),
+                        );
                     let arg_old = snapshotted_var_locs(arg, SNAPSHOT_CALL);
                     ens_args_wo_typ.push(exp_to_expr(ctx, &arg_old, expr_ctxt)?);
                     ens_args_wo_typ.push(exp_to_expr(ctx, &arg_x, expr_ctxt)?);
@@ -2177,7 +2201,8 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                 ),
             };
             if let Some(label) = sst_exp_get_proof_note(expr) {
-                error = error.proof_note_label(&stm.span, label.to_string());
+                error =
+                    error.proof_note_label(&stm.span, label.text.to_string(), label.is_custom_err);
             }
             if ctx.debug {
                 state.map_span(&stm, SpanKind::Full);
@@ -2217,7 +2242,7 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                             ctx,
                             state,
                             &ret_exp.span,
-                            &ret_exp.typ,
+                            &try_reveal_opaque_ty_ctor(ret_exp),
                             &ret,
                         )?);
                     }
@@ -2249,7 +2274,11 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                                 let new_error = base_error
                                     .primary_label(&span, crate::def::THIS_POST_FAILED.to_string());
                                 if let Some(label) = proof_note {
-                                    new_error.proof_note_label(span, label.to_string())
+                                    new_error.proof_note_label(
+                                        span,
+                                        label.text.to_string(),
+                                        label.is_custom_err,
+                                    )
                                 } else {
                                     new_error
                                 }
@@ -3119,7 +3148,7 @@ pub(crate) fn body_stm_to_air(
 
     let initial_sid = Arc::new("0_entry".to_string());
 
-    let mut ens_exprs: Vec<(Span, Expr, Option<Arc<String>>)> = Vec::new();
+    let mut ens_exprs: Vec<(Span, Expr, Option<ProofNoteLabel>)> = Vec::new();
     for ens in post_condition.ens_exps.iter() {
         let expr_ctxt = &ExprCtxt::new_mode(ExprMode::Body);
         let note = sst_exp_get_proof_note(ens);
@@ -3288,6 +3317,62 @@ pub(crate) fn body_stm_to_air(
     Ok((state.commands, state.snap_map))
 }
 
+/// At function returns, we need to tell the SMT solver that the  
+/// future (impl Future<Output = T>) created by the async function will return the return value of
+/// the function body if await() is called on it.
+// fn async_fn_return_to_stmts(
+//     ctx: &Ctx,
+//     state: &mut State,
+//     expr_ctxt: &ExprCtxt,
+//     ret_op: &mut Option<Arc<TypX>>,
+//     async_rete: &Option<Arc<TypX>>,
+//     ret_exp: &Arc<SpannedTyped<ExpX>>,
+//     stm: &Stm,
+//     dest_id: VarIdent,
+// ) -> Result<Vec<Stmt>, VirErr> {
+//     let ret = ret_op.as_ref().expect("async function has no return type");
+//     let async_rete =
+//         async_rete.as_ref().expect("async function has no return type");
+//     let call = ExpX::Call(
+//         CallFun::Fun(
+//             Arc::new(crate::ast::FunX {
+//                 path: Arc::new(PathX {
+//                     krate: Some(Arc::new("vstd".to_string())),
+//                     segments: Arc::new(vec![
+//                         Arc::new("future".to_string()),
+//                         Arc::new("FutureAdditionalSpecFns".to_string()),
+//                         Arc::new("view".to_string()),
+//                     ]),
+//                 }),
+//             }),
+//             None,
+//         ),
+//         Arc::new(vec![ret.clone(), ret_exp.typ.clone()]),
+//         Arc::new(vec![SpannedTyped::new(&stm.span, &ret, ExpX::Var(dest_id.clone()))]),
+//     );
+//     let eq = ExprX::Binary(
+//         air::ast::BinaryOp::Eq,
+//         exp_to_expr(ctx, ret_exp, expr_ctxt)?,
+//         exp_to_expr(ctx, &SpannedTyped::new(&stm.span, &ret, call), expr_ctxt)?,
+//     );
+
+//     *ret_op = Some(async_rete.clone());
+//     Ok(vec![Arc::new(StmtX::Assume(eq.into()))])
+// }
+
+fn try_reveal_opaque_ty_ctor(exp: &Exp) -> Typ {
+    match &exp.x {
+        ExpX::Ctor(Dt::Tuple(len), _, items) => Arc::new(TypX::Datatype(
+            Dt::Tuple(*len),
+            Arc::new(items.iter().map(|x| try_reveal_opaque_ty_ctor(&x.a)).collect()),
+            Arc::new(vec![]),
+        )),
+        ExpX::UnaryOpr(_, exp) => try_reveal_opaque_ty_ctor(exp),
+        ExpX::If(_, exp, _) => try_reveal_opaque_ty_ctor(exp),
+        _ => exp.typ.clone(),
+    }
+}
+
 /// At function returns, we need to tell the SMT solver that the newly created opaque type is indeed the same type
 /// as the returned expression.
 fn opaque_ty_additional_stmts(
@@ -3297,6 +3382,10 @@ fn opaque_ty_additional_stmts(
     ret_exp_typ: &Typ,
     ret_typ: &Typ,
 ) -> Result<Vec<Stmt>, VirErr> {
+    if let TypX::Boxed(typ) = &**ret_exp_typ {
+        return opaque_ty_additional_stmts(ctx, state, span, typ, ret_typ);
+    }
+
     let mut stmts = vec![];
     let mut emit_eq_stmts = || {
         let ret_expr_typs = typ_to_ids(ctx, &ret_exp_typ);
@@ -3372,6 +3461,9 @@ fn opaque_ty_additional_stmts(
         }
         (TypX::Opaque { .. }, _) => {
             emit_eq_stmts();
+        }
+        (_, TypX::Boxed(typ)) => {
+            return opaque_ty_additional_stmts(ctx, state, span, typ, ret_typ);
         }
         _ => {}
     }

@@ -267,7 +267,7 @@ pub enum TypX {
     /// `spec_fn` type (t1, ..., tn) -> t0.
     SpecFn(Typs, Typ),
     /// Executable function types (with a requires and ensures)
-    AnonymousClosure(Typs, Typ, usize),
+    AnonymousClosure(Typs, Typ, ClosureKind, usize),
     /// Corresponds to Rust's FnDef type
     /// Typs are generic type args
     /// If Fun is a trait function, then the Option<Fun> has the statically resolved
@@ -508,6 +508,14 @@ pub enum IntegerTypeBoundKind {
     ArchWordBits,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, ToDebugSNode)]
+pub struct ProofNoteLabel {
+    /// The text to show in error messages.
+    pub text: Arc<String>,
+    /// Whether this label acts as a custom error message.
+    pub is_custom_err: bool,
+}
+
 /// More complex unary operations (requires Clone rather than Copy)
 /// (Below, "boxed" refers to boxing types in the SMT encoding, not the Rust Box type)
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, ToDebugSNode)]
@@ -533,7 +541,7 @@ pub enum UnaryOpr {
     /// Custom diagnostic message
     CustomErr(Arc<String>),
     /// Label from a `proof_note` attribute.
-    ProofNote(Arc<String>),
+    ProofNote(ProofNoteLabel),
     /// Predicate over any type that indicates its mutable references has resolved.
     /// For &mut T this says the prophetic value == the current value.
     /// For primitive types this is trivially true.
@@ -1004,6 +1012,13 @@ pub struct CtorUpdateTail {
     pub taken_fields: Arc<Vec<(Ident, UnfinalizedReadKind)>>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToDebugSNode, Hash, PartialEq, Eq)]
+pub enum ClosureKind {
+    Fn,
+    FnMut,
+    FnOnce,
+}
+
 /// Expression, similar to rustc_hir::Expr
 pub type Expr = Arc<SpannedTyped<ExprX>>;
 pub type Exprs = Arc<Vec<Expr>>;
@@ -1184,6 +1199,8 @@ pub enum ExprX {
     /// and well-formedness checks, but otherwise has no meaning. The `Old` node is
     /// ignored after these checks are complete.
     Old(Expr),
+    /// Async await
+    Await(Expr),
 }
 
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone, Copy)]
@@ -1480,6 +1497,8 @@ pub struct FunctionAttrsX {
     pub tracked_swap: bool,
     /// Is this function `Option::tracked_take`, which requires special handling
     pub tracked_take_option: bool,
+    /// Whether the function is an async function
+    pub is_async: bool,
 }
 
 /// Function specification of its invariant mask
@@ -1628,6 +1647,8 @@ pub struct FunctionX {
     /// Extra dependencies, only used for for the purposes of recursion-well-foundedness
     /// Useful only for trusted fns.
     pub extra_dependencies: Vec<Fun>,
+    /// The return type of the async function i.e., impl Future<Output>.
+    pub async_ret: Option<Param>,
 }
 
 pub type RevealGroup = Arc<Spanned<RevealGroupX>>;
