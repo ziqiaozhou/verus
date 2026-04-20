@@ -1777,8 +1777,7 @@ fn operator_overload_to_vir<'tcx>(
         };
         // When constructing the substs for trait resolution, we use
         // expr_ty_adjusted to account for all adjustments (e.g., pointer
-        // coercions like *mut T -> *const T), then strip off any Ref
-        // since auto-borrow adds a reference we don't want here.
+        // coercions like *mut T -> *const T), then strip off any Refs.
         let lhs_ty = strip_ref(bctx.types.expr_ty_adjusted(lhs));
         let rhs_ty = strip_ref(bctx.types.expr_ty_adjusted(rhs));
         let substs = tcx.mk_args(&[lhs_ty.into(), rhs_ty.into()]);
