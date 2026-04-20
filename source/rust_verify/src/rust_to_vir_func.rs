@@ -30,8 +30,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::vec;
 use vir::ast::{
-    BodyVisibility, Fun, FunX, FunctionAttrsX, FunctionKind, FunctionX, ItemKind, KrateX, Mode,
-    OpaqueTypes, Opaqueness, ParamX, Path, Typ, TypDecoration, TypX, VarIdent, VirErr, Visibility,
+    BodyVisibility, CrateId, Fun, FunX, FunctionAttrsX, FunctionKind, FunctionX, ItemKind, KrateX,
+    Mode, OpaqueTypes, Opaqueness, ParamX, Path, Typ, TypDecoration, TypX, VarIdent, VirErr,
+    Visibility,
 };
 use vir::ast_util::{air_unique_var, unit_typ};
 use vir::def::{RETURN_VALUE, Spanned, VERUS_SPEC};
@@ -247,7 +248,6 @@ fn handle_autospec<'tcx>(
                     broadcast_forall_only: false,
                     no_auto_trigger: false,
                     auto_ext_equal: functionx.attrs.auto_ext_equal.clone(),
-                    custom_req_err: None,
                     autospec: None,
                     bit_vector: false,
                     atomic: false,
@@ -897,7 +897,7 @@ fn handle_external_fn<'tcx>(
     let external_path = ctxt.def_id_to_vir_path(external_id);
     let external_item_visibility = mk_visibility(ctxt, external_id);
 
-    if external_path.krate == Some(Arc::new("verus_builtin".to_string()))
+    if external_path.krate == CrateId::Id(Arc::new("verus_builtin".to_string()))
         && &*external_path.last_segment() != "clone"
         && !is_builtin_external
     {
@@ -1285,15 +1285,15 @@ fn binders_to_string<'tcx>(
         let s = match &k {
             BoundVariableKind::Ty(BoundTyKind::Anon) => "_",
             BoundVariableKind::Ty(BoundTyKind::Param(def_id)) => {
-                sym = tcx.item_name(def_id);
+                sym = tcx.item_name(*def_id);
                 sym.as_str()
             }
             BoundVariableKind::Region(BoundRegionKind::Anon | BoundRegionKind::ClosureEnv) => "'_",
             BoundVariableKind::Region(BoundRegionKind::Named(def_id)) => {
-                sym = tcx.item_name(def_id);
+                sym = tcx.item_name(*def_id);
                 sym.as_str()
             }
-            BoundVariableKind::Region(BoundRegionKind::NamedAnon(sym)) => sym.as_str(),
+            BoundVariableKind::Region(BoundRegionKind::NamedForPrinting(sym)) => sym.as_str(),
             BoundVariableKind::Const => "CONST",
         };
         v.push(s.to_string());
@@ -1359,7 +1359,6 @@ fn make_attributes<'tcx>(
     vattrs: &crate::attributes::VerifierAttrs,
     uses_ghost_blocks: bool,
     hidden: Arc<Vec<Fun>>,
-    custom_req_err: Option<String>,
     print_zero_args: bool,
     print_as_method: bool,
     safety: Safety,
@@ -1378,7 +1377,6 @@ fn make_attributes<'tcx>(
         uses_ghost_blocks,
         inline: vattrs.inline,
         hidden,
-        custom_req_err,
         no_auto_trigger: vattrs.no_auto_trigger,
         broadcast_forall: vattrs.broadcast_forall,
         broadcast_forall_only: false,
@@ -2078,7 +2076,6 @@ pub(crate) fn check_item_fn<'tcx>(
         &vattrs,
         vattrs.verus_macro && !matches!(sig.sig, FnOrConstSigEnum::ConstVar(..)),
         Arc::new(header.hidden),
-        vattrs.custom_req_err.clone(),
         n_params == 0,
         has_self_param,
         safety,
@@ -2099,12 +2096,12 @@ pub(crate) fn check_item_fn<'tcx>(
     // mark it non-private in order to avoid errors down the line.
     let mut visibility = visibility;
     for b in [true, false] {
-        if path == vir::def::nonstatic_call_path(&Some(ctxt.vstd_crate_name.clone()), b) {
+        if path == vir::def::nonstatic_call_path(b) {
             visibility.restricted_to = None;
         }
     }
 
-    if path == vir::def::exec_await_path(&Some(ctxt.vstd_crate_name.clone())) {
+    if path == vir::def::exec_await_path() {
         visibility.restricted_to = None;
     }
 
@@ -2996,7 +2993,6 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         &vattrs,
         false,
         Arc::new(vec![]),
-        vattrs.custom_req_err.clone(),
         false,
         false,
         Safety::Safe,

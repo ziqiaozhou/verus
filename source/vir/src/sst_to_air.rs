@@ -1,8 +1,9 @@
 use crate::ast::{
-    ArithOp, ArrayKind, AssertQueryMode, BinaryOp, BitwiseOp, Dt, FieldOpr, Fun, GenericBoundX,
-    Ident, Idents, InequalityOp, IntRange, IntegerTypeBitwidth, IntegerTypeBoundKind, Mode, Path,
-    PathX, Primitive, ProofNoteLabel, SpannedTyped, Typ, TypDecoration, TypDecorationArg, TypX,
-    Typs, UnaryOp, UnaryOpr, UnwindSpec, VarAt, VarIdent, VariantCheck, VirErr, Visibility,
+    ArithOp, ArrayKind, AssertQueryMode, BinaryOp, BitwiseOp, CrateId, Dt, FieldOpr, Fun,
+    GenericBoundX, Ident, Idents, InequalityOp, IntRange, IntegerTypeBitwidth,
+    IntegerTypeBoundKind, Mode, Path, PathX, Primitive, ProofNoteLabel, SpannedTyped, Typ,
+    TypDecoration, TypDecorationArg, TypX, Typs, UnaryOp, UnaryOpr, UnwindSpec, VarAt, VarIdent,
+    VariantCheck, VirErr, Visibility,
 };
 use crate::ast_util::{
     LowerUniqueVar, fun_as_friendly_rust_name, get_field, get_variant, typ_args_for_datatype_typ,
@@ -149,7 +150,7 @@ pub(crate) fn monotyp_to_path(typ: &MonoTyp) -> Path {
             );
         }
     };
-    Arc::new(PathX { krate: None, segments: Arc::new(vec![id]) })
+    Arc::new(PathX { krate: CrateId::Internal, segments: Arc::new(vec![id]) })
 }
 
 pub(crate) fn typ_to_air(ctx: &Ctx, typ: &Typ) -> air::ast::Typ {
@@ -761,16 +762,6 @@ pub(crate) fn constant_to_expr(ctx: &Ctx, constant: &crate::ast::Constant) -> Ex
     }
 }
 
-fn exp_get_custom_err(exp: &Exp) -> Option<Arc<String>> {
-    match &exp.x {
-        ExpX::UnaryOpr(UnaryOpr::Box(_), e) => exp_get_custom_err(e),
-        ExpX::UnaryOpr(UnaryOpr::Unbox(_), e) => exp_get_custom_err(e),
-        ExpX::UnaryOpr(UnaryOpr::ProofNote(_), e) => exp_get_custom_err(e),
-        ExpX::UnaryOpr(UnaryOpr::CustomErr(s), _) => Some(s.clone()),
-        _ => None,
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum ExprMode {
     Spec,
@@ -1142,7 +1133,7 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                         assert!(*kind == ArrayKind::Slice);
                         assert!(typ_args.len() == 1);
                         let t = &typ_args[0];
-                        let name = crate::def::fn_slice_len(&ctx.global.vstd_crate_name);
+                        let name = crate::def::fn_slice_len();
                         let name = suffix_global_id(&fun_to_air_ident(&name));
                         let mut exprs = typ_to_ids(t);
                         exprs.push(exp_to_expr(ctx, e, expr_ctxt)?);
@@ -1218,12 +1209,6 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                     variant_field_ident(&encode_dt_as_path(datatype), variant, field),
                     Arc::new(exprs),
                 ))
-            }
-            UnaryOpr::CustomErr(_) => {
-                // CustomErr is handled by split_expression. Maybe it could
-                // be useful in the 'normal' case too, but right now, we just
-                // ignore it here.
-                return exp_to_expr(ctx, e, expr_ctxt);
             }
             UnaryOpr::ProofNote(_) => {
                 // A `proof_note` label is metadata and has no effect otherwise.
@@ -1355,7 +1340,7 @@ pub(crate) fn exp_to_expr(ctx: &Ctx, exp: &Exp, expr_ctxt: &ExprCtxt) -> Result<
                             let rhs_expr = exp_to_expr(ctx, rhs, expr_ctxt)?;
                             args.push(lhs_expr);
                             args.push(rhs_expr);
-                            let name = crate::def::fn_slice_index(&ctx.global.vstd_crate_name);
+                            let name = crate::def::fn_slice_index();
                             let name = suffix_global_id(&fun_to_air_ident(&name));
                             ExprX::Apply(name, Arc::new(args))
                         }
@@ -1965,12 +1950,11 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                     e_req = mk_implies(&mk_not(&generic_req_expr), &e_req);
                 }
 
-                let description =
-                    match (ctx.checking_spec_preconditions(), &func.x.attrs.custom_req_err) {
-                        (true, None) => "recommendation not met".to_string(),
-                        (_, None) => crate::def::PRECONDITION_FAILURE.to_string(),
-                        (_, Some(s)) => s.clone(),
-                    };
+                let description = if ctx.checking_spec_preconditions() {
+                    "recommendation not met"
+                } else {
+                    crate::def::PRECONDITION_FAILURE
+                };
 
                 let error = error(&stm.span, description);
                 let filter = Some(fun_to_air_ident(&func.x.name));
@@ -2444,11 +2428,11 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                         let (fun, typ_args) = match &**container_typ {
                             TypX::Primitive(Primitive::Slice, typ_args) => {
                                 assert!(*kind == ArrayKind::Slice);
-                                (crate::def::fn_slice_update(&ctx.global.vstd_crate_name), typ_args)
+                                (crate::def::fn_slice_update(), typ_args)
                             }
                             TypX::Primitive(Primitive::Array, typ_args) => {
                                 assert!(*kind == ArrayKind::Array);
-                                (crate::def::fn_array_update(&ctx.global.vstd_crate_name), typ_args)
+                                (crate::def::fn_array_update(), typ_args)
                             }
                             _ => {
                                 return Err(error(
@@ -2651,7 +2635,6 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                     &inv.inv,
                     &mut hint_message,
                 );
-                let msg_opt = exp_get_custom_err(&inv_exp);
                 let expr = exp_to_expr(ctx, &inv_exp, expr_ctxt)?;
                 if cond.is_some() {
                     assert!(inv.at_entry);
@@ -2659,10 +2642,10 @@ fn stm_to_stmts(ctx: &Ctx, state: &mut State, stm: &Stm) -> Result<Vec<Stmt>, Vi
                 }
                 let both = inv.at_entry && inv.at_exit;
                 if inv.at_entry {
-                    invs_entry.push((inv.inv.span.clone(), expr.clone(), msg_opt.clone(), both));
+                    invs_entry.push((inv.inv.span.clone(), expr.clone(), None, both));
                 }
                 if inv.at_exit {
-                    invs_exit.push((inv.inv.span.clone(), expr.clone(), msg_opt.clone(), both));
+                    invs_exit.push((inv.inv.span.clone(), expr.clone(), None, both));
                 }
             }
             let invs_entry = Arc::new(invs_entry);
@@ -3317,7 +3300,7 @@ pub(crate) fn body_stm_to_air(
     Ok((state.commands, state.snap_map))
 }
 
-/// At function returns, we need to tell the SMT solver that the  
+/// At function returns, we need to tell the SMT solver that the
 /// future (impl Future<Output = T>) created by the async function will return the return value of
 /// the function body if await() is called on it.
 // fn async_fn_return_to_stmts(
@@ -3337,7 +3320,7 @@ pub(crate) fn body_stm_to_air(
 //         CallFun::Fun(
 //             Arc::new(crate::ast::FunX {
 //                 path: Arc::new(PathX {
-//                     krate: Some(Arc::new("vstd".to_string())),
+//                     krate: CrateId::Vstd,
 //                     segments: Arc::new(vec![
 //                         Arc::new("future".to_string()),
 //                         Arc::new("FutureAdditionalSpecFns".to_string()),
