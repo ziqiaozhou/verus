@@ -1,3 +1,57 @@
+/*!
+This file contains the conversion HIR -> VIR.
+
+To properly process the HIR tree, it's important to understand how Rust handles
+"implicit" operations (like auto-borrows, auto-deref, implicit coercions).
+All such operations are represented as "adjustments", which should be thought of
+as nodes of the tree in their own right.
+
+Example: consider a function which in source looks like `f(foo, bar)`.
+Suppose that `foo` is a mutable reference which is implicitly reborrowed,
+and `bar` implicitly gets a pointer cast, so that the actual function
+call is more like `f(&mut *foo, bar as *const T)`.
+
+The HIR tree initially looks like this:
+
+```
+          Call `f(foo, bar)`
+         /        |        \
+        /         |         \
+    Path `f`   Path `foo`   Path `bar`
+```
+
+Rust performs type-checking on a tree that looks like this. However,
+during type-checking, Rust computes the "adjustments", which are
+(conceptually) inserted into the tree:
+
+```
+          Call `f(&mut *foo, bar as *const T)`
+         /           |                      \
+        /            |                       \
+    Path `f`   Adjust `&mut *foo`        Adjust `bar as *const T`
+                     |                        |
+                     |                        |
+               Adjust `*foo`             Path `bar`
+                     |
+                     |
+                  Path `foo`
+```
+
+Adjustments can have rich and complex behaviors, so it's important
+to treat the adjustment nodes as nodes in their own right, and not
+try to skip over them. When processing an explicit HIR node,
+always use `expr_ty_adjusted` to get the type of its arguments.
+If you try to work with the unadjusted type of the child HIR node,
+you are essentially skipping over a bunch of nodes of the tree.
+This often seems to work in common cases, but this is misleading
+and generally leads to an incomplete mental model of what's going on.
+
+For any confusion about how to interpret an HIR node or Adjustment node,
+there is no substitute for simply consulting the rustc source.
+The file `rustc_mir_build/src/thir/cx/expr.rs` is particularly useful.
+(This file is checked into our repo as part of our rustc_mir_build fork).
+*/
+
 use crate::attributes::{
     Attr, GhostBlockAttr, get_ghost_block_opt, get_proof_note_annotation, get_trigger,
     get_var_mode, parse_attrs, parse_attrs_opt,
