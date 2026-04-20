@@ -1681,6 +1681,14 @@ enum OpKind {
     AssignOp(rustc_hir::AssignOp),
 }
 
+/// If `ty` is a reference type, return the referent; otherwise return `ty` unchanged.
+fn strip_ref<'tcx>(ty: rustc_middle::ty::Ty<'tcx>) -> rustc_middle::ty::Ty<'tcx> {
+    match ty.kind() {
+        TyKind::Ref(_, inner_ty, _) => *inner_ty,
+        _ => ty,
+    }
+}
+
 // Add lang_item_for_op from rust/compiler/rustc_hir_typeck/src/op.rs
 // Returns the required traits to use op
 // Note: comparison operators are defined only by PartialEq and PartialOrd
@@ -1816,8 +1824,11 @@ fn operator_overload_to_vir<'tcx>(
         let (fun_sym, Some(trait_id)) = lang_item_for_op(tcx, op, span)? else {
             crate::internal_err!(span, "operator needs an accessible trait");
         };
-        let lhs_ty = bctx.types.node_type(lhs.hir_id);
-        let rhs_ty = bctx.types.node_type(rhs.hir_id);
+        // When constructing the substs for trait resolution, we use
+        // expr_ty_adjusted to account for all adjustments (e.g., pointer
+        // coercions like *mut T -> *const T), then strip off any Refs.
+        let lhs_ty = strip_ref(bctx.types.expr_ty_adjusted(lhs));
+        let rhs_ty = strip_ref(bctx.types.expr_ty_adjusted(rhs));
         let substs = tcx.mk_args(&[lhs_ty.into(), rhs_ty.into()]);
 
         let args = vec![lhs, rhs];
@@ -1828,7 +1839,7 @@ fn operator_overload_to_vir<'tcx>(
         };
 
         let args = vec![arg];
-        let arg_ty = bctx.types.node_type(arg.hir_id);
+        let arg_ty = strip_ref(bctx.types.expr_ty_adjusted(arg));
         let substs = tcx.mk_args(&[arg_ty.into()]);
         (trait_id, fun_sym, args, substs)
     } else {
