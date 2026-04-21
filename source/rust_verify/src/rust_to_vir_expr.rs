@@ -2836,7 +2836,9 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
             let lhs_ty = mid_ty_simplify(tcx, &bctx.ctxt.verus_items, &lhs_ty, true);
             let field_opr = if let Some(adt_def) = lhs_ty.ty_adt_def() {
                 unsupported_err_unless!(
-                    current_modifier == ExprModifier::REGULAR || !adt_def.is_union(),
+                    bctx.new_mut_ref
+                        || current_modifier == ExprModifier::REGULAR
+                        || !adt_def.is_union(),
                     expr.span,
                     "assigning to or taking &mut of a union field",
                     expr

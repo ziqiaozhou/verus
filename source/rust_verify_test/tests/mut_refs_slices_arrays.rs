@@ -1020,6 +1020,18 @@ test_verify_one_file_with_options! {
 }
 
 test_verify_one_file_with_options! {
+    #[test] control_flow_ordering6 ["new-mut-ref"] => verus_code! {
+        #[verifier::exec_allows_no_decreases_clause]
+        #[allow(unreachable_code)]
+        fn test1_fails_access2() {
+            let mut a = [0, 1];
+            // rhs evaluated first; a[3] is never reachable
+            a[3] = loop { };
+        }
+    } => Ok(())
+}
+
+test_verify_one_file_with_options! {
     #[test] control_flow_ordering_overflow_error ["new-mut-ref"] => verus_code! {
         use vstd::prelude::*;
 
