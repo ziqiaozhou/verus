@@ -1198,7 +1198,12 @@ impl<'a> Builder<'a> {
             }
             ExprX::Await(e) => {
                 bb = self.build(e, bb)?;
-                Ok(bb)
+                let cancel_bb = self.new_bb(AstPosition::OnUnwind(expr.span.id), false);
+                let main_bb = self.new_bb(AstPosition::After(expr.span.id), false);
+                self.basic_blocks[bb].successors.push(cancel_bb);
+                self.basic_blocks[bb].successors.push(main_bb);
+                self.basic_blocks[cancel_bb].is_exit = true;
+                Ok(main_bb)
             }
         }
     }
