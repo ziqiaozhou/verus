@@ -1743,3 +1743,26 @@ test_verify_one_file_with_options! {
         }
     } => Ok(())
 }
+
+test_verify_one_file_with_options! {
+    #[test] assignment_to_mut_ref_in_index ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test1() {
+            let mut x = 0;
+            let mut x_ref = &mut x;
+            let mut y = [1, 2];
+            y[({ *x_ref = 30; 0 })] = 30;
+            assert(x == 30);
+        }
+
+        fn test1_fails() {
+            let mut x = 0;
+            let mut x_ref = &mut x;
+            let mut y = [1, 2];
+            y[({ *x_ref = 30; 0 })] = 30;
+            assert(x == 30);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
