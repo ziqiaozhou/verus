@@ -42,6 +42,8 @@ use vir::ast_util::{
 };
 use vir::def::field_ident_from_rust;
 
+use crate::proof_with_lifetime::check_proof_with_lifetime;
+
 pub(crate) fn fn_call_to_vir<'tcx>(
     bctx: &BodyCtxt<'tcx>,
     expr: &Expr<'tcx>,
@@ -302,62 +304,109 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
 
     record_call(bctx, expr, ResolvedCall::Call(name.clone(), record_name, bctx.in_ghost));
 
-    let vir_args = if let Some(args) = args { mk_vir_args(bctx, &args)? } else { vec![] };
+    let vir_args = if let Some(args) = args {
+        *bctx.in_args_depth.borrow_mut() += 1;
+        let result = mk_vir_args(bctx, node_substs, f, &args);
+        *bctx.in_args_depth.borrow_mut() -= 1;
+        result?
+    } else {
+        vec![]
+    };
 
     // Append any pending tracked args from proof_with() calls.
     // If the function has extra tracked params but no proof_with was used, error.
+    // Skip consumption if we're inside argument processing (nested call).
     let vir_args = {
         let mut args = vir_args;
-        let mut pending = bctx.pending_tracked_args.borrow_mut();
-        let extra_modes =
-            bctx.ctxt.external_fn_extra_tracked_params.borrow().get(&f).cloned();
-        if let Some(ref expected_modes) = extra_modes {
-            let extra_count = expected_modes.len();
-            if pending.is_empty() {
-                return err_span(
-                    expr.span,
-                    format!(
-                        "this external function requires {} extra tracked/ghost argument(s) via proof_with()",
-                        extra_count
-                    ),
-                );
-            }
-            if pending.len() != extra_count {
-                return err_span(
-                    expr.span,
-                    format!(
-                        "expected {} tracked/ghost argument(s) via proof_with(), got {}",
-                        extra_count,
-                        pending.len()
-                    ),
-                );
-            }
-            // Check that each pending arg's mode matches the expected mode
-            for (i, ((_, actual_is_tracked), expected_is_tracked)) in
-                pending.iter().zip(expected_modes.iter()).enumerate()
-            {
-                if *actual_is_tracked != *expected_is_tracked {
-                    let expected_mode = if *expected_is_tracked { "Tracked" } else { "Ghost" };
-                    let actual_mode = if *actual_is_tracked { "Tracked" } else { "Ghost" };
+        let in_args = *bctx.in_args_depth.borrow() > 0;
+        if !in_args {
+            let mut pending = bctx.pending_tracked_args.borrow_mut();
+            let extra_params =
+                bctx.ctxt.external_fn_extra_tracked_params.borrow().get(&f).cloned();
+            if let Some(ref expected_params) = extra_params {
+                let extra_count = expected_params.len();
+                if pending.is_empty() {
                     return err_span(
                         expr.span,
                         format!(
-                            "proof_with argument {} has wrong mode: expected {}, got {}",
-                            i + 1,
-                            expected_mode,
-                            actual_mode,
+                            "this external function requires {} extra tracked/ghost argument(s) via proof_with()",
+                            extra_count
                         ),
                     );
                 }
+                if pending.len() != extra_count {
+                    return err_span(
+                        expr.span,
+                        format!(
+                            "expected {} tracked/ghost argument(s) via proof_with(), got {}",
+                            extra_count,
+                            pending.len()
+                        ),
+                    );
+                }
+                // Check mode and type for each pending arg
+                for (i, ((_, actual_is_tracked, arg_hir_id, _pw_call_hir_id), (expected_is_tracked, expected_ty))) in
+                    pending.iter().zip(expected_params.iter()).enumerate()
+                {
+                    // Mode check
+                    if *actual_is_tracked != *expected_is_tracked {
+                        let expected_mode = if *expected_is_tracked { "Tracked" } else { "Ghost" };
+                        let actual_mode = if *actual_is_tracked { "Tracked" } else { "Ghost" };
+                        return err_span(
+                            expr.span,
+                            format!(
+                                "proof_with argument {} has wrong mode: expected {}, got {}",
+                                i + 1,
+                                expected_mode,
+                                actual_mode,
+                            ),
+                        );
+                    }
+                    // Type check: compare rustc types with regions erased.
+                    // expected_ty has real regions (ReLateParam) from lower_ty,
+                    // actual_ty has ReErased from typeck. Erase regions on expected side
+                    // so the structural type check passes; actual lifetime enforcement
+                    // is done later via THIR constraints checked by mir_borrowck.
+                    let tcx = bctx.ctxt.tcx;
+                    let expected_ty_instantiated =
+                        rustc_middle::ty::EarlyBinder::bind(*expected_ty)
+                            .instantiate(tcx, node_substs);
+                    let actual_ty = bctx.types.node_type(*arg_hir_id);
+                    use rustc_middle::ty::TypeFoldable;
+                    let expected_erased = expected_ty_instantiated.fold_with(
+                        &mut rustc_middle::ty::RegionFolder::new(tcx, &mut |_, _| tcx.lifetimes.re_erased),
+                    );
+                    if actual_ty != expected_erased {
+                        return err_span(
+                            expr.span,
+                            format!(
+                                "proof_with argument {} has wrong type: expected `{}`, got `{}`",
+                                i + 1,
+                                expected_ty_instantiated,
+                                actual_ty,
+                            ),
+                        );
+                    }
+                    // Lifetime check: verify that the proof_with arg's lifetime is
+                    // compatible with the expected lifetime from the callee's declaration.
+                    //
+                    // The expected_ty has ReLateParam(callee, 'a) regions from lower_ty.
+                    // We need to map callee's 'a to the caller's corresponding lifetime,
+                    // then check that the proof_with arg's lifetime outlives it.
+                    check_proof_with_lifetime(
+                        bctx, tcx, f, expr.hir_id, node_substs, *arg_hir_id,
+                        *expected_ty, expected_ty_instantiated, expr.span, i,
+                    )?;
+                }
+                let exprs: Vec<_> = pending.drain(..).map(|(e, _, _, _)| e).collect();
+                args.extend(exprs);
+            } else if !pending.is_empty() {
+                pending.drain(..);
+                return err_span(
+                    expr.span,
+                    "proof_with was used but this function does not expect extra tracked/ghost arguments",
+                );
             }
-            let exprs: Vec<_> = pending.drain(..).map(|(e, _)| e).collect();
-            args.extend(exprs);
-        } else if !pending.is_empty() {
-            pending.drain(..);
-            return err_span(
-                expr.span,
-                "proof_with was used but this function does not expect extra tracked/ghost arguments",
-            );
         }
         args
     };
@@ -2184,7 +2233,7 @@ fn verus_item_to_vir<'tcx, 'a>(
             };
             let bctx_ghost = &BodyCtxt { in_ghost: true, ..bctx.clone() };
             let arg_expr = expr_to_vir_consume(bctx_ghost, &args[0], ExprModifier::REGULAR)?;
-            bctx.pending_tracked_args.borrow_mut().push((arg_expr, is_tracked));
+            bctx.pending_tracked_args.borrow_mut().push((arg_expr, is_tracked, args[0].hir_id, expr.hir_id));
             // Return a unit expression (no-op)
             mk_expr(ExprX::Block(Arc::new(vec![]), None))
         }

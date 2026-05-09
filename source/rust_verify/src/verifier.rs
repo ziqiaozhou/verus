@@ -3175,6 +3175,7 @@ impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
                 providers.queries.check_mod_deathness = |_, _| {};
 
                 rustc_mir_build_verus::verus_provide(providers);
+
                 providers.queries.mir_built = |tcx, def| {
                     // We need to override this to call our verus of build_mir.
                     // mir_built is defined in the crate rustc_mir_transform, which I prefer

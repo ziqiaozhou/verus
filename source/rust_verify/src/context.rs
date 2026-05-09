@@ -49,9 +49,9 @@ pub struct ContextX<'tcx> {
     pub(crate) name_def_id_map: Rc<RefCell<std::collections::HashMap<Path, DefId>>>,
     pub(crate) next_read_kind_id: AtomicU64,
     /// For external_fn_specification functions with extra ghost/tracked params:
-    /// maps the external function's DefId to a Vec of booleans (true = Tracked, false = Ghost)
+    /// maps the external function's DefId to a Vec of (is_tracked, expected_ty) pairs
     pub(crate) external_fn_extra_tracked_params:
-        Rc<RefCell<std::collections::HashMap<DefId, Vec<bool>>>>,
+        Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
 }
 
 /// The context in which a given header node might be interpretted
@@ -97,8 +97,13 @@ pub(crate) struct BodyCtxt<'tcx> {
     /// We use this map to resolve them later.
     pub(crate) external_opaque_type_map: Option<HashMap<Path, Path>>,
     /// Pending tracked/ghost args from proof_with() calls, to be appended to the next function call.
-    /// Each entry is (expr, is_tracked) where is_tracked=true for Tracked<T>, false for Ghost<T>.
-    pub(crate) pending_tracked_args: Rc<RefCell<Vec<(vir::ast::Expr, bool)>>>,
+    /// Each entry is (expr, is_tracked, arg_hir_id, proof_with_call_hir_id):
+    /// - is_tracked: true for Tracked<T>, false for Ghost<T>
+    /// - arg_hir_id: HirId of the proof_with argument expression (for type lookup)
+    /// - proof_with_call_hir_id: HirId of the proof_with() call expression (for THIR interception)
+    pub(crate) pending_tracked_args: Rc<RefCell<Vec<(vir::ast::Expr, bool, HirId, HirId)>>>,
+    /// Depth counter: >0 means we're inside argument processing, so don't consume pending_tracked_args.
+    pub(crate) in_args_depth: Rc<RefCell<u32>>,
     /// HirIds of declare_with_tracked()/declare_with_ghost() let-stmts to skip during body conversion
     pub(crate) declare_with_hir_ids: Rc<HashSet<HirId>>,
 }

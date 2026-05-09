@@ -312,6 +312,7 @@ fn mk_bctx<'tcx>(
         unwrap_param_map: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
         external_opaque_type_map,
         pending_tracked_args: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        in_args_depth: std::rc::Rc::new(std::cell::RefCell::new(0)),
         declare_with_hir_ids: std::rc::Rc::new(declare_with_hir_ids),
     }
 }
@@ -325,7 +326,7 @@ fn pre_scan_declare_with_params<'tcx>(
     id: DefId,
     body: &Body<'tcx>,
     body_id: &BodyId,
-) -> Result<(Vec<(vir::ast::Param, Option<Mode>)>, HashSet<HirId>), VirErr> {
+) -> Result<(Vec<(vir::ast::Param, Option<Mode>, rustc_middle::ty::Ty<'tcx>)>, HashSet<HirId>), VirErr> {
     let mut extra_params = Vec::new();
     let mut hir_ids = HashSet::new();
     let types = body_id_to_types(ctxt.tcx, body_id);
@@ -337,7 +338,7 @@ fn pre_scan_declare_with_params<'tcx>(
     };
 
     for stmt in stmts {
-        if let rustc_hir::StmtKind::Let(rustc_hir::LetStmt { pat, init: Some(init), .. }) =
+        if let rustc_hir::StmtKind::Let(rustc_hir::LetStmt { pat, init: Some(init), ty: hir_ty, .. }) =
             &stmt.kind
         {
             // Check if init is a call to declare_with_tracked() or declare_with_ghost()
@@ -363,8 +364,14 @@ fn pre_scan_declare_with_params<'tcx>(
             // Require simple binding pattern
             let (is_mut_var, name) = pat_to_mut_var(pat)?;
 
-            // Get the resolved type from typeck
-            let ty = types.node_type(init.hir_id);
+            // Get the resolved type. Use lower_ty on the HIR type annotation if available,
+            // because it preserves early-bound regions (ReEarlyParam) which are needed for
+            // lifetime checking. typeck's node_type() returns types with erased regions.
+            let ty = if let Some(hir_ty) = hir_ty {
+                rustc_hir_analysis::lower_ty(ctxt.tcx, hir_ty)
+            } else {
+                types.node_type(init.hir_id)
+            };
 
             // Derive is_tracked from the type (Tracked<T> vs Ghost<T>) via ADT DefId
             let is_tracked = match ty.kind() {
@@ -425,7 +432,7 @@ fn pre_scan_declare_with_params<'tcx>(
                 },
             );
 
-            extra_params.push((vir_param, None));
+            extra_params.push((vir_param, None, ty));
             hir_ids.insert(stmt.hir_id);
         }
     }
@@ -956,9 +963,9 @@ fn compare_external_sig<'tcx>(
     sig1: &rustc_middle::ty::FnSig<'tcx>,
     sig2: &rustc_middle::ty::FnSig<'tcx>,
     external_trait_from_to: &Option<(vir::ast::Path, vir::ast::Path, Option<vir::ast::Path>)>,
-) -> Result<Option<Vec<bool>>, VirErr> {
-    // Returns None if signatures don't match, or Some(mode_vec) if they do.
-    // mode_vec[i] = true means Tracked, false means Ghost for extra param i.
+) -> Result<Option<Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>, VirErr> {
+    // Returns None if signatures don't match, or Some(mode_and_type_vec) if they do.
+    // Each entry is (is_tracked, ty) for extra params.
     // Ghost/Tracked params at the same position in both sigs are treated as exec params.
     // Ghost/Tracked params only in the proxy's tail (beyond io2's length) are extra non-exec inputs.
     use rustc_middle::ty::FnSig;
@@ -989,7 +996,7 @@ fn compare_external_sig<'tcx>(
         if !is_ghost_or_tracked_ty(verus_items, &io1[i]) {
             return Ok(None);
         }
-        extra_modes.push(is_tracked_ty(verus_items, &io1[i]));
+        extra_modes.push((is_tracked_ty(verus_items, &io1[i]), io1[i]));
     }
 
     // Compare return types (last element in inputs_and_output)
@@ -1946,15 +1953,16 @@ pub(crate) fn check_item_fn<'tcx>(
             // Pre-scan for declare_with_tracked()/declare_with_ghost() calls
             let (declare_with_extra_params, declare_with_hir_ids) =
                 pre_scan_declare_with_params(ctxt, id, body, body_id)?;
-            let declare_with_modes: Vec<bool> = declare_with_extra_params
-                .iter()
-                .map(|(p, _)| {
-                    // unwrapped_info mode: Proof = Tracked, Spec = Ghost
-                    matches!(p.x.unwrapped_info, Some((Mode::Proof, _)))
-                })
-                .collect();
-            for p in declare_with_extra_params {
-                vir_params.push(p);
+            let declare_with_modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> =
+                declare_with_extra_params
+                    .iter()
+                    .map(|(p, _, ty)| {
+                        // unwrapped_info mode: Proof = Tracked, Spec = Ghost
+                        (matches!(p.x.unwrapped_info, Some((Mode::Proof, _))), *ty)
+                    })
+                    .collect();
+            for (p, mode, _) in declare_with_extra_params {
+                vir_params.push((p, mode));
             }
 
             let external_body = vattrs.external_body || vattrs.external_fn_specification;
