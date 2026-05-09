@@ -304,6 +304,64 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
 
     let vir_args = if let Some(args) = args { mk_vir_args(bctx, &args)? } else { vec![] };
 
+    // Append any pending tracked args from proof_with() calls.
+    // If the function has extra tracked params but no proof_with was used, error.
+    let vir_args = {
+        let mut args = vir_args;
+        let mut pending = bctx.pending_tracked_args.borrow_mut();
+        let extra_modes =
+            bctx.ctxt.external_fn_extra_tracked_params.borrow().get(&f).cloned();
+        if let Some(ref expected_modes) = extra_modes {
+            let extra_count = expected_modes.len();
+            if pending.is_empty() {
+                return err_span(
+                    expr.span,
+                    format!(
+                        "this external function requires {} extra tracked/ghost argument(s) via proof_with()",
+                        extra_count
+                    ),
+                );
+            }
+            if pending.len() != extra_count {
+                return err_span(
+                    expr.span,
+                    format!(
+                        "expected {} tracked/ghost argument(s) via proof_with(), got {}",
+                        extra_count,
+                        pending.len()
+                    ),
+                );
+            }
+            // Check that each pending arg's mode matches the expected mode
+            for (i, ((_, actual_is_tracked), expected_is_tracked)) in
+                pending.iter().zip(expected_modes.iter()).enumerate()
+            {
+                if *actual_is_tracked != *expected_is_tracked {
+                    let expected_mode = if *expected_is_tracked { "Tracked" } else { "Ghost" };
+                    let actual_mode = if *actual_is_tracked { "Tracked" } else { "Ghost" };
+                    return err_span(
+                        expr.span,
+                        format!(
+                            "proof_with argument {} has wrong mode: expected {}, got {}",
+                            i + 1,
+                            expected_mode,
+                            actual_mode,
+                        ),
+                    );
+                }
+            }
+            let exprs: Vec<_> = pending.drain(..).map(|(e, _)| e).collect();
+            args.extend(exprs);
+        } else if !pending.is_empty() {
+            pending.drain(..);
+            return err_span(
+                expr.span,
+                "proof_with was used but this function does not expect extra tracked/ghost arguments",
+            );
+        }
+        args
+    };
+
     let typ_args = mk_typ_args(bctx, node_substs, f, expr.span)?;
     let impl_paths = get_impl_paths(bctx, f, node_substs, None, const_var, expr.span)?;
     let target =
@@ -2109,6 +2167,27 @@ fn verus_item_to_vir<'tcx, 'a>(
             let p = crate::rust_to_vir_expr::simplify_place_by_cancelling(&p);
             mk_expr(ExprX::BorrowMutTracked(p))
         }
+        VerusItem::PassTracked => {
+            // proof_with(expr) stores the tracked/ghost arg to be appended to the next call
+            unsupported_err_unless!(args_len == 1, expr.span, "expected proof_with(expr)", &args);
+            let arg_typ =
+                typ_of_expr_adjusted(bctx, args[0].span, &args[0].hir_id, false)?;
+            let is_tracked = match &*arg_typ {
+                TypX::Decorate(TypDecoration::Tracked, _, _) => true,
+                TypX::Decorate(TypDecoration::Ghost, _, _) => false,
+                _ => {
+                    return err_span(
+                        args[0].span,
+                        "proof_with expects an argument of type Tracked<T> or Ghost<T>",
+                    );
+                }
+            };
+            let bctx_ghost = &BodyCtxt { in_ghost: true, ..bctx.clone() };
+            let arg_expr = expr_to_vir_consume(bctx_ghost, &args[0], ExprModifier::REGULAR)?;
+            bctx.pending_tracked_args.borrow_mut().push((arg_expr, is_tracked));
+            // Return a unit expression (no-op)
+            mk_expr(ExprX::Block(Arc::new(vec![]), None))
+        }
         VerusItem::BuiltinDeref(d) => {
             // This would be easy to support (similar to handling borrow_mut etc.) but their usage
             // would be very rare so I'm skipping for now
@@ -2125,6 +2204,14 @@ fn verus_item_to_vir<'tcx, 'a>(
                 format!("not supported: using {tyname}::{derefname}"),
             )
             .help("you can implicitly dereference this type using `*`"));
+        }
+        VerusItem::DeclareWith => {
+            // declare_with() is handled at let-stmt level
+            // in rust_to_vir_expr.rs. If we reach here, it's used outside a let-stmt.
+            return err_span(
+                expr.span,
+                "declare_with() must be used as a let initializer",
+            );
         }
         VerusItem::Vstd(_, _)
         | VerusItem::Marker(_)
