@@ -365,7 +365,7 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
     // Only consume when callee expects extra params (has declare_with entries).
     let vir_args = {
         let mut args = vir_args;
-        let extra_params = bctx.ctxt.external_fn_extra_tracked_params.borrow().get(&f).cloned();
+        let extra_params = bctx.ctxt.declare_with_params.borrow().get(&f).cloned();
         if let Some(ref expected_params) = extra_params {
             let extra_count = expected_params.len();
             let mut pending_opt = bctx.pending_tracked_args.borrow_mut();
@@ -435,13 +435,10 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
                     }
                     check_proof_with_lifetime(
                         bctx,
-                        tcx,
                         f,
                         expr.hir_id,
-                        node_substs,
                         pending_arg.arg_hir_id,
                         *expected_ty,
-                        expected_ty_instantiated,
                         expr.span,
                         i,
                     )?;
