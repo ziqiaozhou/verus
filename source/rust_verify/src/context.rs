@@ -63,6 +63,10 @@ pub struct ContextX<'tcx> {
     /// maps the function's DefId to a Vec of (is_tracked, expected_ty) pairs
     pub(crate) declare_with_params:
         Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
+    /// For functions with extra ghost/tracked return values (from declare_ret_with() stmts):
+    /// maps the function's DefId to a Vec of (is_tracked, expected_ty) pairs
+    pub(crate) declare_ret_with_params:
+        Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
 }
 
 /// The context in which a given header node might be interpretted
@@ -144,6 +148,7 @@ impl<'tcx> ContextX<'tcx> {
             name_def_id_map: Rc::new(RefCell::new(HashMap::new())),
             next_read_kind_id: AtomicU64::new(0),
             declare_with_params: Rc::new(RefCell::new(HashMap::new())),
+            declare_ret_with_params: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
