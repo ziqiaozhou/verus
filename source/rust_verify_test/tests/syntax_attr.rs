@@ -381,8 +381,8 @@ test_verify_one_file! {
         fn test_mut_tracked(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
@@ -437,8 +437,8 @@ test_verify_one_file! {
         fn test_mut_tracked(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
@@ -466,8 +466,8 @@ test_verify_one_file! {
         fn test_mut_tracked(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
@@ -499,8 +499,8 @@ test_verify_one_file! {
         fn test_mut_tracked(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            proof_with!{|= Ghost(x)}
             x
         }
 
@@ -543,8 +543,8 @@ test_verify_one_file! {
         fn test_mut_tracked(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            proof_with!{|= Ghost(x)}
             x
         }
 
@@ -1192,7 +1192,7 @@ test_verify_one_file! {
                 z@ == x,
             )]
         fn foo(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
@@ -1208,7 +1208,7 @@ test_verify_one_file! {
                 z@ == x,
         )]
         fn bar(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
@@ -1224,7 +1224,7 @@ test_verify_one_file! {
                 z@ == x,
         )]
         fn baz(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
@@ -1240,7 +1240,7 @@ test_verify_one_file! {
                 z@ == x,
         )]
         fn qux(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
     } => Ok(())
@@ -1461,7 +1461,7 @@ test_verify_one_file! {
             pub y: Ghost<int>,
         }
 
-        // Test combined struct fields and |= follow output in a single proof_with!
+        // Test combined struct fields and output assignment
         #[verus_spec(s =>
             with
                 -> g: Ghost<int>
@@ -1474,19 +1474,18 @@ test_verify_one_file! {
         )]
         fn make_struct_with_follows(x: u32) -> TestStruct
         {
-            proof_decl! {
-                let ghost g_tmp = 3 * x;
+            proof! {
+                g = Ghost(3 * x as int);
             }
             proof_with! {
                 y: Ghost(2 * (x + 1)),
-                |= Ghost(g_tmp)
             }
             TestStruct{
                 x: x + 1,
             }
         }
 
-        // Test combined struct fields and |= follow output with let binding
+        // Test combined struct fields and output assignment with let binding
         #[verus_spec(s =>
             with
                 -> g: Ghost<int>
@@ -1499,14 +1498,13 @@ test_verify_one_file! {
         )]
         fn make_struct_with_follows_let(x: u32) -> TestStruct
         {
-            proof_decl! {
-                let ghost tmp = 3 * x;
+            proof! {
+                g = Ghost(3 * x as int);
             }
             proof_with! { y: Ghost(2 * (x + 1))}
             let s = TestStruct{
                 x: x + 1,
             };
-            proof_with! { |= Ghost(tmp) }
             s
         }
     } => Ok(())
@@ -1536,9 +1534,31 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     // Regression test for https://github.com/verus-lang/verus/issues/2283
-    // proof_with! with only |= follow output before a struct constructor
-    // should not attempt to parse the follow as struct fields.
+    // Assigning to the named output before a struct constructor should work
+    // without the `|=` follow syntax.
     #[test] test_proof_with_follows_only_before_struct code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        pub struct S {}
+
+        #[verus_spec(
+            with
+                -> res: Ghost<int>
+            ensures
+                res == 0,
+        )]
+        pub fn f() -> S {
+            proof!{ res = Ghost(0int); }
+            S {}
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    // The `|= ...` follow-expression syntax is no longer supported.
+    // Users should assign directly to the named output via `proof!{ name = ... }`.
+    #[test] test_proof_with_follows_rejected code!{
         use vstd::prelude::*;
 
         #[verus_verify]
@@ -1554,7 +1574,7 @@ test_verify_one_file! {
             proof_with!(|= Ghost(0int));
             S {}
         }
-    } => Ok(())
+    } => Err(e) => assert_any_vir_error_msg(e, "the `|= ...` follow-expression is no longer supported")
 }
 
 test_verify_one_file! {
