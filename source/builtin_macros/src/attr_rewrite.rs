@@ -39,7 +39,7 @@ use quote::{ToTokens, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
-use syn::{Expr, Item, ItemConst, parse2, spanned::Spanned};
+use syn::{Expr, Item, ItemConst, parse_quote, parse2, spanned::Spanned};
 
 use crate::{
     EraseGhost,
@@ -50,6 +50,10 @@ use crate::{
 };
 
 pub const VERIFIED: &str = "_VERUS_VERIFIED";
+/// Name prefix of the companion trait that holds the verified counterparts of
+/// the methods of a trait. The name is derived from the name of that trait so
+/// that an implementation does not have to spell it out.
+pub const VERIFIED_TRAIT_PREFIX: &str = "_VERUS_VERIFIED_TRAIT";
 
 pub const DUAL_SPEC_PREFIX: &str = "__VERUS_SPEC";
 
@@ -107,13 +111,82 @@ impl syn::parse::Parse for VerusSpecTarget {
     }
 }
 
+/// When ghost code is erased, a companion trait has no reason to exist: the
+/// bodies of its counterparts stay in the implementation of the trait, which is
+/// what is executed. The declaration itself still has to survive, since user
+/// code may name it in a bound, so it is emitted empty together with a blanket
+/// implementation that discharges such bounds.
+fn erase_verus_attribute(
+    attr_args: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let _ = attr_args;
+    let Ok(mut item) = syn::parse::<syn::ItemTrait>(input.clone()) else {
+        return input;
+    };
+    let (ident, supertraits, generics) = {
+        // The companion trait is derived from the trait this item declares. It
+        // only exists if one of the methods declares extra ghost/tracked
+        // parameters.
+        if !has_with_method(&item) {
+            return input;
+        }
+        let trait_path = self_trait_path(&item);
+        let mut supertraits = syn::punctuated::Punctuated::new();
+        supertraits.push(mk_trait_bound(trait_path.clone()));
+        let generics = item.generics.clone();
+        item = syn::ItemTrait {
+            attrs: Vec::new(),
+            vis: item.vis.clone(),
+            unsafety: None,
+            auto_token: None,
+            restriction: None,
+            trait_token: item.trait_token,
+            ident: companion_trait_path(&trait_path)
+                .segments
+                .last()
+                .expect("non-empty path")
+                .ident
+                .clone(),
+            generics: generics.clone(),
+            colon_token: Some(syn::token::Colon { spans: [item.ident.span()] }),
+            supertraits: supertraits.clone(),
+            brace_token: item.brace_token,
+            items: Vec::new(),
+        };
+        (item.ident.clone(), supertraits, generics)
+    };
+
+    let (_, ty_generics, where_clause) = generics.split_for_impl();
+    let ty_generics = quote! { #ty_generics };
+    let where_clause = quote! { #where_clause };
+    let mut impl_generics = generics.clone();
+    let self_ty: syn::Ident = syn::Ident::new("VerusCompanionSelf", ident.span());
+    let param: syn::GenericParam = if supertraits.is_empty() {
+        parse_quote!(#self_ty: ?Sized)
+    } else {
+        parse_quote!(#self_ty: #supertraits + ?Sized)
+    };
+    impl_generics.params.push(param);
+    let (impl_generics, _, _) = impl_generics.split_for_impl();
+    let companion = quote_spanned! {item.span()=>
+        #[allow(non_camel_case_types)]
+        #item
+        impl #impl_generics #ident #ty_generics for #self_ty #where_clause {}
+    };
+    // The trait the companion belongs to is part of the compiled program: emit
+    // the companion next to the unchanged input.
+    let input: TokenStream = input.into();
+    quote! { #input #companion }.into()
+}
+
 pub(crate) fn rewrite_verus_attribute(
     erase: &EraseGhost,
     attr_args: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     if !erase.keep() {
-        return input;
+        return erase_verus_attribute(attr_args, input);
     }
 
     let mut item = syn::parse_macro_input!(input as Item);
@@ -188,12 +261,48 @@ pub(crate) fn rewrite_verus_attribute(
         attributes.push(quote_spanned!(item.span() => #[verifier::verify]));
     }
 
+    // Define the verified counterparts of the methods with a `with` clause in an
+    // implementation of the companion trait, leaving the unverified stubs here.
+    let mut companion_impl = None;
+    if matches!(&item, syn::Item::Impl(item_impl) if item_impl.trait_.is_some()) {
+        match split_trait_impl(&mut item) {
+            Ok(companion_item) => companion_impl = companion_item,
+            Err(error_tokens) => return error_tokens.into(),
+        }
+    }
+
+    // Collect the verified counterparts of the methods with a `with` clause into
+    // a companion trait.
+    let companion_trait = match companion_trait_of(&mut item) {
+        Ok(companion_item) => companion_item,
+        Err(error_tokens) => return error_tokens.into(),
+    };
+
     // Inject #[verus_spec] where missing and stamp impl methods with the sentinel marker.
-    prepare_items_for_verus_spec(args.span(), &mut item);
+    prepare_items_for_verus_spec(args.span(), &mut item, false);
+
     let mut new_stream = quote_spanned! {item.span()=>
         #(#attributes)*
         #item
     };
+    if let Some(mut companion_impl) = companion_impl {
+        prepare_items_for_verus_spec(args.span(), &mut companion_impl, true);
+        quote_spanned! {companion_impl.span()=>
+            #(#attributes)*
+            #companion_impl
+        }
+        .to_tokens(&mut new_stream);
+    }
+    if let Some(mut companion_trait) = companion_trait {
+        prepare_items_for_verus_spec(args.span(), &mut companion_trait, true);
+        quote_spanned! {companion_trait.span()=>
+            #[allow(non_camel_case_types)]
+            #[verus::internal(verified_trait)]
+            #[verifier::verify]
+            #companion_trait
+        }
+        .to_tokens(&mut new_stream);
+    }
     spec_fun.map(|f| f.to_tokens(&mut new_stream));
     new_stream.into()
 }
@@ -397,6 +506,198 @@ fn is_verus_macro_applied(attrs: &syn::Attribute) -> bool {
         && attrs.path().segments[1].ident == "internal"
 }
 
+/// The verified counterpart of a method of a trait lives in a companion trait,
+/// declared next to the trait, so that the trait itself keeps the exact
+/// signature its callers and its implementors see. An implementation of the
+/// trait is therefore split along the same line, without any annotation: a
+/// method with a `with` clause defines its counterpart in an implementation of
+/// the companion trait, and what is left in the implementation of the trait is
+/// the unverified stub of that counterpart.
+///
+/// Given `impl T for S`, a method
+///
+/// ```ignore
+/// #[verus_spec(with Ghost(g): Ghost<u64>)]
+/// fn f(&self, a: u64) -> u64 { BODY }
+/// ```
+///
+/// becomes a counterpart in `impl _VERUS_VERIFIED_TRAIT_T for S`
+///
+/// ```ignore
+/// #[verus_spec(with Ghost(g): Ghost<u64>)]
+/// fn _VERUS_VERIFIED_f(&self, a: u64, Ghost(g): Ghost<u64>) -> u64 { BODY }
+/// ```
+///
+/// while `impl T for S` keeps the stub, which is `external_body` and inherits
+/// `requires(false)` from the declaration of `f`. In erase mode nothing is
+/// split: the stub keeps the real body and is what is executed.
+fn split_trait_impl(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStream> {
+    let span = item.span();
+    let syn::Item::Impl(item_impl) = item else {
+        return Ok(None);
+    };
+    let Some((_, trait_path, _)) = &item_impl.trait_ else {
+        return Ok(None);
+    };
+    let companion = companion_trait_path(trait_path);
+    let mut companion_items: Vec<syn::ImplItem> = Vec::new();
+    for impl_item in item_impl.items.iter_mut() {
+        let syn::ImplItem::Fn(fun) = impl_item else {
+            continue;
+        };
+        if !has_with_clause(&fun.attrs)? {
+            continue;
+        }
+        companion_items.push(syn::ImplItem::Fn(fun.clone()));
+        // What is left implements the method of the trait itself.
+        fun.attrs.push(mk_companion_marker(span));
+    }
+    if companion_items.is_empty() {
+        return Ok(None);
+    }
+    let mut companion_impl = item_impl.clone();
+    companion_impl.attrs = Vec::new();
+    // Implementing the companion trait is never unsafe: it declares only the
+    // verified counterparts, and the obligation of the trait itself is
+    // discharged by the implementation of that trait.
+    companion_impl.unsafety = None;
+    companion_impl.trait_ = Some((None, companion, syn::token::For { span }));
+    companion_impl.items = companion_items;
+    Ok(Some(syn::Item::Impl(companion_impl)))
+}
+
+/// Derive the companion trait of a trait whose methods declare a `with` clause.
+///
+/// A method cannot declare its own verified counterpart: the counterpart has
+/// extra parameters, so it is a different method, and for an external trait it
+/// could not be added at all. The counterparts of the methods that are given a
+/// `with` clause are therefore collected into a companion trait declared next
+/// to the trait, and the method itself keeps `requires(false)`, so verified
+/// code can only call it through its counterpart.
+///
+/// The companion is a subtrait of the trait it belongs to, `trait
+/// _VERUS_VERIFIED_TRAIT_X: X`, which is the only direction available for an
+/// external trait, and the one that lets a counterpart refer to `Self::Assoc`
+/// and keep a default body. A bound `A: X` therefore does not reach the
+/// counterparts by itself; the bound on the companion is added to the callers
+/// that need it, see `hir_proof_with_rewrite`.
+///
+/// An implementation is split along the same line, so it implements the
+/// companion only if it defines a method that has a `with` clause. A method
+/// that has both a `with` clause and a default body therefore has to be defined
+/// by every implementation, like a method without a default body.
+fn companion_trait_of(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStream> {
+    let syn::Item::Trait(item_trait) = item else {
+        return Ok(None);
+    };
+    let span = item_trait.ident.span();
+    let mut methods: Vec<syn::TraitItem> = Vec::new();
+    for trait_item in item_trait.items.iter_mut() {
+        let syn::TraitItem::Fn(fun) = trait_item else {
+            continue;
+        };
+        if !has_with_clause(&fun.attrs)? {
+            continue;
+        }
+        if let Some(default) = &fun.default {
+            // The counterpart of the method is declared by the companion trait,
+            // which an implementation only implements when it overrides the
+            // method. A default body would therefore be inherited by the
+            // counterpart of an implementation that overrides the method
+            // without a `with` clause, and a verified call would run the
+            // default while the executable runs the override.
+            return Err(quote_spanned!(default.span() =>
+                compile_error!("`with` is not supported on a trait method with a default body: remove the default body and implement the method in every implementation of the trait");
+            ));
+        }
+        methods.push(syn::TraitItem::Fn(fun.clone()));
+        // What is left declares the method of the trait itself.
+        fun.attrs.push(mk_companion_marker(span));
+    }
+    if methods.is_empty() {
+        return Ok(None);
+    }
+    let trait_path = self_trait_path(item_trait);
+    let companion = companion_trait_path(&trait_path);
+    let mut supertraits = syn::punctuated::Punctuated::new();
+    supertraits.push(mk_trait_bound(trait_path));
+    Ok(Some(syn::Item::Trait(syn::ItemTrait {
+        attrs: Vec::new(),
+        vis: item_trait.vis.clone(),
+        unsafety: None,
+        auto_token: None,
+        restriction: None,
+        trait_token: item_trait.trait_token,
+        ident: companion.segments.last().expect("non-empty path").ident.clone(),
+        generics: item_trait.generics.clone(),
+        colon_token: Some(syn::token::Colon { spans: [span] }),
+        supertraits,
+        brace_token: item_trait.brace_token,
+        items: methods,
+    })))
+}
+
+fn mk_trait_bound(path: syn::Path) -> syn::TypeParamBound {
+    syn::TypeParamBound::Trait(syn::TraitBound {
+        paren_token: None,
+        modifier: syn::TraitBoundModifier::None,
+        lifetimes: None,
+        path,
+    })
+}
+
+/// The trait itself, named with the arguments of its own generics: `X<A>` for
+/// `trait X<A>`.
+fn self_trait_path(item_trait: &syn::ItemTrait) -> syn::Path {
+    let ident = &item_trait.ident;
+    let (_, ty_generics, _) = item_trait.generics.split_for_impl();
+    syn::parse_quote_spanned!(ident.span() => #ident #ty_generics)
+}
+
+/// Does one of the methods of this trait declare a `with` clause?
+fn has_with_method(item_trait: &syn::ItemTrait) -> bool {
+    item_trait.items.iter().any(|trait_item| match trait_item {
+        syn::TraitItem::Fn(fun) => has_with_clause(&fun.attrs).unwrap_or(false),
+        _ => false,
+    })
+}
+
+/// Does one of these attributes declare extra ghost/tracked inputs or outputs?
+fn has_with_clause(attrs: &[syn::Attribute]) -> Result<bool, TokenStream> {
+    for attr in attrs {
+        if attr.path().get_ident().map_or(true, |ident| ident != VERUS_SPEC) {
+            continue;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let spec: verus_syn::SignatureSpecAttr = match verus_syn::parse2(list.tokens.clone()) {
+            Ok(spec) => spec,
+            Err(err) => return Err(err.to_compile_error()),
+        };
+        if spec.spec.with.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The name of the companion trait of a trait.
+///
+/// The companion is declared next to the trait it belongs to, so it is reached
+/// through the same path, with the last segment renamed. The companion repeats
+/// the generics of that trait, so the arguments written at the use site carry
+/// over unchanged.
+pub(crate) fn companion_trait_path(trait_path: &syn::Path) -> syn::Path {
+    let mut companion = trait_path.clone();
+    let segment = companion.segments.last_mut().expect("non-empty trait path");
+    segment.ident = syn::Ident::new(
+        &format!("{VERIFIED_TRAIT_PREFIX}_{}", segment.ident),
+        segment.ident.span(),
+    );
+    companion
+}
+
 /// Adds a `#[verus_spec]` attribute to the given attributes if it's not already present.
 /// #[verus_spec] may be applied earlier or later than the current attribute.
 /// If it's applied earlier, we can infer it via verus::internal(xxx).
@@ -426,14 +727,35 @@ fn add_verus_spec_if_needed(attrs: &mut Vec<syn::Attribute>, span: proc_macro2::
 ///
 /// Recursion into nested items is intentionally skipped here; `#[verus_spec]`
 /// handles that during its own expansion pass.
-fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item) {
+fn prepare_items_for_verus_spec(
+    span: proc_macro2::Span,
+    i: &mut syn::Item,
+    is_verified_trait: bool,
+) {
     match i {
+        syn::Item::Trait(t) if is_verified_trait => {
+            for item in &mut t.items {
+                if let syn::TraitItem::Fn(syn::TraitItemFn { attrs, .. }) = item {
+                    add_verus_spec_if_needed(attrs, span);
+                    attrs.push(crate::syntax::mk_rust_attr_syn(
+                        span,
+                        "allow",
+                        quote_spanned! { span => (unused, verus_verified_trait_marker)},
+                    ));
+                }
+            }
+        }
         syn::Item::Const(syn::ItemConst { attrs, .. })
         | syn::Item::Static(syn::ItemStatic { attrs, .. })
         | syn::Item::Fn(syn::ItemFn { attrs, .. }) => {
             add_verus_spec_if_needed(attrs, span);
         }
         syn::Item::Impl(i) => {
+            let marker = if i.trait_.is_some() {
+                quote_spanned! { span => (unused, verus_trait_impl_method_marker)}
+            } else {
+                quote_spanned! { span => (unused, verus_impl_method_marker)}
+            };
             for item in &mut i.items {
                 match item {
                     syn::ImplItem::Const(syn::ImplItemConst { attrs, .. }) => {
@@ -441,11 +763,14 @@ fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item) {
                     }
                     syn::ImplItem::Fn(syn::ImplItemFn { attrs, .. }) => {
                         add_verus_spec_if_needed(attrs, span);
-                        attrs.push(crate::syntax::mk_rust_attr_syn(
-                            span,
-                            "allow",
-                            quote_spanned! { span => (unused, verus_impl_method_marker)},
-                        ));
+                        attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", marker.clone()));
+                        if is_verified_trait {
+                            attrs.push(crate::syntax::mk_rust_attr_syn(
+                                span,
+                                "allow",
+                                quote_spanned! { span => (unused, verus_verified_trait_marker)},
+                            ));
+                        }
                     }
                     _ => {}
                 }
@@ -453,6 +778,35 @@ fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item) {
         }
         _ => {}
     }
+}
+
+/// A method with a `with` clause is expanded into an unverified stub and a
+/// verified counterpart. When the two do not live next to each other, each side
+/// is marked with which of the two it is to expand into.
+///
+/// This marker says: the counterpart is declared elsewhere, in the companion
+/// trait, so expand into the stub only.
+fn mk_companion_marker(span: proc_macro2::Span) -> syn::Attribute {
+    crate::syntax::mk_rust_attr_syn(
+        span,
+        "allow",
+        quote_spanned! { span => (unused, verus_companion_marker)},
+    )
+}
+
+fn is_companion_marker(attr: &syn::Attribute) -> bool {
+    attr.path().get_ident().map_or(false, |ident| ident == "allow")
+        && matches!(&attr.meta, syn::Meta::List(meta_list)
+            if meta_list.tokens.to_string().contains("verus_companion_marker"))
+}
+
+/// The other side: this method is declared by a companion trait, or defined by
+/// an implementation of one, so expand into the counterpart only. The stub is
+/// the method of the trait the companion belongs to.
+fn is_verified_trait_marker(attr: &syn::Attribute) -> bool {
+    attr.path().get_ident().map_or(false, |ident| ident == "allow")
+        && matches!(&attr.meta, syn::Meta::List(meta_list)
+            if meta_list.tokens.to_string().contains("verus_verified_trait_marker"))
 }
 
 fn is_verus_proof_stmt(stmt: &syn::Stmt) -> bool {
@@ -665,19 +1019,38 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
 
             fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
 
-            let is_hidden_impl_marker = |attr: &syn::Attribute| {
-                attr.path().get_ident().map_or(false, |ident| {
-                    ident == "allow"
-                        && matches!(&attr.meta, syn::Meta::List(meta_list)
-                        if meta_list.tokens.to_string().contains("verus_impl_method_marker"))
-                })
+            let impl_marker = |attr: &syn::Attribute| -> Option<bool> {
+                if attr.path().get_ident().map_or(true, |ident| ident != "allow") {
+                    return None;
+                }
+                let syn::Meta::List(meta_list) = &attr.meta else {
+                    return None;
+                };
+                let tokens = meta_list.tokens.to_string();
+                if tokens.contains("verus_trait_impl_method_marker") {
+                    Some(true)
+                } else if tokens.contains("verus_impl_method_marker") {
+                    Some(false)
+                } else {
+                    None
+                }
             };
 
             // Check if the function has the impl method marker
-            let is_impl_fn = fun.attrs.iter().any(&is_hidden_impl_marker);
+            let impl_kind = fun.attrs.iter().find_map(&impl_marker);
+            let is_impl_fn = impl_kind.is_some();
+            let is_trait_impl_fn = impl_kind == Some(true);
 
             // Remove the marker attribute (internal use only)
-            fun.attrs.retain(|attr| !is_hidden_impl_marker(attr));
+            fun.attrs.retain(|attr| impl_marker(attr).is_none());
+
+            // A method with a `with` clause expands into an unverified stub and a
+            // verified counterpart. When a trait implementation is split between
+            // the trait and its companion, the two sides live in different impl
+            // blocks, and each is marked with which of the two it expands into.
+            let emit_stub = !fun.attrs.iter().any(is_verified_trait_marker);
+            let emit_counterpart = !fun.attrs.iter().any(is_companion_marker);
+            fun.attrs.retain(|attr| !is_verified_trait_marker(attr) && !is_companion_marker(attr));
 
             let mut new_stream = TokenStream::new();
             let mut rustdoc_attrs: Vec<syn::Attribute> = vec![];
@@ -717,17 +1090,46 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             // To avoid misuse of the unverified function,
             // we add `requires false` and thus prevent verified function to use it.
             // Allow unverified code to use the function without changing in/output.
+            // In erase mode the verified counterpart is never called: `proof_with!`
+            // is erased, so every call goes to the unverified stub, which keeps the
+            // real body. Emitting the counterpart would only add dead code, and for
+            // a trait implementation it would not even compile, since the erased
+            // trait declaration does not declare it.
+            let skip_verified = erase.erase() && spec_attr.spec.with.is_some();
             if let Some(with) = &spec_attr.spec.with {
                 let span = with.with.span();
-                let mut extra_funs = rewrite_unverified_func(&mut fun, span, erase);
+                if emit_stub {
+                    let mut extra_funs =
+                        rewrite_unverified_func(&mut fun, span, erase, is_trait_impl_fn);
 
-                if crate::rustdoc::env_rustdoc() {
-                    if let Some(unverified_fun) = extra_funs.last_mut() {
-                        unverified_fun.attrs.extend(rustdoc_attrs.clone());
+                    if crate::rustdoc::env_rustdoc() {
+                        if let Some(unverified_fun) = extra_funs.last_mut() {
+                            unverified_fun.attrs.extend(rustdoc_attrs.clone());
+                        }
+                        fun.attrs.push(crate::syntax::mk_rust_attr_syn(
+                            span,
+                            "doc",
+                            quote! {hidden},
+                        ));
                     }
-                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "doc", quote! {hidden}));
+                    extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
+                } else {
+                    // The stub is the method of the trait that the companion
+                    // trait belongs to, so only the rename is left to do here.
+                    let x = &fun.sig.ident;
+                    fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(
+                        span,
+                        "allow",
+                        quote! {non_snake_case},
+                    ));
+                    if crate::rustdoc::env_rustdoc() {
+                        fun.attrs.extend(rustdoc_attrs.clone());
+                    }
                 }
-                extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
+                if !emit_counterpart {
+                    return proc_macro::TokenStream::from(new_stream);
+                }
             } else if crate::rustdoc::env_rustdoc() {
                 fun.attrs.extend(rustdoc_attrs);
             }
@@ -772,7 +1174,9 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             if erase.erase() {
                 // In erase mode, just return the stub functions.
                 // No need to add proof statements.
-                fun.to_tokens(&mut new_stream);
+                if !skip_verified {
+                    fun.to_tokens(&mut new_stream);
+                }
                 return proc_macro::TokenStream::from(new_stream);
             }
             // Create const proxy function if it is a const function.
@@ -833,14 +1237,70 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                 verus_syn::parse_macro_input!(outer_attr_tokens as verus_syn::SignatureSpecAttr);
             let mut new_stream = TokenStream::new();
 
+            // In a companion trait, the role of the unverified stub is played by
+            // the method of the trait the companion belongs to, which is declared
+            // elsewhere and cannot be given a precondition here.
+            let emit_stub = !method.attrs.iter().any(is_verified_trait_marker);
+            // In that trait it is the other way round: the counterpart is not a
+            // member of it, and is declared by the companion trait instead.
+            let emit_counterpart = !method.attrs.iter().any(is_companion_marker);
+            method
+                .attrs
+                .retain(|attr| !is_verified_trait_marker(attr) && !is_companion_marker(attr));
+
             if let Some(with) = &spec_attr.spec.with {
-                // Trait method requires can only be inherited from the trait declaration
-                // However, we cannot distinguish trait function impl vs other function impl.
-                // let unverified_method = rewrite_unverified_func(&mut method, with.with.span());
-                // unverified_method.to_tokens(&mut new_stream);
-                return proc_macro::TokenStream::from(
-                    quote_spanned!(with.with.span() => compile_error!("`with` does not support trait");),
-                );
+                // An `assume_specification` function names its target with the
+                // trailing call of its body, so a bodyless one cannot be linked
+                // to an external function.
+                if method.attrs.iter().any(is_external_fn_specification_attr) {
+                    return proc_macro::TokenStream::from(quote_spanned!(with.with.span() =>
+                        compile_error!("`with` on an assume_specification requires a body that calls the specified function");
+                    ));
+                }
+                let span = with.with.span();
+                // The unverified stub keeps the declared signature and gets
+                // `requires(false)`, so verified code cannot call it directly.
+                // The verified counterpart is declared next to it and carries the
+                // extra ghost/tracked parameters and the specification.
+                if emit_stub {
+                    let mut stub = method.clone();
+                    stub.attrs.push(mk_verus_attr_syn(span, quote! { unverified_stub }));
+                    stub.attrs.push(mk_verus_attr_syn(span, quote! { verus_macro }));
+                    if !crate::rustdoc::env_rustdoc() {
+                        stub.attrs.push(crate::syntax::mk_rust_attr_syn(
+                            span,
+                            "doc",
+                            quote! {hidden},
+                        ));
+                    }
+                    let mut stub_spec_fun_opt =
+                        syntax_trait::split_trait_method_syn(&stub, erase.erase());
+                    let stub_spec_fun = stub_spec_fun_opt.as_mut().unwrap_or(&mut stub);
+                    if let Some(block) = stub_spec_fun.block_mut() {
+                        block.stmts.insert(
+                            0,
+                            syn::Stmt::Expr(
+                                syn::Expr::Verbatim(
+                                    quote_spanned_builtin!(verus_builtin, span => #verus_builtin::requires([false])),
+                                ),
+                                Some(syn::token::Semi { spans: [span] }),
+                            ),
+                        );
+                    }
+                    stub_spec_fun_opt.to_tokens(&mut new_stream);
+                    stub.to_tokens(&mut new_stream);
+                }
+                if !emit_counterpart {
+                    return proc_macro::TokenStream::from(new_stream);
+                }
+                let x = &method.sig.ident;
+                method.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+                method.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
+                method.attrs.push(crate::syntax::mk_rust_attr_syn(
+                    span,
+                    "allow",
+                    quote! {non_snake_case},
+                ));
             }
 
             let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig, true, false);
@@ -1205,6 +1665,7 @@ fn rewrite_unverified_func(
     fun: &mut syn::ItemFn,
     span: proc_macro2::Span,
     erase: EraseGhost,
+    is_trait_impl_fn: bool,
 ) -> Vec<syn::ItemFn> {
     let is_assume_spec = fun.attrs.iter().any(is_external_fn_specification_attr);
     let mut ret = vec![];
@@ -1251,7 +1712,11 @@ fn rewrite_unverified_func(
                 block.stmts.insert(0, precondition_false);
             } else {
                 block.stmts.clear();
-                block.stmts.push(precondition_false);
+                // A trait implementation cannot declare its own `requires`: it
+                // inherits `requires(false)` from the trait declaration.
+                if !is_trait_impl_fn {
+                    block.stmts.push(precondition_false);
+                }
                 block.stmts.push(unimplemented.clone());
             }
         }
