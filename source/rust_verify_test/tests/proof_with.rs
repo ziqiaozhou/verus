@@ -979,3 +979,365 @@ test_verify_one_file! {
         }
     } => Err(e) => assert_rust_error_msg_all(e, "not all trait items implemented, missing: `_VERUS_VERIFIED_g`")
 }
+
+// --- `with` on the methods of an external trait ---
+//
+// An external trait cannot declare the verified counterparts of its methods:
+// they take extra parameters, so they are not members of it. Declaring a `with`
+// clause on its proxy derives a companion trait, a subtrait of the external
+// trait, that declares the counterparts. The method of the external trait keeps
+// `requires(false)`, so verified code can only reach it through its
+// counterpart, and an implementation of the external trait is split between the
+// two traits.
+
+// The external trait and the type that implements it, shared by the tests below.
+const EXTERNAL_TRAIT_DECL: &str = code_str! {
+    use vstd::prelude::*;
+
+    #[verifier::external]
+    trait T {
+        fn f(&self, a: u64) -> u64;
+    }
+
+    #[verus_verify]
+    struct S;
+};
+
+// The proxy that declares the `with` clause, and the implementation split by it.
+const EXTERNAL_TRAIT: &str = code_str! {
+    #[verus_verify]
+    #[verifier::external_trait_specification]
+    trait ExT {
+        type ExternalTraitSpecificationFor: T;
+
+        #[verus_spec(r =>
+            with Ghost(g): Ghost<int> -> g2: Ghost<int>
+            ensures r == a, g2@ == g + 1,
+        )]
+        fn f(&self, a: u64) -> u64;
+    }
+
+    #[verus_verify]
+    impl T for S {
+        #[verus_spec(with Ghost(g): Ghost<int> -> g2: Ghost<int>)]
+        fn f(&self, a: u64) -> u64 {
+            proof_decl!{ let ghost gg: int = g + 1; }
+            proof_with!{|= Ghost(gg)}
+            a
+        }
+    }
+};
+
+const CALL_EXTERNAL_TRAIT: &str = code_str! {
+    #[verus_verify]
+    fn test() {
+        proof_with!{Ghost(3int) => Ghost(g2)}
+        let r = S.f(7);
+        proof!{ assert(r == 7); assert(g2 == 4); }
+    }
+};
+
+test_verify_one_file! {
+    #[test] test_external_trait_group
+        // The external trait `T`, its proxy `ExT`, and one impl serve the cases
+        // whose shape is not the point; each is just a caller.
+        EXTERNAL_TRAIT_DECL.to_string() + EXTERNAL_TRAIT + code_str!{
+            // a method call reaches the counterpart of the external trait method
+            #[verus_verify]
+            fn call_method() {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = S.f(7);
+                proof!{ assert(r == 7); assert(g2 == 4); }
+            }
+
+            // a qualified call, whose counterpart the companion declares
+            #[verus_verify]
+            fn qualified_call() {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = T::f(&S, 7);
+                proof!{ assert(r == 7); assert(g2 == 4); }
+            }
+
+            // a generic caller gets the companion-trait bound added to it
+            #[verus_spec]
+            fn call_generic<A: T>(x: &A) {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = x.f(7);
+                proof!{ assert(r == 7); assert(g2 == 4); }
+            }
+
+            // the added bound has to be satisfied by a concrete argument
+            #[verus_verify]
+            fn call_the_generic_caller() {
+                call_generic(&S);
+            }
+        }
+        // the proxy may be generic, and its companion must carry those
+        // parameters through to the implementation
+        + &in_mod("generic_trait", code_str!{
+            use vstd::prelude::*;
+
+            #[verifier::external]
+            trait T<A> {
+                fn f(&self, a: A) -> A;
+            }
+
+            #[verus_verify]
+            #[verifier::external_trait_specification]
+            trait ExT<A> {
+                type ExternalTraitSpecificationFor: T<A>;
+
+                #[verus_spec(r =>
+                    with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                    ensures g2@ == g + 1,
+                )]
+                fn f(&self, a: A) -> A;
+            }
+
+            #[verus_verify]
+            struct S;
+
+            #[verus_verify]
+            impl T<u64> for S {
+                #[verus_spec(r =>
+                    with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                    ensures r == a,
+                )]
+                fn f(&self, a: u64) -> u64 {
+                    proof_decl!{ let ghost gg: int = g + 1; }
+                    proof_with!{|= Ghost(gg)}
+                    a
+                }
+            }
+
+            #[verus_verify]
+            fn test() {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = S.f(7);
+                proof!{ assert(r == 7); assert(g2 == 4); }
+            }
+        })
+        // a proxy may describe some methods with `with` and some without, and
+        // each `with` method gets a counterpart of its own, ghost or tracked
+        + &in_mod("mixed_methods", code_str!{
+            use vstd::prelude::*;
+
+            #[verifier::external]
+            trait T {
+                fn ghost_method(&self, a: u64) -> u64;
+                fn tracked_method(&self) -> u64;
+                fn output_only(&self, a: u64) -> u64;
+                fn plain(&self) -> u64;
+            }
+
+            #[verus_verify]
+            #[verifier::external_trait_specification]
+            trait ExT {
+                type ExternalTraitSpecificationFor: T;
+
+                #[verus_spec(r =>
+                    with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                    ensures r == a, g2@ == g + 1,
+                )]
+                fn ghost_method(&self, a: u64) -> u64;
+
+                #[verus_spec(r =>
+                    with Tracked(b): Tracked<u64>
+                    requires b == 1,
+                    ensures r == 2,
+                )]
+                fn tracked_method(&self) -> u64;
+
+                // extra outputs alone are enough to need a counterpart
+                #[verus_spec(r =>
+                    with -> g2: Ghost<int>
+                    ensures r == a, g2@ == a,
+                )]
+                fn output_only(&self, a: u64) -> u64;
+
+                #[verus_spec(r => ensures r == 5)]
+                fn plain(&self) -> u64;
+            }
+
+            #[verus_verify]
+            struct S;
+
+            #[verus_verify]
+            impl T for S {
+                #[verus_spec(with Ghost(g): Ghost<int> -> g2: Ghost<int>)]
+                fn ghost_method(&self, a: u64) -> u64 {
+                    proof_decl!{ let ghost gg: int = g + 1; }
+                    proof_with!{|= Ghost(gg)}
+                    a
+                }
+
+                #[verus_spec(with -> g2: Ghost<int>)]
+                fn output_only(&self, a: u64) -> u64 {
+                    proof_decl!{ let ghost gg: int = a as int; }
+                    proof_with!{|= Ghost(gg)}
+                    a
+                }
+
+                #[verus_spec(with Tracked(b): Tracked<u64>)]
+                fn tracked_method(&self) -> u64 {
+                    2
+                }
+
+                fn plain(&self) -> u64 {
+                    5
+                }
+            }
+
+            #[verus_verify]
+            fn call_all<A: T>(x: &A) {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = x.ghost_method(7);
+                proof_with!{Tracked(1u64)}
+                let q = x.tracked_method();
+                proof_with!{=> Ghost(g3)}
+                let o = x.output_only(4);
+                let p = x.plain();
+                proof!{
+                    assert(r == 7); assert(g2 == 4); assert(q == 2);
+                    assert(o == 4); assert(g3 == 4); assert(p == 5);
+                }
+            }
+
+            #[verus_verify]
+            fn test() {
+                call_all(&S);
+                proof_with!{Tracked(1u64)}
+                let r = S.tracked_method();
+                proof!{ assert(r == 2); }
+            }
+        })
+    => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    // The companion trait is erased away when the code is compiled: the body
+    // stays in the implementation of the external trait.
+    #[test] test_external_trait_with_compile ["--compile"] =>
+        EXTERNAL_TRAIT_DECL.to_string() + EXTERNAL_TRAIT + CALL_EXTERNAL_TRAIT
+    => Ok(())
+}
+
+test_verify_one_file! {
+    // The method of the external trait has `requires(false)`: what it does
+    // without the extra arguments is not specified.
+    #[test] test_external_trait_with_plain_call
+        EXTERNAL_TRAIT_DECL.to_string() + EXTERNAL_TRAIT + code_str!{
+        #[verus_verify]
+        fn test() {
+            let r = S.f(7); // FAILS
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    // The counterpart is checked against the specification declared for it by
+    // the companion trait, which the implementation does not repeat.
+    #[test] test_external_trait_with_failed_ensures
+        EXTERNAL_TRAIT_DECL.to_string() + code_str!{
+        #[verus_verify]
+        #[verifier::external_trait_specification]
+        trait ExT {
+            type ExternalTraitSpecificationFor: T;
+
+            #[verus_spec(r =>
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                ensures r == a, g2@ == g + 1, // FAILS
+            )]
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verus_verify]
+        impl T for S {
+            #[verus_spec(with Ghost(g): Ghost<int> -> g2: Ghost<int>)]
+            fn f(&self, a: u64) -> u64 {
+                proof_decl!{ let ghost gg: int = g + 2; }
+                proof_with!{|= Ghost(gg)}
+                a
+            }
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    // The companion trait is named after the external trait, so the proxy has
+    // to say which trait it stands for.
+    #[test] test_external_trait_with_without_specification_for code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        #[verifier::external_trait_specification]
+        trait ExT {
+            #[verus_spec(r =>
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                ensures r == a, g2@ == g + 1,
+            )]
+            fn f(&self, a: u64) -> u64;
+        }
+    } => Err(e) => assert_vir_error_msg(e, "ExternalTraitSpecificationFor")
+}
+
+// TODO: update verus_spec macro to support trait methods
+test_verify_one_file! {
+    // `with` on an implementation of an external trait is not supported: the
+    // verified counterpart cannot be added to a trait declared in another crate.
+    // The counterparts of the methods of a trait are declared by a companion
+    // trait, which is derived from a `with` clause on the trait itself or, for
+    // an external trait, on its `external_trait_specification`. A trait that has
+    // neither has no companion to implement.
+    #[test] test_external_trait_impl code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl core::default::Default for S {
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn default() -> S {
+                S
+            }
+        }
+    } => Err(e) => assert_rust_error_msg_all(e, "cannot find trait `_VERUS_VERIFIED_TRAIT_Default`")
+}
+
+test_verify_one_file! {
+    // A method of an external trait that has a default body has to be overridden
+    // by an implementation that is used through `proof_with!`: the counterpart
+    // declared by the companion trait has no default body of its own.
+    #[test] test_external_trait_with_default_body code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        trait T {
+            fn g(&self) -> u64 {
+                2
+            }
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        #[verifier::external_trait_specification]
+        trait ExT {
+            type ExternalTraitSpecificationFor: T;
+
+            #[verus_spec(with Tracked(b): Tracked<u64>)]
+            fn g(&self) -> u64;
+        }
+
+        #[verus_verify]
+        impl T for S {}
+
+        #[verus_verify]
+        fn test() {
+            proof_with!{Tracked(1u64)}
+            let q = S.g();
+        }
+    } => Err(e) => assert_rust_error_msg_all(e, "no method named `_VERUS_VERIFIED_g` found for struct `S`")
+}

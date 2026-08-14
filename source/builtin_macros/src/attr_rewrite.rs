@@ -120,18 +120,37 @@ fn erase_verus_attribute(
     attr_args: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let _ = attr_args;
+    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+    let Ok(args) = syn::parse::Parser::parse(parser, attr_args) else {
+        return input;
+    };
+    let has_arg =
+        |name: &str| args.iter().any(|arg| arg.path().get_ident().map_or(false, |id| id == name));
     let Ok(mut item) = syn::parse::<syn::ItemTrait>(input.clone()) else {
         return input;
     };
+    let is_proxy = has_arg("external_trait_specification")
+        || item.attrs.iter().any(|attr| {
+            attr.path()
+                .segments
+                .last()
+                .map_or(false, |seg| seg.ident == "external_trait_specification")
+        });
     let (ident, supertraits, generics) = {
-        // The companion trait is derived from the trait this item declares. It
-        // only exists if one of the methods declares extra ghost/tracked
-        // parameters.
+        // The companion trait is derived from the trait this item declares or,
+        // for a proxy, specifies. It only exists if one of the methods declares
+        // extra ghost/tracked parameters.
         if !has_with_method(&item) {
             return input;
         }
-        let trait_path = self_trait_path(&item);
+        let trait_path = if is_proxy {
+            let Some(external) = external_trait_of_proxy(&item) else {
+                return input;
+            };
+            external
+        } else {
+            self_trait_path(&item)
+        };
         let mut supertraits = syn::punctuated::Punctuated::new();
         supertraits.push(mk_trait_bound(trait_path.clone()));
         let generics = item.generics.clone();
@@ -200,6 +219,16 @@ pub(crate) fn rewrite_verus_attribute(
     const DUAL_ATTR: &str = "dual_spec";
     const IGNORE_VERIFY_ATTRS: [&str; 3] =
         ["external", "external_body", "external_type_specification"];
+    const EXTERNAL_TRAIT_SPECIFICATION: &str = "external_trait_specification";
+    let mut is_external_trait_proxy = match &item {
+        syn::Item::Trait(item_trait) => item_trait.attrs.iter().any(|attr| {
+            attr.path()
+                .segments
+                .last()
+                .map_or(false, |seg| seg.ident == EXTERNAL_TRAIT_SPECIFICATION)
+        }),
+        _ => false,
+    };
     // Modifier attrs are compatible with both external and non-external attrs.
     // They neither set contains_external nor contains_non_external.
     const MODIFIER_ATTRS: [&str; 3] = [
@@ -210,7 +239,11 @@ pub(crate) fn rewrite_verus_attribute(
 
     for arg in &args {
         let path = arg.path().get_ident().expect("Invalid verus verifier attribute");
-        if IGNORE_VERIFY_ATTRS.contains(&path.to_string().as_str()) {
+        if EXTERNAL_TRAIT_SPECIFICATION == path.to_string().as_str() {
+            is_external_trait_proxy = true;
+            contains_external = true;
+            attributes.push(quote_spanned!(arg.span() => #[verifier::#arg]));
+        } else if IGNORE_VERIFY_ATTRS.contains(&path.to_string().as_str()) {
             contains_external = true;
             attributes.push(quote_spanned!(arg.span() => #[verifier::#arg]));
         } else if VERIFY_ATTRS.contains(&path.to_string().as_str()) {
@@ -273,7 +306,7 @@ pub(crate) fn rewrite_verus_attribute(
 
     // Collect the verified counterparts of the methods with a `with` clause into
     // a companion trait.
-    let companion_trait = match companion_trait_of(&mut item) {
+    let companion_trait = match companion_trait_of(&mut item, is_external_trait_proxy) {
         Ok(companion_item) => companion_item,
         Err(error_tokens) => return error_tokens.into(),
     };
@@ -586,7 +619,10 @@ fn split_trait_impl(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStre
 /// companion only if it defines a method that has a `with` clause. A method
 /// that has both a `with` clause and a default body therefore has to be defined
 /// by every implementation, like a method without a default body.
-fn companion_trait_of(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStream> {
+fn companion_trait_of(
+    item: &mut syn::Item,
+    is_proxy: bool,
+) -> Result<Option<syn::Item>, TokenStream> {
     let syn::Item::Trait(item_trait) = item else {
         return Ok(None);
     };
@@ -617,7 +653,18 @@ fn companion_trait_of(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenSt
     if methods.is_empty() {
         return Ok(None);
     }
-    let trait_path = self_trait_path(item_trait);
+    // The trait the companion belongs to: for a proxy that is the external
+    // trait it specifies, not the proxy itself.
+    let trait_path = if is_proxy {
+        let Some(external) = external_trait_of_proxy(item_trait) else {
+            return Err(quote_spanned!(span =>
+                compile_error!("`with` on the proxy of an external trait requires an `ExternalTraitSpecificationFor` member naming the external trait");
+            ));
+        };
+        external
+    } else {
+        self_trait_path(item_trait)
+    };
     let companion = companion_trait_path(&trait_path);
     let mut supertraits = syn::punctuated::Punctuated::new();
     supertraits.push(mk_trait_bound(trait_path));
@@ -652,6 +699,23 @@ fn self_trait_path(item_trait: &syn::ItemTrait) -> syn::Path {
     let ident = &item_trait.ident;
     let (_, ty_generics, _) = item_trait.generics.split_for_impl();
     syn::parse_quote_spanned!(ident.span() => #ident #ty_generics)
+}
+
+/// The external trait that a proxy specifies, named by the bound of its
+/// `ExternalTraitSpecificationFor` member.
+fn external_trait_of_proxy(item_trait: &syn::ItemTrait) -> Option<syn::Path> {
+    item_trait.items.iter().find_map(|trait_item| {
+        let syn::TraitItem::Type(assoc) = trait_item else {
+            return None;
+        };
+        if assoc.ident != "ExternalTraitSpecificationFor" {
+            return None;
+        }
+        assoc.bounds.iter().find_map(|bound| match bound {
+            syn::TypeParamBound::Trait(bound) => Some(bound.path.clone()),
+            _ => None,
+        })
+    })
 }
 
 /// Does one of the methods of this trait declare a `with` clause?

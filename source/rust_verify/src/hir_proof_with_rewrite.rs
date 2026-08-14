@@ -173,9 +173,20 @@ fn local_maps<'tcx>(
             twin_traits.entry(name).or_default().push(parent.to_def_id());
         }
     }
+    external_twin_traits(tcx, &mut twin_traits, &mut trait_supers);
     (map, attrs, twin_traits, trait_supers)
 }
 
+/// The supertraits a trait of another crate declares.
+fn foreign_supertraits<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId) -> Vec<DefId> {
+    tcx.explicit_super_predicates_of(trait_def_id)
+        .skip_binder()
+        .iter()
+        .filter_map(|(clause, _)| Some(clause.as_trait_clause()?.def_id()))
+        .collect()
+}
+
+/// The traits named by a list of bounds.
 fn bound_trait_ids(bounds: &[GenericBound<'_>]) -> Vec<DefId> {
     bounds
         .iter()
@@ -189,6 +200,35 @@ fn bound_trait_ids(bounds: &[GenericBound<'_>]) -> Vec<DefId> {
 /// Does one of these attributes mark a companion trait?
 fn is_companion_trait(attrs: &[rustc_hir::Attribute]) -> bool {
     parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::VerifiedTrait))
+}
+
+/// Index the companion traits declared by the crates this one depends on.
+///
+/// A companion trait is usually declared next to the `external_trait_specification`
+/// of the trait it belongs to, which is commonly in another crate.
+fn external_twin_traits<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    twin_traits: &mut HashMap<Symbol, Vec<DefId>>,
+    trait_supers: &mut HashMap<DefId, Vec<DefId>>,
+) {
+    for cnum in tcx.crates(()) {
+        for trait_def_id in tcx.traits(*cnum) {
+            // Verus attributes are `Unparsed`, where `get_all_attrs` is
+            // acceptable per its deprecation message.
+            #[allow(deprecated)]
+            let attrs = tcx.get_all_attrs(*trait_def_id);
+            if !is_companion_trait(attrs) {
+                continue;
+            }
+            for assoc in tcx.associated_items(*trait_def_id).in_definition_order() {
+                let name = assoc.name();
+                if name.as_str().starts_with(VERIFIED_PREFIX) {
+                    twin_traits.entry(name).or_default().push(*trait_def_id);
+                }
+            }
+            trait_supers.insert(*trait_def_id, foreign_supertraits(tcx, *trait_def_id));
+        }
+    }
 }
 
 /// Index the verified counterparts declared for external functions.
@@ -352,7 +392,11 @@ impl<'tcx> Ctxt<'tcx> {
     /// its declaration: the query would re-enter the `hir_crate` computation
     /// this pass is part of.
     fn supertraits(&self, trait_def_id: DefId) -> Vec<DefId> {
-        self.trait_supers.get(&trait_def_id).cloned().unwrap_or_default()
+        match self.trait_supers.get(&trait_def_id) {
+            Some(supers) => supers.clone(),
+            None if !trait_def_id.is_local() => foreign_supertraits(self.tcx, trait_def_id),
+            None => Vec::new(),
+        }
     }
 
     /// Do these bounds already give the trait that `companion` is the companion
