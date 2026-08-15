@@ -121,17 +121,10 @@ fn register_friendly_path_as_rust_name<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, p
         _ => None,
     };
     if let Some(ty_path) = friendly_self_ty {
-        let friendly_path =
-            typ_path_and_ident_to_vir_path(&ty_path, def_to_path_ident(tcx, def_id));
+        // Note: take the name from `path`, which a function declared with `with ..`
+        // is renamed in, rather than from the definition.
+        let friendly_path = typ_path_and_ident_to_vir_path(&ty_path, path.last_segment());
         vir::ast_util::set_path_as_rust_name(path, &friendly_path);
-    }
-}
-
-fn def_to_path_ident<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> vir::ast::Ident {
-    let def_path = tcx.def_path(def_id);
-    match def_path.data.last().expect("unexpected empty impl path").data {
-        rustc_hir::definitions::DefPathData::ValueNs(name) => Arc::new(name.to_string()),
-        _ => panic!("unexpected name of impl"),
     }
 }
 
@@ -160,11 +153,86 @@ pub(crate) fn def_id_to_vir_path_option<'tcx>(
             return Some(Arc::new(PathX { krate: CrateId::Vstd, segments: Arc::new(segments) }));
         }
     }
-    let path = def_path_to_vir_path(tcx, tcx.def_path(def_id));
+    let path =
+        def_path_to_vir_path(tcx, tcx.def_path(def_id)).map(|p| with_fn_path(tcx, def_id, p));
     if let Some(path) = &path {
         register_friendly_path_as_rust_name(tcx, def_id, path);
     }
     path
+}
+
+/// A function declared with `#[verus_spec(with ..)]` is split in two: the stub `f`,
+/// which keeps the signature the user wrote, and the verified counterpart
+/// `_VERUS_VERIFIED_f`, which carries the extra ghost/tracked parameters and the
+/// specification. Swap the two names, so that the function the user verifies is the
+/// one named `f` in messages, `--verify-function` and the profiler.
+///
+/// This has to happen for definitions and for call sites alike, so it belongs here
+/// rather than in `check_item_fn`. The specification of a trait method and the
+/// unerased proxy of a `const fn` are separate items whose names embed the name of
+/// the function, so rename what follows their prefix.
+fn with_fn_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, path: Path) -> Path {
+    use rustc_hir::def::DefKind;
+    if !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+        return path;
+    }
+    let name = path.last_segment();
+    let mut prefix = "";
+    let mut base: &str = &name;
+    for p in [vir::def::VERUS_SPEC, crate::rust_to_vir_func::UNERASED_PROXY_PREFIX] {
+        if let Some(rest) = base.strip_prefix(p) {
+            prefix = p;
+            base = rest;
+        }
+    }
+    let renamed = match base.strip_prefix(crate::attributes::VERIFIED_PREFIX) {
+        Some(base) => base.to_owned(),
+        None if crate::attributes::is_unverified_stub(def_attrs(tcx, def_id))
+            && has_sibling_counterpart(tcx, def_id) =>
+        {
+            format!("{}{base}", crate::attributes::UNVERIFIED_PREFIX)
+        }
+        None => return path,
+    };
+    path.pop_segment().push_segment(Arc::new(format!("{prefix}{renamed}")))
+}
+
+/// Does `with_fn_path` rename this function? Only the two halves of a `with ..` split
+/// are renamed; every other function keeps the name it is written with.
+pub(crate) fn is_with_fn_renamed<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
+    match def_path_to_vir_path(tcx, tcx.def_path(def_id)) {
+        Some(path) => with_fn_path(tcx, def_id, path.clone()).last_segment() != path.last_segment(),
+        None => false,
+    }
+}
+
+/// Does the counterpart of this stub claim its name? A function, an inherent method
+/// and a method of a trait declared in this crate all give their name up, since the
+/// counterpart is a sibling item or a method of the companion trait.
+///
+/// A method of an `external_trait_specification` is the exception: it is named after
+/// the external method it specifies, and that name is what call sites of the external
+/// method compute, so it cannot move.
+fn has_sibling_counterpart<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
+    use rustc_hir::def::DefKind;
+    let Some(parent) = tcx.opt_parent(def_id) else {
+        return false;
+    };
+    match tcx.def_kind(parent) {
+        DefKind::Mod | DefKind::Impl { .. } => true,
+        DefKind::Trait => crate::attributes::parse_attrs_opt(def_attrs(tcx, parent), None)
+            .into_iter()
+            .all(|a| !matches!(a, crate::attributes::Attr::ExternalTraitSpecification(..))),
+        _ => false,
+    }
+}
+
+/// The attributes of any item, local or not.
+fn def_attrs<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> &'tcx [rustc_hir::Attribute] {
+    match def_id.as_local() {
+        Some(local) => tcx.hir_attrs(tcx.local_def_id_to_hir_id(local)),
+        None => tcx.attrs_for_def(def_id),
+    }
 }
 
 pub(crate) fn def_id_to_vir_path_ignoring_diagnostic_rename<'tcx>(

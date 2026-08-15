@@ -959,6 +959,18 @@ pub(crate) fn parse_attrs(
     Ok(v)
 }
 
+/// The prefix `builtin_macros` gives the verified counterpart of a function
+/// declared with `#[verus_spec(with ..)]`.
+pub(crate) const VERIFIED_PREFIX: &str = "_VERUS_VERIFIED_";
+/// The prefix its unverified stub gets in VIR, so that the counterpart can take
+/// the name the user wrote.
+pub(crate) const UNVERIFIED_PREFIX: &str = "_VERUS_UNVERIFIED_";
+
+/// Is this the unverified stub of a function declared with `#[verus_spec(with ..)]`?
+pub(crate) fn is_unverified_stub(attrs: &[Attribute]) -> bool {
+    parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::UnverifiedStub))
+}
+
 pub(crate) fn parse_attrs_opt(
     attrs: &[Attribute],
     diagnostics: Option<&mut Vec<VirErrAs>>,
