@@ -1963,3 +1963,137 @@ test_verify_one_file! {
         }
     } => Err(e) => assert_rust_error_msg_all(e, "no method named `_VERUS_VERIFIED_g` found for struct `S`")
 }
+
+test_verify_one_file_with_options! {
+    // The verified counterpart is named after the function the user wrote, so
+    // `--verify-function` selects it and messages do not mention the twin.
+    #[test] test_verify_function_selects_counterpart
+        ["--verify-function test", "--verify-root"] => code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(r =>
+            with Tracked(b): Tracked<u64>
+            requires b == 1,
+            ensures r == 3u64,
+        )]
+        fn test(a: u64) -> u64 {
+            a
+        }
+    } => Err(err) => assert_eq!(err.errors.len(), 1)
+}
+
+test_verify_one_file_with_options! {
+    // The counterpart of a method takes the name of the method the user wrote in
+    // the friendly name too, which is what `--verify-function` matches on.
+    #[test] test_verify_function_selects_method_counterpart
+        ["--verify-function S::f", "--verify-root"] => code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                with Tracked(b): Tracked<u64>
+                requires b == 1,
+                ensures r == 3u64,
+            )]
+            fn f(&self, a: u64) -> u64 {
+                a
+            }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "postcondition not satisfied")
+}
+
+test_verify_one_file_with_options! {
+    // A trait method is selected by the name the user wrote too, and only the
+    // one method named is verified even when the trait has several methods with
+    // a `with` clause.
+    #[test] test_verify_function_selects_trait_method_counterpart
+        ["--verify-function S::g", "--verify-root"] => code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait T {
+            #[verus_spec(r =>
+                with Ghost(g): Ghost<int>
+                ensures r == a,
+            )]
+            fn f(&self, a: u64) -> u64;
+
+            #[verus_spec(r =>
+                with Tracked(b): Tracked<u64>
+                requires b == 1,
+                ensures r == 2,
+            )]
+            fn g(&self) -> u64;
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl T for S {
+            #[verus_spec(with Ghost(g): Ghost<int>)]
+            fn f(&self, a: u64) -> u64 {
+                a
+            }
+
+            #[verus_spec(with Tracked(b): Tracked<u64>)]
+            fn g(&self) -> u64 {
+                3
+            }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "postcondition not satisfied")
+}
+
+test_verify_one_file_with_options! {
+    // The implementation of an external trait is named after the method the user
+    // wrote as well, so `--verify-function` picks one of its counterparts.
+    #[test] test_verify_function_selects_external_trait_method_counterpart
+        ["--verify-function S::g", "--verify-root"] => code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        trait T {
+            fn f(&self, a: u64) -> u64;
+            fn g(&self) -> u64;
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        #[verifier::external_trait_specification]
+        trait ExT {
+            type ExternalTraitSpecificationFor: T;
+
+            #[verus_spec(r =>
+                with Ghost(g): Ghost<int>
+                ensures r == a,
+            )]
+            fn f(&self, a: u64) -> u64;
+
+            #[verus_spec(r =>
+                with Tracked(b): Tracked<u64>
+                requires b == 1,
+                ensures r == 2,
+            )]
+            fn g(&self) -> u64;
+        }
+
+        #[verus_verify]
+        impl T for S {
+            #[verus_spec(with Ghost(g): Ghost<int>)]
+            fn f(&self, a: u64) -> u64 {
+                a
+            }
+
+            #[verus_spec(with Tracked(b): Tracked<u64>)]
+            fn g(&self) -> u64 {
+                3
+            }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "postcondition not satisfied")
+}
