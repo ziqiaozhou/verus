@@ -973,12 +973,15 @@ fn rewrite_verus_spec_on_expr_local(
     tokens.into()
 }
 
-/// Wrap an expression with a `|=` follow clause, producing a tuple `(expr, follow)`.
-/// Used by both struct-constructor and function-call proof_with! handling.
-fn apply_follows(erase: &EraseGhost, expr: &mut Expr, follow_tokens: TokenStream) {
-    let follow: TokenStream =
-        syntax::rewrite_expr(erase.clone(), false, follow_tokens.into()).into();
-    *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr, #follow)));
+/// Wrap an expression with a `|=` follow clause, producing a flat tuple
+/// `(expr, follow_0, .., follow_n)`, which is the shape of the return type the
+/// extra outputs of a `with` clause give the function.
+fn apply_follows(erase: &EraseGhost, expr: &mut Expr, follow_tokens: Vec<TokenStream>) {
+    let follows: Vec<TokenStream> = follow_tokens
+        .into_iter()
+        .map(|tokens| syntax::rewrite_expr(erase.clone(), false, tokens.into()).into())
+        .collect();
+    *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr #(,#follows)*)));
 }
 
 fn is_tracked_ghost_expr(expr: &verus_syn::Expr) -> bool {
@@ -1100,7 +1103,12 @@ fn rewrite_with_expr(
         let mut elems =
             verus_syn::punctuated::Punctuated::<verus_syn::Pat, verus_syn::Token![,]>::new();
         elems.push(tmp_pat.clone());
-        elems.push(extra_pat);
+        // Several extra outputs are returned as one flat tuple, so a tuple
+        // pattern `=> (a, b)` has to be flattened to match it.
+        match extra_pat {
+            verus_syn::Pat::Tuple(tuple) => elems.extend(tuple.elems),
+            pat => elems.push(pat),
+        }
         // The actual pat.
         let mut pat = verus_syn::Pat::Tuple(verus_syn::PatTuple {
             attrs: vec![],
@@ -1121,7 +1129,15 @@ fn rewrite_with_expr(
         vec![]
     };
     if let Some((_, follow)) = follows {
-        apply_follows(&erase, expr, follow.into_token_stream());
+        // A tuple pattern `|= (a, b)` supplies several extra outputs, which the
+        // function returns as the flat tuple `(ret, a, b)`.
+        let follow_tokens = match follow {
+            verus_syn::Pat::Tuple(tuple) => {
+                tuple.elems.iter().map(|p| p.to_token_stream()).collect()
+            }
+            pat => vec![pat.to_token_stream()],
+        };
+        apply_follows(&erase, expr, follow_tokens);
     }
     x_declares
 }
