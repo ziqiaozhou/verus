@@ -3038,7 +3038,8 @@ pub(crate) static BODY_HIR_ID_TO_REVEAL_PATH_RES: std::sync::RwLock<
 
 fn hir_crate<'tcx>(tcx: TyCtxt<'tcx>, _: ()) -> rustc_middle::hir::Crate<'tcx> {
     let crate_ = (rustc_interface::DEFAULT_QUERY_PROVIDERS.queries.hir_crate)(tcx, ());
-    crate::hir_hide_reveal_rewrite::hir_hide_reveal_rewrite(crate_, tcx)
+    let crate_ = crate::hir_hide_reveal_rewrite::hir_hide_reveal_rewrite(crate_, tcx);
+    crate::hir_proof_with_rewrite::hir_proof_with_rewrite(crate_, tcx)
 }
 
 impl rustc_driver::Callbacks for VerifierCallbacksEraseMacro {
