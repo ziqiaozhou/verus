@@ -37,6 +37,7 @@
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote, quote_spanned};
 use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
 use syn::{Expr, Item, ItemConst, parse2, spanned::Spanned};
 
@@ -717,17 +718,14 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             // we add `requires false` and thus prevent verified function to use it.
             // Allow unverified code to use the function without changing in/output.
             if let Some(with) = &spec_attr.spec.with {
-                let mut extra_funs = rewrite_unverified_func(&mut fun, with.with.span(), erase);
+                let span = with.with.span();
+                let mut extra_funs = rewrite_unverified_func(&mut fun, span, erase);
 
                 if crate::rustdoc::env_rustdoc() {
                     if let Some(unverified_fun) = extra_funs.last_mut() {
                         unverified_fun.attrs.extend(rustdoc_attrs.clone());
                     }
-                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(
-                        with.with.span(),
-                        "doc",
-                        quote! {hidden},
-                    ));
+                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "doc", quote! {hidden}));
                 }
                 extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
             } else if crate::rustdoc::env_rustdoc() {
@@ -1052,16 +1050,35 @@ fn rewrite_with_expr(
 
     if outputs.is_some() || inputs.len() > 0 {
         match expr {
-            syn::Expr::Call(syn::ExprCall { func, .. }) => {
-                if let Expr::Path(path) = func.as_mut() {
-                    let x = &path.path.segments.last().unwrap().ident;
-                    path.path.segments.last_mut().unwrap().ident =
-                        syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
-                }
-            }
-            syn::Expr::MethodCall(syn::ExprMethodCall { method, .. }) => {
-                let x = &method;
-                *method = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+            syn::Expr::Call(_) | syn::Expr::MethodCall(_) => {
+                let elems = inputs
+                    .iter()
+                    .map(|arg| {
+                        syn::Expr::Verbatim(
+                            syntax::rewrite_expr(
+                                erase.clone(),
+                                false,
+                                arg.into_token_stream().into(),
+                            )
+                            .into(),
+                        )
+                    })
+                    .collect::<Punctuated<syn::Expr, syn::Token![,]>>();
+
+                let inputs_expr = syn::Expr::Tuple(syn::ExprTuple {
+                    attrs: vec![],
+                    paren_token: syn::token::Paren::default(),
+                    elems,
+                });
+                *expr = if outputs.is_some() {
+                    syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
+                        #verus_builtin::proof_with(#inputs_expr, #expr)
+                    ))
+                } else {
+                    syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() => {
+                        #verus_builtin::proof_with_ret(#inputs_expr, #expr)
+                    }))
+                };
             }
             syn::Expr::Try(syn::ExprTry { expr, .. }) => {
                 let call_with_spec = verus_syn::WithSpecOnExpr {
@@ -1085,17 +1102,6 @@ fn rewrite_with_expr(
     if apply_erased_fields(erase.clone(), expr, erased_fields.iter()).is_err() {
         return vec![];
     }
-    match expr {
-        syn::Expr::Call(syn::ExprCall { args, .. })
-        | syn::Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
-            for arg in inputs {
-                let arg =
-                    syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
-                args.push(syn::Expr::Verbatim(arg.into()));
-            }
-        }
-        _ => {}
-    };
     let x_declares = if let Some((_, extra_pat)) = outputs {
         // The expected pat.
         let tmp_pat =
@@ -1161,6 +1167,7 @@ fn rewrite_const_ret_proxy(const_fun: &mut syn::ItemFn) -> syn::ItemFn {
         const_fun.sig.ident.span(),
     );
     proxy_fun.attrs.push(mk_verus_attr_syn(span, quote! { unerased_proxy }));
+    proxy_fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", quote! { non_snake_case }));
     proxy_fun
 }
 
@@ -1216,6 +1223,7 @@ fn rewrite_unverified_func(
     // change name to verified_{fname}
     let x = &fun.sig.ident;
     fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+    fun.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
     fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", quote! {non_snake_case}));
 
     // In erase mode, we just keep the verified function with unimplemented!()
@@ -1226,5 +1234,13 @@ fn rewrite_unverified_func(
         fun.block.stmts.push(unimplemented);
     }
     ret.push(unverified_fun);
+    // Mark every unverified item, so that rust_verify can redirect
+    // `proof_with(.., f(..))` calls to the verified counterpart, which is the
+    // sibling named `_VERUS_VERIFIED_{name}`.
+    // A const function also produces an unerased proxy, and a call site may resolve
+    // to either of them, so both carry the marker.
+    for unverified_fun in ret.iter_mut() {
+        unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { unverified_stub }));
+    }
     ret
 }

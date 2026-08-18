@@ -2367,6 +2367,15 @@ fn verus_item_to_vir<'tcx, 'a>(
             };
             mk_expr(ExprX::ReadPlace(p, rk))
         }
+        VerusItem::ProofWith | VerusItem::ProofWithRet => err_span(
+            expr.span,
+            format!(
+                "{} should have been replaced by a call to the verified function; \
+                 `with` ghost inputs/outputs can only be applied to a call of a function \
+                 declared with `with`",
+                f_name
+            ),
+        ),
         VerusItem::MutRefTracked => {
             record_compilable_operator(bctx, expr, CompilableOperator::MutRefTracked);
             if !bctx.in_ghost {
