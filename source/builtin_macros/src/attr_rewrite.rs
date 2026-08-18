@@ -1171,18 +1171,45 @@ fn rewrite_const_ret_proxy(const_fun: &mut syn::ItemFn) -> syn::ItemFn {
     proxy_fun
 }
 
+/// Returns true for `#[verifier::assume_specification]` and
+/// `#[verifier::external_fn_specification]`, in either the `verifier::x` or the
+/// `verifier(x)` form.
+fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
+    let is_name = |n: &str| n == "assume_specification" || n == "external_fn_specification";
+    let segments: Vec<String> = attr.path().segments.iter().map(|s| s.ident.to_string()).collect();
+    match segments.as_slice() {
+        [verifier, name] if verifier == "verifier" => is_name(name),
+        [verifier] if verifier == "verifier" => match &attr.meta {
+            syn::Meta::List(list) => list
+                .parse_args::<syn::Path>()
+                .ok()
+                .and_then(|p| p.get_ident().map(|i| is_name(&i.to_string())))
+                .unwrap_or(false),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 // Create a copy of function with unverified function signature without a
 // function body, to enable seamless use of unverified call to the function in
 // verification.
 // If the function is const, it will be rewritten to a proxy function and a verified function.
+//
+// For an `assume_specification`, the unverified copy stays the real
+// `assume_specification`: it keeps the exact signature and the body whose
+// trailing call names the specified function, and only gains `requires(false)`.
+// The verified counterpart carries the extra ghost/tracked parameters and the
+// user's specification, and is a plain `external_body` function.
 fn rewrite_unverified_func(
     fun: &mut syn::ItemFn,
     span: proc_macro2::Span,
     erase: EraseGhost,
 ) -> Vec<syn::ItemFn> {
+    let is_assume_spec = fun.attrs.iter().any(is_external_fn_specification_attr);
     let mut ret = vec![];
     let mut unverified_fun = fun.clone();
-    if fun.sig.constness.is_some() {
+    if fun.sig.constness.is_some() && !is_assume_spec {
         // Create a proxy function to include requires/ensures.
         let proxy = rewrite_const_ret_proxy(&mut unverified_fun);
         ret.push(unverified_fun);
@@ -1198,7 +1225,11 @@ fn rewrite_unverified_func(
         ),
         Some(syn::token::Semi { spans: [span] }),
     );
-    unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
+    if !is_assume_spec {
+        // `assume_specification` already implies an external body, and marking it
+        // `external_body` explicitly is rejected.
+        unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
+    }
     if !crate::rustdoc::env_rustdoc() {
         unverified_fun.attrs_mut().push(crate::syntax::mk_rust_attr_syn(
             span,
@@ -1215,9 +1246,14 @@ fn rewrite_unverified_func(
         // Since the body is erased only in keep mode, we still
         // see correct body in generated executable in erase mode.
         if erase.keep() {
-            block.stmts.clear();
-            block.stmts.push(precondition_false);
-            block.stmts.push(unimplemented.clone());
+            if is_assume_spec {
+                // Keep the body: its trailing call names the specified function.
+                block.stmts.insert(0, precondition_false);
+            } else {
+                block.stmts.clear();
+                block.stmts.push(precondition_false);
+                block.stmts.push(unimplemented.clone());
+            }
         }
     }
     // change name to verified_{fname}
@@ -1226,10 +1262,18 @@ fn rewrite_unverified_func(
     fun.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
     fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", quote! {non_snake_case}));
 
-    // In erase mode, we just keep the verified function with unimplemented!()
-    // since we do not need to verifying the function body and only unverified
-    // function is called in erase mode.
-    if erase.erase() {
+    if is_assume_spec {
+        // The verified counterpart has extra parameters, so it cannot itself be an
+        // `assume_specification`; it is an ordinary function whose specification is
+        // assumed for the external function it stands in for.
+        fun.attrs.retain(|attr| !is_external_fn_specification_attr(attr));
+        fun.attrs.push(mk_verus_attr_syn(span, quote! { external_body }));
+        fun.block.stmts.clear();
+        fun.block.stmts.push(unimplemented);
+    } else if erase.erase() {
+        // In erase mode, we just keep the verified function with unimplemented!()
+        // since we do not need to verifying the function body and only unverified
+        // function is called in erase mode.
         fun.block.stmts.clear();
         fun.block.stmts.push(unimplemented);
     }

@@ -577,6 +577,161 @@ test_verify_one_file! {
     } => Ok(())
 }
 
+// --- `with` on an external function specification (`assume_specification`) ---
+//
+// The `assume_specification` keeps the exact signature of the external function
+// and gains `requires(false)`, so a plain call fails. The verified counterpart
+// carries the extra ghost/tracked parameters, and `proof_with!` redirects the
+// call to it.
+
+test_verify_one_file! {
+    #[test] test_external_fn_with code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8>
+            requires x == extra,
+            ensures ret == !b,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+
+        #[verus_spec]
+        fn call_external() {
+            proof_with!{Tracked(1u8)}
+            let ret = negate_bool(true, 1);
+            proof!{
+                assert(!ret);
+            }
+        }
+
+        #[verifier::external]
+        fn unverified_call_external() {
+            negate_bool(true, 1);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_external_fn_with_extra_output code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8> -> z: Ghost<u8>
+            requires x == extra,
+            ensures ret == !b, z@ == extra,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+
+        #[verus_spec]
+        fn call_external() {
+            proof_with!{Tracked(1u8) => Ghost(z)}
+            let ret = negate_bool(true, 1);
+            proof!{
+                assert(!ret);
+                assert(z == 1u8);
+            }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    // Without `proof_with!`, the call goes to the `assume_specification`, whose
+    // precondition is `false`.
+    #[test] test_external_fn_missing_proof_with code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8>
+            requires x == extra,
+            ensures ret == !b,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+
+        #[verus_spec]
+        fn call_external() {
+            let ret = negate_bool(true, 1); // FAILS
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    #[test] test_external_fn_failed_requires code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8>
+            requires x == extra,
+            ensures ret == !b,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+
+        #[verus_spec]
+        fn call_external() {
+            proof_with!{Tracked(99u8)}
+            let ret = negate_bool(true, 1); // FAILS
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    // rustc still checks the extra arguments of the redirected call.
+    #[test] test_external_fn_wrong_extra_type code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8>
+            ensures ret == !b,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+
+        #[verus_spec]
+        fn call_external() {
+            proof_with!{Tracked(1u32)}
+            let ret = negate_bool(true, 1);
+        }
+    } => Err(e) => assert_rust_error_msg_all(e, "mismatched types")
+}
+
 // --- Functions in different modules ---
 
 test_verify_one_file! {

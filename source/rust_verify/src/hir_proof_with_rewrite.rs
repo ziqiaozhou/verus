@@ -75,12 +75,17 @@ struct Ctxt<'tcx> {
     /// Attributes of local items. Reading them through `tcx` would re-enter the
     /// `hir_crate` query that this pass is part of.
     local_attrs: HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
+    /// External function -> the verified counterpart declared for it by a local
+    /// `assume_specification`. The external function cannot carry a `verified_by`
+    /// attribute itself, so the link is indexed the other way round.
+    external_targets: HashMap<DefId, DefId>,
 }
 
 impl<'tcx> Ctxt<'tcx> {
     fn new(tcx: TyCtxt<'tcx>, owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>) -> Ctxt<'tcx> {
         let (local_fns, local_attrs) = local_maps(tcx, owners);
-        Ctxt { tcx, local_fns, local_attrs }
+        let external_targets = external_target_map(tcx, owners, &local_fns, &local_attrs);
+        Ctxt { tcx, local_fns, local_attrs, external_targets }
     }
 }
 
@@ -113,6 +118,76 @@ fn local_maps<'tcx>(
         attrs.insert(def_id, owner.attrs.get(ItemLocalId::ZERO));
     }
     (map, attrs)
+}
+
+/// Index the verified counterparts declared for external functions.
+///
+/// An external function cannot carry a `verified_by` attribute, so the link is
+/// written on the local `assume_specification` that specifies it. That item names
+/// its target with the trailing call of its body, which name resolution has
+/// already resolved to a `DefId` at this point -- unlike `get_external_def_id`,
+/// which runs after type checking, this only supports a plain path callee.
+fn external_target_map<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    local_fns: &HashMap<(DefId, Symbol), DefId>,
+    local_attrs: &HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
+) -> HashMap<DefId, DefId> {
+    let mut map = HashMap::new();
+    for (def_id, owner) in owners.iter_enumerated() {
+        let MaybeOwner::Owner(owner) = owner else {
+            continue;
+        };
+        let OwnerNode::Item(item) = owner.node() else {
+            continue;
+        };
+        let rustc_hir::ItemKind::Fn { body, .. } = &item.kind else {
+            continue;
+        };
+        let Some(attrs) = local_attrs.get(&def_id) else {
+            continue;
+        };
+        let (mut is_external_fn_spec, mut is_stub, mut is_proxy) = (false, false, false);
+        for attr in parse_attrs_opt(attrs, None) {
+            match attr {
+                Attr::ExternalFnSpecification => is_external_fn_spec = true,
+                Attr::UnverifiedStub => is_stub = true,
+                Attr::UnerasedProxy => is_proxy = true,
+                _ => {}
+            }
+        }
+        if !is_external_fn_spec || !is_stub {
+            continue;
+        }
+        let Some(body) = owner.nodes.bodies.get(&body.hir_id.local_id) else {
+            continue;
+        };
+        let Some(target) = tail_call_target(body.value) else {
+            continue;
+        };
+        if let Some(verified) = counterpart_of(tcx, local_fns, def_id.to_def_id(), is_proxy) {
+            map.insert(target, verified);
+        }
+    }
+    map
+}
+
+/// The `DefId` called by the trailing expression of an `assume_specification` body.
+fn tail_call_target(mut expr: &Expr<'_>) -> Option<DefId> {
+    loop {
+        match &expr.kind {
+            ExprKind::Block(block, _) => expr = block.expr?,
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else {
+                    return None;
+                };
+                return Some(path.res.def_id());
+            }
+            _ => {
+                return None;
+            }
+        }
+    }
 }
 
 impl<'tcx> Ctxt<'tcx> {
@@ -177,7 +252,10 @@ impl<'tcx> Ctxt<'tcx> {
     fn verified_counterpart(&self, def_id: DefId) -> Option<DefId> {
         let (is_stub, is_proxy) = self.stub_kind(def_id);
         if !is_stub {
-            return None;
+            // The callee is not a stub itself: it may be an external function
+            // specified by a local `assume_specification`, or a method of an
+            // external trait, specified by a proxy.
+            return self.external_targets.get(&def_id).copied();
         }
         counterpart_of(self.tcx, &self.local_fns, def_id, is_proxy)
     }
