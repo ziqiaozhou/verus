@@ -11,9 +11,8 @@
 /// - To apply `ensures`, `invariant`, `decreases` in `exec`,
 ///   developers should call the corresponding macros at the beginning of the loop
 /// - To use proof block, add proof!{...} inside function body.
-/// - To Add tracked/ghost in signature, use #[verus_spec(with ...)] in function definition.
-///   To pass and get tracked/ghost from function call, use #[verus_spec(with ...)] in
-///   call expr or local statement. Unverified code does not need to change arguments or outputs.
+/// - `#[verus_spec(with ...)]` adds ghost or tracked inputs and outputs without changing
+///   the executable signature.
 ///
 /// Rationale:
 /// - This approach avoids introducing new syntax into existing Rust executable
@@ -23,7 +22,7 @@
 ///   For developers who do not understand verification, they can easily ignore
 ///   verus code via feature/cfg selection and use standard rust tools like
 ///   `rustfmt` and `rust-analyzer`.
-/// - Unverified code does not need additional annotation to interact with verified.
+/// - Executable callers use the signature written by the user.
 ///
 /// Limitations:
 /// - #[verus_verify] does not support all `verus` syntax, particularly
@@ -50,9 +49,9 @@ use crate::{
 };
 
 pub const VERIFIED: &str = "_VERUS_VERIFIED";
-/// Name prefix of the companion trait that holds the verified counterparts of
-/// the methods of a trait. The name is derived from the name of that trait so
-/// that an implementation does not have to spell it out.
+/// Companion traits hold verified counterparts without changing the original trait.
+/// Their names are derived from the original trait names, so implementations never
+/// need to name them explicitly.
 pub const VERIFIED_TRAIT_PREFIX: &str = "_VERUS_VERIFIED_TRAIT";
 
 pub const DUAL_SPEC_PREFIX: &str = "__VERUS_SPEC";
@@ -111,9 +110,11 @@ impl syn::parse::Parse for VerusSpecTarget {
     }
 }
 
-/// The counterparts a crate compiled in `Erase` mode declares: the companion
-/// trait of a trait, and the companion implementation of an implementation of
-/// one. See `rewrite_unverified_func` for what a counterpart is declared for.
+/// Emits companion declarations in erase mode.
+///
+/// In this mode, `#[verus_spec]` does not declare counterparts itself. The companion
+/// trait and implementation must therefore remain in metadata so downstream crates can
+/// resolve calls to verified counterparts.
 fn erase_verus_attribute(
     attr_args: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
@@ -132,11 +133,13 @@ fn erase_verus_attribute(
             attr.path().segments.last().map_or(false, |seg| seg.ident == "external_trait_specification")
         }));
     let span = item.span();
-    let Ok(companion_impl) = split_trait_impl(&mut item) else {
-        return input;
+    let companion_impl = match split_trait_impl(&mut item) {
+        Ok(companion_impl) => companion_impl,
+        Err(error_tokens) => return error_tokens.into(),
     };
-    let Ok(companion_trait) = companion_trait_of(&mut item, is_proxy) else {
-        return input;
+    let companion_trait = match companion_trait_of(&mut item, is_proxy) {
+        Ok(companion_trait) => companion_trait,
+        Err(error_tokens) => return error_tokens.into(),
     };
     if companion_impl.is_none() && companion_trait.is_none() {
         return input;
@@ -164,8 +167,6 @@ pub(crate) fn rewrite_verus_attribute(
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     if erase.erase_all() {
-        // `#[verus_spec]` is a no-op in this mode, so nothing declares the
-        // counterparts the companion items would collect.
         return input;
     }
     if !erase.keep() {
@@ -258,8 +259,6 @@ pub(crate) fn rewrite_verus_attribute(
         attributes.push(quote_spanned!(item.span() => #[verifier::verify]));
     }
 
-    // Define the verified counterparts of the methods with a `with` clause in an
-    // implementation of the companion trait, leaving the unverified stubs here.
     let mut companion_impl = None;
     if matches!(&item, syn::Item::Impl(item_impl) if item_impl.trait_.is_some()) {
         match split_trait_impl(&mut item) {
@@ -268,8 +267,6 @@ pub(crate) fn rewrite_verus_attribute(
         }
     }
 
-    // Collect the verified counterparts of the methods with a `with` clause into
-    // a companion trait.
     let companion_trait = match companion_trait_of(&mut item, is_external_trait_proxy) {
         Ok(companion_item) => companion_item,
         Err(error_tokens) => return error_tokens.into(),
@@ -349,13 +346,19 @@ impl VisitMut for ExecReplacer {
         }
     }
 
-    /// convert proof_with macro to functin with ghost/tracked argumemts.
-    /// In order to apply `with` to expr/stmt without using unstable feature.
-    /// proof_with!(Tracked(x), Ghost(y);
+    /// Lowers `proof_with!` without requiring unstable attributes on expressions.
+    ///
+    /// Calls can supply extra arguments:
+    /// ```ignore
+    /// proof_with!{Tracked(x), Ghost(y)}
     /// f(a);
-    /// Also supports struct constructors with ghost/tracked fields:
+    /// ```
+    ///
+    /// Struct constructors can supply ghost or tracked fields:
+    /// ```ignore
     /// proof_with!{ p: Tracked(p) }
     /// STest { u }
+    /// ```
     fn visit_block_mut(&mut self, block: &mut syn::Block) {
         // Don't call visit_block_mut to recurse on the whole block --
         // skip statements that will be processed by their own #[verus_spec] attribute.
@@ -503,31 +506,33 @@ fn is_verus_macro_applied(attrs: &syn::Attribute) -> bool {
         && attrs.path().segments[1].ident == "internal"
 }
 
-/// The verified counterpart of a method of a trait lives in a companion trait,
-/// declared next to the trait, so that the trait itself keeps the exact
-/// signature its callers and its implementors see. An implementation of the
-/// trait is therefore split along the same line, without any annotation: a
-/// method with a `with` clause defines its counterpart in an implementation of
-/// the companion trait, and what is left in the implementation of the trait is
-/// the unverified stub of that counterpart.
+/// Splits a trait implementation without requiring any annotation beyond each method's
+/// `with` clause. The method defines its counterpart in an implementation of the
+/// companion trait, while the original implementation retains the unverified stub.
 ///
-/// Given `impl T for S`, a method
-///
+/// For example:
 /// ```ignore
-/// #[verus_spec(with Ghost(g): Ghost<u64>)]
-/// fn f(&self, a: u64) -> u64 { BODY }
+/// impl T for S {
+///     #[verus_spec(with Ghost(g): Ghost<u64>)]
+///     fn f(&self, a: u64) -> u64 { BODY }
+/// }
 /// ```
 ///
-/// becomes a counterpart in `impl _VERUS_VERIFIED_TRAIT_T for S`
-///
+/// produces:
 /// ```ignore
-/// #[verus_spec(with Ghost(g): Ghost<u64>)]
-/// fn _VERUS_VERIFIED_f(&self, a: u64, Ghost(g): Ghost<u64>) -> u64 { BODY }
+/// impl _VERUS_VERIFIED_TRAIT_T for S {
+///     #[verus_spec(with Ghost(g): Ghost<u64>)]
+///     fn _VERUS_VERIFIED_f(
+///         &self,
+///         a: u64,
+///         Ghost(g): Ghost<u64>,
+///     ) -> u64 { BODY }
+/// }
 /// ```
 ///
-/// while `impl T for S` keeps the stub, which is `external_body` and inherits
-/// `requires(false)` from the declaration of `f`. In erase mode nothing is
-/// split: the stub keeps the real body and is what is executed.
+/// The `f` left in `impl T for S` is an `external_body` stub that inherits
+/// `requires(false)` from the trait declaration. In erase mode, no split occurs:
+/// the stub retains the real body and is the item that executes.
 fn split_trait_impl(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStream> {
     let span = item.span();
     let syn::Item::Impl(item_impl) = item else {
@@ -546,7 +551,6 @@ fn split_trait_impl(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStre
             continue;
         }
         companion_items.push(syn::ImplItem::Fn(fun.clone()));
-        // What is left implements the method of the trait itself.
         fun.attrs.push(mk_companion_marker(span));
     }
     if companion_items.is_empty() {
@@ -554,35 +558,19 @@ fn split_trait_impl(item: &mut syn::Item) -> Result<Option<syn::Item>, TokenStre
     }
     let mut companion_impl = item_impl.clone();
     companion_impl.attrs = Vec::new();
-    // Implementing the companion trait is never unsafe: it declares only the
-    // verified counterparts, and the obligation of the trait itself is
-    // discharged by the implementation of that trait.
+    // The companion adds verification-only methods and introduces no unsafe obligation.
     companion_impl.unsafety = None;
     companion_impl.trait_ = Some((None, companion, syn::token::For { span }));
     companion_impl.items = companion_items;
     Ok(Some(syn::Item::Impl(companion_impl)))
 }
 
-/// Derive the companion trait of a trait whose methods declare a `with` clause.
+/// Creates a companion trait because adding counterparts would change the original
+/// trait's public signature and break existing implementors.
 ///
-/// A method cannot declare its own verified counterpart: the counterpart has
-/// extra parameters, so it is a different method, and for an external trait it
-/// could not be added at all. The counterparts of the methods that are given a
-/// `with` clause are therefore collected into a companion trait declared next
-/// to the trait, and the method itself keeps `requires(false)`, so verified
-/// code can only call it through its counterpart.
-///
-/// The companion is a subtrait of the trait it belongs to, `trait
-/// _VERUS_VERIFIED_TRAIT_X: X`, which is the only direction available for an
-/// external trait, and the one that lets a counterpart refer to `Self::Assoc`
-/// and keep a default body. A bound `A: X` therefore does not reach the
-/// counterparts by itself; the bound on the companion is added to the callers
-/// that need it, see `hir_proof_with_rewrite`.
-///
-/// An implementation is split along the same line, so it implements the
-/// companion only if it defines a method that has a `with` clause. A method
-/// that has both a `with` clause and a default body therefore has to be defined
-/// by every implementation, like a method without a default body.
+/// For an external trait, the companion is generated beside its proxy declaration.
+/// Making the companion a subtrait preserves access to the original trait's associated
+/// items.
 fn companion_trait_of(
     item: &mut syn::Item,
     is_proxy: bool,
@@ -600,25 +588,18 @@ fn companion_trait_of(
             continue;
         }
         if let Some(default) = &fun.default {
-            // The counterpart of the method is declared by the companion trait,
-            // which an implementation only implements when it overrides the
-            // method. A default body would therefore be inherited by the
-            // counterpart of an implementation that overrides the method
-            // without a `with` clause, and a verified call would run the
-            // default while the executable runs the override.
+            // A default counterpart could diverge from an executable override.
             return Err(quote_spanned!(default.span() =>
                 compile_error!("`with` is not supported on a trait method with a default body: remove the default body and implement the method in every implementation of the trait");
             ));
         }
         methods.push(syn::TraitItem::Fn(fun.clone()));
-        // What is left declares the method of the trait itself.
         fun.attrs.push(mk_companion_marker(span));
     }
     if methods.is_empty() {
         return Ok(None);
     }
-    // The trait the companion belongs to: for a proxy that is the external
-    // trait it specifies, not the proxy itself.
+    // A proxy's companion extends the external trait rather than the proxy.
     let trait_path = if is_proxy {
         let Some(external) = external_trait_of_proxy(item_trait) else {
             return Err(quote_spanned!(span =>
@@ -682,7 +663,6 @@ fn external_trait_of_proxy(item_trait: &syn::ItemTrait) -> Option<syn::Path> {
     })
 }
 
-/// Does one of these attributes declare extra ghost/tracked inputs or outputs?
 fn has_with_clause(attrs: &[syn::Attribute]) -> Result<bool, TokenStream> {
     for attr in attrs {
         if attr.path().get_ident().map_or(true, |ident| ident != VERUS_SPEC) {
@@ -702,12 +682,10 @@ fn has_with_clause(attrs: &[syn::Attribute]) -> Result<bool, TokenStream> {
     Ok(false)
 }
 
-/// The name of the companion trait of a trait.
+/// Derives the companion path by renaming the final segment of the written trait path.
 ///
-/// The companion is declared next to the trait it belongs to, so it is reached
-/// through the same path, with the last segment renamed. The companion repeats
-/// the generics of that trait, so the arguments written at the use site carry
-/// over unchanged.
+/// This cannot repair aliases or paths that reach an external trait through a module
+/// other than the one containing its proxy.
 pub(crate) fn companion_trait_path(trait_path: &syn::Path) -> syn::Path {
     let mut companion = trait_path.clone();
     let segment = companion.segments.last_mut().expect("non-empty trait path");
@@ -800,12 +778,7 @@ fn prepare_items_for_verus_spec(
     }
 }
 
-/// A method with a `with` clause is expanded into an unverified stub and a
-/// verified counterpart. When the two do not live next to each other, each side
-/// is marked with which of the two it is to expand into.
-///
-/// This marker says: the counterpart is declared elsewhere, in the companion
-/// trait, so expand into the stub only.
+/// Marks the original trait side, where only the executable stub is emitted.
 fn mk_companion_marker(span: proc_macro2::Span) -> syn::Attribute {
     crate::syntax::mk_rust_attr_syn(
         span,
@@ -820,9 +793,7 @@ fn is_companion_marker(attr: &syn::Attribute) -> bool {
             if meta_list.tokens.to_string().contains("verus_companion_marker"))
 }
 
-/// The other side: this method is declared by a companion trait, or defined by
-/// an implementation of one, so expand into the counterpart only. The stub is
-/// the method of the trait the companion belongs to.
+/// Recognizes the companion side, where only the verified counterpart is emitted.
 fn is_verified_trait_marker(attr: &syn::Attribute) -> bool {
     attr.path().get_ident().map_or(false, |ident| ident == "allow")
         && matches!(&attr.meta, syn::Meta::List(meta_list)
@@ -1064,10 +1035,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             // Remove the marker attribute (internal use only)
             fun.attrs.retain(|attr| impl_marker(attr).is_none());
 
-            // A method with a `with` clause expands into an unverified stub and a
-            // verified counterpart. When a trait implementation is split between
-            // the trait and its companion, the two sides live in different impl
-            // blocks, and each is marked with which of the two it expands into.
+            // Trait methods emit each item in the corresponding original or companion impl.
             let emit_stub = !fun.attrs.iter().any(is_verified_trait_marker);
             let emit_counterpart = !fun.attrs.iter().any(is_companion_marker);
             fun.attrs.retain(|attr| !is_verified_trait_marker(attr) && !is_companion_marker(attr));
@@ -1106,10 +1074,6 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                 }
             }
 
-            // Create a copy of unverified function.
-            // To avoid misuse of the unverified function,
-            // we add `requires false` and thus prevent verified function to use it.
-            // Allow unverified code to use the function without changing in/output.
             if let Some(with) = &spec_attr.spec.with {
                 let span = with.with.span();
                 if emit_stub {
@@ -1128,19 +1092,16 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                     }
                     extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
                 } else {
-                    // The stub is the method of the trait that the companion
-                    // trait belongs to, so only the rename is left to do here.
                     let x = &fun.sig.ident;
                     fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+                    fun.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
                     fun.attrs.push(crate::syntax::mk_rust_attr_syn(
                         span,
                         "allow",
                         quote! {non_snake_case},
                     ));
                     if erase.erase() {
-                        // The body belongs to the stub, and does not even type
-                        // check against the signature of the counterpart, which
-                        // returns the extra ghost/tracked outputs as well.
+                        // The executable body has the stub's signature, not the counterpart's.
                         fun.block.stmts.clear();
                         fun.block.stmts.push(syn::Stmt::Expr(
                             syn::Expr::Verbatim(quote_spanned! {span => unimplemented!()}),
@@ -1196,8 +1157,6 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                 syntax::sig_specs_attr(erase, spec_attr, &mut fun.sig, is_impl_fn, false);
 
             if erase.erase() {
-                // In erase mode, just return the stub functions.
-                // No need to add proof statements.
                 fun.to_tokens(&mut new_stream);
                 return proc_macro::TokenStream::from(new_stream);
             }
@@ -1219,8 +1178,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             fun.to_tokens(&mut new_stream);
             proc_macro::TokenStream::from(new_stream)
         }
-        // A method of a companion trait declares the counterpart in this mode
-        // as well. Any other trait method declares itself.
+        // Erased metadata retains companion declarations for downstream resolution.
         AnyFnOrLoop::TraitMethod(mut method) if erase.erase() => {
             let spec_attr =
                 verus_syn::parse_macro_input!(outer_attr_tokens as verus_syn::SignatureSpecAttr);
@@ -1234,6 +1192,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let span = method.sig.ident.span();
             let x = &method.sig.ident;
             method.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+            method.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
             method.attrs.push(crate::syntax::mk_rust_attr_syn(
                 span,
                 "allow",
@@ -1282,12 +1241,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                 verus_syn::parse_macro_input!(outer_attr_tokens as verus_syn::SignatureSpecAttr);
             let mut new_stream = TokenStream::new();
 
-            // In a companion trait, the role of the unverified stub is played by
-            // the method of the trait the companion belongs to, which is declared
-            // elsewhere and cannot be given a precondition here.
             let emit_stub = !method.attrs.iter().any(is_verified_trait_marker);
-            // In that trait it is the other way round: the counterpart is not a
-            // member of it, and is declared by the companion trait instead.
             let emit_counterpart = !method.attrs.iter().any(is_companion_marker);
             method
                 .attrs
@@ -1303,10 +1257,8 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                     ));
                 }
                 let span = with.with.span();
-                // The unverified stub keeps the declared signature and gets
-                // `requires(false)`, so verified code cannot call it directly.
-                // The verified counterpart is declared next to it and carries the
-                // extra ghost/tracked parameters and the specification.
+                // The stub preserves the public signature; the counterpart carries the
+                // extra parameters and specification.
                 if emit_stub {
                     let mut stub = method.clone();
                     stub.attrs.push(mk_verus_attr_syn(span, quote! { unverified_stub }));
@@ -1399,47 +1351,21 @@ pub(crate) fn proof_rewrite(erase: EraseGhost, input: TokenStream) -> proc_macro
     }
 }
 
-/// The `verus_spec(with)` annotation can be applied to either a local statement or an expression.
+/// Lowers a `with` clause on a call to a marker that is replaced before type checking.
 ///
-/// - When applied to an expression (`expr`), the trailing semicolon (`;`) is ignored due to limitations of the procedure macro.
-///   To include the semicolon, developers must use the following syntax:
-///   ```rust
-///   {#[verus_spec(with ..)] expr};
-///   ```
-///
-/// - When used with an expression, developers must explicitly declare the returned ghost or tracked patterns.
-///   This is because the additional declarations cannot be automatically added in a meaningful way.
-///
-/// Example:
-/// ```rust
-/// if #[verus_io(with Tracked(arg1), Ghost(arg2) -> Tracked(out) |= Tracked(extra))]
-/// call(arg0) == something {
-/// }
+/// The attribute can apply to a local statement:
+/// ```ignore
+/// #[verus_spec(with Tracked(&mut y), Ghost(0) => Ghost(z))]
+/// let result = test_mut_tracked(1);
 /// ```
-/// This will be transformed to the following:
-/// ```rust
+///
+/// It can also apply directly to an expression:
+/// ```ignore
+/// if #[verus_spec(with Tracked(&mut y), Ghost(0) => _)]
+///     test_mut_tracked(1) == 0
 /// {
-///     let (tmp, tmp_out) = call(arg0, Tracked(arg1), Tracked(arg2));
-///     proof!{out = tmp_out.get();}  // Ensuring `out` is properly assigned.
-///     (tmp, Tracked(extra))  // Returning the transformed values.
+///     return;
 /// }
-/// ```
-///
-/// The recommended approach for handling returned ghost/tracked outputs is to use a local statement:
-///
-/// Example:
-/// ```rust
-/// #[verus_spec(with Tracked(arg1), Ghost(arg2) -> Tracked(out) |= Tracked(extra))]
-/// let out0 = call(arg0);
-/// ```
-/// This will be transformed to:
-/// ```rust
-/// let tracked mut out;
-/// let out0 = {
-///     let (tmp, tmp_out) = call(arg0, Tracked(arg1), Tracked(arg2));
-///     proof!{out = tmp_out.get();}  // Ensure proper assignment of the ghost value.
-///     (tmp, Tracked(extra))  // Returning the transformed values.
-/// };
 /// ```
 fn rewrite_verus_spec_on_expr_local(
     erase: EraseGhost,
@@ -1476,9 +1402,7 @@ fn rewrite_verus_spec_on_expr_local(
     tokens.into()
 }
 
-/// Wrap an expression with a `|=` follow clause, producing a flat tuple
-/// `(expr, follow_0, .., follow_n)`, which is the shape of the return type the
-/// extra outputs of a `with` clause give the function.
+/// Keeps appended values flat so they match the counterpart's extra result tuple.
 fn apply_follows(erase: &EraseGhost, expr: &mut Expr, follow_tokens: Vec<TokenStream>) {
     let follows: Vec<TokenStream> = follow_tokens
         .into_iter()
@@ -1488,7 +1412,6 @@ fn apply_follows(erase: &EraseGhost, expr: &mut Expr, follow_tokens: Vec<TokenSt
 }
 
 fn is_tracked_ghost_expr(expr: &verus_syn::Expr) -> bool {
-    // check expr is of the form Tracked(...) or Ghost(...)
     if let verus_syn::Expr::Call(verus_syn::ExprCall { func, .. }) = expr {
         if let verus_syn::Expr::Path(path) = func.as_ref() {
             if let Some(ident) = path.path.get_ident() {
@@ -1499,22 +1422,18 @@ fn is_tracked_ghost_expr(expr: &verus_syn::Expr) -> bool {
     false
 }
 
-/// Apply ghost/tracked fields in `with` clause to a struct constructor expression.
-/// Return Err if the ghost/tracked fields are not valid.
 fn apply_erased_fields<'a>(
     erase: EraseGhost,
     expr: &mut Expr,
     erased_fields: impl Iterator<Item = &'a verus_syn::FieldValue>,
 ) -> Result<(), ()> {
     let syn::Expr::Struct(expr_struct) = expr else {
-        // If there's no struct constructor, we cannot apply ghost/tracked fields.
         if let Some(field) = erased_fields.last() {
             *expr = syn::Expr::Verbatim(quote_spanned! {field.span() =>
                 compile_error!("Ghost/tracked fields can only be applied to struct constructors.")
             });
             return Err(());
         }
-        // No ghost/tracked fields, just return.
         return Ok(());
     };
     for field in erased_fields {
@@ -1544,8 +1463,6 @@ fn apply_erased_fields<'a>(
     return Ok(());
 }
 
-// Expand `with extra_in => extra_out` on a method call expr.
-// Return some pre-statements that needs to be declared before the expr.
 fn rewrite_with_expr(
     erase: EraseGhost,
     expr: &mut Expr,
@@ -1608,19 +1525,16 @@ fn rewrite_with_expr(
         return vec![];
     }
     let x_declares = if let Some((_, extra_pat)) = outputs {
-        // The expected pat.
         let tmp_pat =
             verus_syn::Pat::Verbatim(quote_spanned! {expr.span() => __verus_tmp_expr_var__});
         let mut elems =
             verus_syn::punctuated::Punctuated::<verus_syn::Pat, verus_syn::Token![,]>::new();
         elems.push(tmp_pat.clone());
-        // Several extra outputs are returned as one flat tuple, so a tuple
-        // pattern `=> (a, b)` has to be flattened to match it.
+        // Extra results use one flat tuple rather than a nested tuple.
         match extra_pat {
             verus_syn::Pat::Tuple(tuple) => elems.extend(tuple.elems),
             pat => elems.push(pat),
         }
-        // The actual pat.
         let mut pat = verus_syn::Pat::Tuple(verus_syn::PatTuple {
             attrs: vec![],
             paren_token: verus_syn::token::Paren::default(),
@@ -1640,8 +1554,6 @@ fn rewrite_with_expr(
         vec![]
     };
     if let Some((_, follow)) = follows {
-        // A tuple pattern `|= (a, b)` supplies several extra outputs, which the
-        // function returns as the flat tuple `(ret, a, b)`.
         let follow_tokens = match follow {
             verus_syn::Pat::Tuple(tuple) => {
                 tuple.elems.iter().map(|p| p.to_token_stream()).collect()
@@ -1696,33 +1608,13 @@ fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
     }
 }
 
-/// What a `with` clause expands into, per erasure mode.
+/// Emits two items because executable code must retain the user's signature while
+/// verification must expose the extra ghost or tracked inputs and outputs.
 ///
-/// `#[verus_spec(with Tracked(t): Tracked<u8>)] fn f(x: u8) -> bool { body }`
-///
-/// | mode       | when                 | stub `f`                           | counterpart `_VERUS_VERIFIED_f`     |
-/// |------------|----------------------|------------------------------------|-------------------------------------|
-/// | `Keep`     | verification         | `external_body`, `requires(false)` | extra params, `body`, specification |
-/// | `Erase`    | compilation by verus | `body`: this is what executes      | extra params, `unimplemented!()`    |
-/// | `EraseAll` | standard rust tools  | `f` as written                     | not declared                        |
-///
-/// The counterpart is declared in `Erase` mode because a crate depending on this
-/// one resolves the callee of a `proof_with!` call against the metadata compiled
-/// in that mode, while its specification comes from the vir metadata exported in
-/// `Keep` mode. The two are matched by path, so what `Erase` mode declares has
-/// to have the name, the signature and the enclosing item that `Keep` mode gives
-/// it -- for a method, that means the companion trait and an implementation of
-/// it. The body is never run: `proof_with!` is erased along with the ghost code,
-/// so every call goes to the stub.
-///
-/// If the function is const, it is rewritten to a proxy function and a verified
-/// function.
-///
-/// For an `assume_specification`, the stub stays the real `assume_specification`:
-/// it keeps the exact signature and the body whose trailing call names the
-/// specified function, and only gains `requires(false)`. The counterpart carries
-/// the extra ghost/tracked parameters and the user's specification, and is a
-/// plain `external_body` function.
+/// The unverified stub keeps the original name and executable signature. The verified
+/// counterpart is named `_VERUS_VERIFIED_{name}` and carries the extra parameters,
+/// flat extra-result tuple, and specification. Erased metadata retains the counterpart
+/// declaration so downstream marker calls can resolve it, but only the stub executes.
 fn rewrite_unverified_func(
     fun: &mut syn::ItemFn,
     span: proc_macro2::Span,
@@ -1761,17 +1653,15 @@ fn rewrite_unverified_func(
         ));
     }
     if let Some(block) = unverified_fun.block_mut() {
-        // The body of the stub is dropped in `Keep` mode: it is not verified,
-        // and the proof code in it names ghost variables the stub does not
-        // take. It is kept in `Erase` mode, where it is what executes.
+        // Verification cannot type-check the executable body against the stub signature
+        // when the body refers to the erased parameters.
         if erase.keep() {
             if is_assume_spec {
                 // Keep the body: its trailing call names the specified function.
                 block.stmts.insert(0, precondition_false);
             } else {
                 block.stmts.clear();
-                // A trait implementation cannot declare its own `requires`: it
-                // inherits `requires(false)` from the trait declaration.
+                // Trait implementations inherit the stub precondition from the trait.
                 if !is_trait_impl_fn {
                     block.stmts.push(precondition_false);
                 }
@@ -1779,31 +1669,23 @@ fn rewrite_unverified_func(
             }
         }
     }
-    // change name to verified_{fname}
     let x = &fun.sig.ident;
     fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
     fun.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
     fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", quote! {non_snake_case}));
 
     if is_assume_spec {
-        // The verified counterpart has extra parameters, so it cannot itself be an
-        // `assume_specification`; it is an ordinary function whose specification is
-        // assumed for the external function it stands in for.
+        // The counterpart's expanded signature cannot name the external target directly.
         fun.attrs.retain(|attr| !is_external_fn_specification_attr(attr));
         fun.attrs.push(mk_verus_attr_syn(span, quote! { external_body }));
         fun.block.stmts.clear();
         fun.block.stmts.push(unimplemented);
     } else if erase.erase() {
-        // The other way round for the counterpart: only the stub is called.
         fun.block.stmts.clear();
         fun.block.stmts.push(unimplemented);
     }
     ret.push(unverified_fun);
-    // Mark every unverified item, so that rust_verify can redirect
-    // `proof_with(.., f(..))` calls to the verified counterpart, which is the
-    // sibling named `_VERUS_VERIFIED_{name}`.
-    // A const function also produces an unerased proxy, and a call site may resolve
-    // to either of them, so both carry the marker.
+    // Const functions may expose both the executable item and its proxy as call targets.
     for unverified_fun in ret.iter_mut() {
         unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { unverified_stub }));
     }

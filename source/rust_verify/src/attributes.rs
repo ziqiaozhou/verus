@@ -398,11 +398,9 @@ pub(crate) enum Attr {
     // Proxy containing unerased code
     UnerasedProxy,
     UsesUnerasedProxy,
-    /// On an unverified stub `f`: names the verified counterpart `_VERUS_VERIFIED_f`
-    /// that carries the extra ghost/tracked parameters declared with `with`.
-    /// The unverified stub of a function declared with `with ..`
+    /// Marks the executable stub generated for a function with extra ghost or tracked state.
     UnverifiedStub,
-    /// The verified counterpart of a function declared with `with ..`
+    /// Marks the verified counterpart that receives the extra ghost or tracked state.
     VerifiedWith,
     /// On a companion trait: it declares the verified counterparts of the methods
     /// of an external trait, which cannot declare them itself.
@@ -959,16 +957,18 @@ pub(crate) fn parse_attrs(
     Ok(v)
 }
 
-/// The prefix `builtin_macros` gives the verified counterpart of a function
-/// declared with `#[verus_spec(with ..)]`.
+/// The proc macro uses this prefix for generated verified counterparts.
 pub(crate) const VERIFIED_PREFIX: &str = "_VERUS_VERIFIED_";
-/// The prefix its unverified stub gets in VIR, so that the counterpart can take
-/// the name the user wrote.
+/// VIR uses this prefix for stubs after assigning the source name to their counterparts.
 pub(crate) const UNVERIFIED_PREFIX: &str = "_VERUS_UNVERIFIED_";
 
-/// Is this the unverified stub of a function declared with `#[verus_spec(with ..)]`?
 pub(crate) fn is_unverified_stub(attrs: &[Attribute]) -> bool {
     parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::UnverifiedStub))
+}
+
+/// The marker is authoritative because user functions may also start with `VERIFIED_PREFIX`.
+pub(crate) fn is_verified_counterpart(attrs: &[Attribute]) -> bool {
+    parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::VerifiedWith))
 }
 
 pub(crate) fn parse_attrs_opt(

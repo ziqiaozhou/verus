@@ -2,25 +2,129 @@
 //! of `f` before rustc type checks the crate.
 //!
 //! `#[verus_spec(with ...)]` generates two functions: the unverified stub `f`,
-//! which keeps the original signature and carries
-//! `#[verus::internal(unverified_stub)]`, and the verified
-//! function `_VERUS_VERIFIED_f`, whose signature also contains the extra
-//! ghost/tracked parameters and returns the extra ghost/tracked outputs, and attributes include
-//! `#[verus::internal(verified_with)]`.
+//! which keeps the signature the user wrote and carries
+//! `#[verus::internal(unverified_stub)]`, and the verified counterpart
+//! `_VERUS_VERIFIED_f`, which carries `#[verus::internal(verified_with)]` and
+//! whose signature also has the extra ghost and tracked parameters and returns
+//! the extra ghost and tracked outputs. Only the stub is compiled; the
+//! counterpart is what gets verified.
 //!
-//! When call `f` in verification mode, we should use `_VERUS_VERIFIED_f`. However,
-//! verus macro is not reliable to rewrite the call: since a call may be
-//! written as `$path::f(..)`, through a `use` alias, or as a method call. Thus, we
-//! need to rewrite the HIR after macro expansion, but before type checking.
+//! A call to `f` has to become a call to `_VERUS_VERIFIED_f`. The macro cannot
+//! do that itself, because at expansion time it does not know what a call site
+//! refers to: it may be written as `$path::f(..)`, go through a `use` alias, or
+//! be a method call whose receiver type is not known yet. The rewrite therefore
+//! happens on the HIR, after macro expansion and after name resolution, but
+//! before type checking, so that rustc still type checks, borrow checks and
+//! lifetime checks the extra arguments of the rewritten call.
+//!
+//! # Pairing a stub with its verified counterpart
+//!
+//! A call names the unverified stub; the rewrite has to find the verified
+//! counterpart the macro generated for it. The two are never linked by a direct
+//! reference, since the stub may come from another crate, so the link is
+//! re-derived from the name and the enclosing item. The code below is what the
+//! macro expands to, with the attributes and the spec statements that do not
+//! take part in the pairing left out. There are three cases.
+//!
+//! ## Free functions and inherent methods
+//!
+//! ```ignore
+//! // #[verus_spec(with Tracked(t): Tracked<u8>)] fn f(x: u8) -> u8 { x }
+//!
+//! #[verus::internal(unverified_stub)]
+//! fn f(x: u8) -> u8 { unimplemented!() }
+//!
+//! #[verus::internal(verified_with)]
+//! fn _VERUS_VERIFIED_f(x: u8, verus_tmp_t: Tracked<u8>) -> u8 { x }
+//! ```
+//!
+//! The two are siblings, so the counterpart is the item named
+//! `_VERUS_VERIFIED_f` under the same parent, see [`counterpart_of`].
+//!
+//! ```ignore
+//! // proof_with!{t} let y = f(x);
+//!
+//! let y = proof_with_ret((t,), f(x));   // before: what this pass receives
+//! let y = _VERUS_VERIFIED_f(x, t);      // after
+//! ```
+//!
+//! ## Trait methods
+//!
+//! The counterpart cannot be added to the trait being called: an external trait
+//! cannot be edited, and editing a local one would change what every
+//! implementation has to provide. It goes into a *companion trait* instead, a
+//! generated subtrait with one implementation per implementation of the original.
+//!
+//! ```ignore
+//! // trait Tr { #[verus_spec(with Tracked(t): Tracked<u8>)] fn m(&self); }
+//! // impl Tr for S { .. }
+//!
+//! trait Tr {
+//!     #[verus::internal(unverified_stub)]
+//!     fn m(&self);
+//! }
+//! #[verus::internal(verified_trait)]
+//! trait _VERUS_VERIFIED_TRAIT_Tr: Tr {
+//!     #[verus::internal(verified_with)]
+//!     fn _VERUS_VERIFIED_m(&self, verus_tmp_t: Tracked<u8>);
+//! }
+//!
+//! impl Tr for S { fn m(&self) { unimplemented!() } }
+//! impl _VERUS_VERIFIED_TRAIT_Tr for S { fn _VERUS_VERIFIED_m(&self, verus_tmp_t: Tracked<u8>) {} }
+//! ```
+//!
+//! ```ignore
+//! // proof_with!{t} s.m();
+//!
+//! proof_with_ret((t,), s.m());       // before
+//! s._VERUS_VERIFIED_m(t);            // after
+//! ```
+//!
+//! The receiver type is unknown before type checking, so the counterpart is not
+//! looked up under an enclosing item; the call is renamed and left to name
+//! resolution. Resolution only considers the traits in scope that declare a
+//! method of the name written in the source, which the companion trait is not, so
+//! [`Ctxt::companions_by_method`] indexes the companion traits by the name they
+//! declare and [`rewrite_owner`] adds them back. A caller generic over `Tr` also
+//! needs a `_VERUS_VERIFIED_TRAIT_Tr` bound, which [`Injection`] adds.
+//!
+//! ## External functions
+//!
+//! The function called belongs to a crate that knows nothing of Verus, so it has
+//! no counterpart and cannot carry an attribute pointing at one. The counterpart
+//! belongs to the local `assume_specification` that specifies it, and the stub of
+//! that specification names the external function in tail position, which is how
+//! [`external_target_map`] indexes the pair.
+//!
+//! ```ignore
+//! // #[verifier::external_fn_specification]
+//! // #[verus_spec(with Tracked(t): Tracked<u8>)] fn ext_spec(x: u8) -> u8 { ext(x) }
+//!
+//! #[verifier::external_fn_specification]
+//! #[verus::internal(unverified_stub)]
+//! fn ext_spec(x: u8) -> u8 { ext(x) }   // the tail call names the external function
+//!
+//! #[verus::internal(verified_with)]
+//! fn _VERUS_VERIFIED_ext_spec(x: u8, verus_tmp_t: Tracked<u8>) -> u8 { unimplemented!() }
+//! ```
+//!
+//! ```ignore
+//! // proof_with!{t} let z = ext(x);
+//!
+//! let z = proof_with_ret((t,), ext(x));        // before
+//! let z = _VERUS_VERIFIED_ext_spec(x, t);      // after
+//! ```
 
 use crate::attributes::{Attr, parse_attrs_opt};
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::steal::Steal;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{
-    Arm, Block, Expr, ExprField, ExprKind, GenericBound, Generics, ItemLocalId, LetExpr,
-    MaybeOwner, Node, OwnerNode, ParentedNode, PathSegment, PolyTraitRef, QPath, Stmt, StmtKind,
-    TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate, WherePredicateKind,
+    Arm, Block, Expr, ExprField, ExprKind, GenericArgs, GenericBound, Generics, ItemLocalId,
+    LetExpr, MaybeOwner, Node, OwnerNode, ParentedNode, PathSegment, PolyTraitRef, QPath, Stmt,
+    StmtKind, StructTailExpr, TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate,
+    WherePredicateKind,
 };
 use rustc_index::IndexVec;
 use rustc_middle::ty::TyCtxt;
@@ -49,10 +153,10 @@ pub(crate) fn hir_proof_with_rewrite<'tcx>(
         *owner = crate_.owner(tcx, def_id);
     }
 
-    let ctxt = Ctxt::new(tcx, &new_owners);
-
     let owners = new_owners.clone();
-    let mut injections: HashMap<LocalDefId, Vec<Injection>> = HashMap::new();
+    let ctxt = Ctxt::new(tcx, &owners);
+
+    let mut injections: HashMap<LocalDefId, Vec<Injection<'tcx>>> = HashMap::new();
     for i in 0..new_owners.len() {
         let def_id = LocalDefId { local_def_index: DefIndex::from_usize(i) };
         let MaybeOwner::Owner(inner_owner) = new_owners[def_id] else {
@@ -79,13 +183,12 @@ pub(crate) fn hir_proof_with_rewrite<'tcx>(
     )
 }
 
-struct Ctxt<'tcx> {
+struct Ctxt<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    /// (parent def, item name) -> def id, for all local functions.
-    local_fns: HashMap<(DefId, Symbol), DefId>,
-    /// Attributes of local items. Reading them through `tcx` would re-enter the
+    /// The owners of this crate, as they were before the rewrite. Attributes are
+    /// read from here, since reading them through `tcx` would re-enter the
     /// `hir_crate` query that this pass is part of.
-    local_attrs: HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
+    owners: &'a IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     /// External function -> the verified counterpart declared for it by a local
     /// `assume_specification`. The external function cannot carry a `verified_by`
     /// attribute itself, so the link is indexed the other way round.
@@ -96,18 +199,100 @@ struct Ctxt<'tcx> {
     /// which declares the counterpart and not the method it is the counterpart
     /// of, is never a candidate for the call; the rewrite adds it back, see
     /// `rewrite_owner`.
-    twin_traits: HashMap<Symbol, Vec<DefId>>,
+    companions_by_method: HashMap<Symbol, Vec<DefId>>,
     /// Trait -> the traits it declares as supertraits. Used to find the trait a
     /// companion trait belongs to, and to elaborate the bounds of a caller, see
     /// `Injection`.
     trait_supers: HashMap<DefId, Vec<DefId>>,
 }
 
-impl<'tcx> Ctxt<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>) -> Ctxt<'tcx> {
-        let (local_fns, local_attrs, twin_traits, trait_supers) = local_maps(tcx, owners);
-        let external_targets = external_target_map(tcx, owners, &local_fns, &local_attrs);
-        Ctxt { tcx, local_fns, local_attrs, external_targets, twin_traits, trait_supers }
+/// The attributes of a local item, read from the owners this pass was handed.
+fn owner_attrs<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: LocalDefId,
+) -> Option<&'tcx [rustc_hir::Attribute]> {
+    let MaybeOwner::Owner(owner) = owners.get(def_id)? else {
+        return None;
+    };
+    Some(owner.attrs.get(ItemLocalId::ZERO))
+}
+
+/// The attributes of any item.
+///
+/// `attrs_for_def` only answers for another crate; for a local item rustc reads the
+/// attributes off the HIR owner, which is the `hir_crate` result this pass is
+/// computing, so a local item is looked up in the owners this pass was handed.
+fn def_attrs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: DefId,
+) -> Option<&'tcx [rustc_hir::Attribute]> {
+    match def_id.as_local() {
+        Some(local) => owner_attrs(owners, local),
+        None => Some(tcx.attrs_for_def(def_id)),
+    }
+}
+
+/// The function that the local item `parent` declares under `name`, read from the
+/// owners this pass was handed: `module_children` and `associated_items` would
+/// re-enter the `hir_crate` query that this pass is part of.
+fn local_child_fn<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    parent: LocalDefId,
+    name: Symbol,
+) -> Option<LocalDefId> {
+    let MaybeOwner::Owner(owner) = owners.get(parent)? else {
+        return None;
+    };
+    let children: Vec<LocalDefId> = match owner.node() {
+        OwnerNode::Crate(module) => module.item_ids.iter().map(|id| id.owner_id.def_id).collect(),
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Mod(_, module) => {
+                module.item_ids.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            rustc_hir::ItemKind::Impl(impl_) => {
+                impl_.items.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            rustc_hir::ItemKind::Trait { items, .. } => {
+                items.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    children.into_iter().find(|child| local_fn_name(owners, *child) == Some(name))
+}
+
+/// The name of a local function item, or `None` if the item is not a function.
+fn local_fn_name<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: LocalDefId,
+) -> Option<Symbol> {
+    let MaybeOwner::Owner(owner) = owners.get(def_id)? else {
+        return None;
+    };
+    match owner.node() {
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Fn { ident, .. } => Some(ident.name),
+            _ => None,
+        },
+        OwnerNode::ImplItem(item) => match &item.kind {
+            rustc_hir::ImplItemKind::Fn(..) => Some(item.ident.name),
+            _ => None,
+        },
+        OwnerNode::TraitItem(item) => match &item.kind {
+            rustc_hir::TraitItemKind::Fn(..) => Some(item.ident.name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+impl<'a, 'tcx> Ctxt<'a, 'tcx> {
+    fn new(tcx: TyCtxt<'tcx>, owners: &'a IndexVec<LocalDefId, MaybeOwner<'tcx>>) -> Ctxt<'a, 'tcx> {
+        let (companions_by_method, trait_supers) = local_maps(tcx, owners);
+        let external_targets = external_target_map(tcx, owners);
+        Ctxt { tcx, owners, external_targets, companions_by_method, trait_supers }
     }
 }
 
@@ -117,64 +302,43 @@ impl<'tcx> Ctxt<'tcx> {
 fn local_maps<'tcx>(
     tcx: TyCtxt<'tcx>,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-) -> (
-    HashMap<(DefId, Symbol), DefId>,
-    HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
-    HashMap<Symbol, Vec<DefId>>,
-    HashMap<DefId, Vec<DefId>>,
-) {
-    let mut map = HashMap::new();
-    let mut attrs = HashMap::new();
+) -> (HashMap<Symbol, Vec<DefId>>, HashMap<DefId, Vec<DefId>>) {
     let mut companion_traits: HashSet<LocalDefId> = HashSet::new();
     let mut trait_supers: HashMap<DefId, Vec<DefId>> = HashMap::new();
-    let mut twin_methods: Vec<(Symbol, LocalDefId)> = Vec::new();
+    let mut companion_methods: Vec<(Symbol, LocalDefId)> = Vec::new();
     for (def_id, owner) in owners.iter_enumerated() {
         let MaybeOwner::Owner(owner) = owner else {
             continue;
         };
-        let mut in_trait = false;
-        let ident = match owner.node() {
-            OwnerNode::Item(item) => match &item.kind {
-                rustc_hir::ItemKind::Fn { ident, .. } => *ident,
-                rustc_hir::ItemKind::Trait { bounds, .. } => {
-                    if is_companion_trait(owner.attrs.get(ItemLocalId::ZERO)) {
-                        companion_traits.insert(def_id);
-                    }
-                    trait_supers.insert(def_id.to_def_id(), bound_trait_ids(bounds));
-                    continue;
-                }
-                _ => continue,
-            },
-            OwnerNode::ImplItem(item) => match &item.kind {
-                rustc_hir::ImplItemKind::Fn(..) => item.ident,
-                _ => continue,
-            },
-            OwnerNode::TraitItem(item) => match &item.kind {
-                rustc_hir::TraitItemKind::Fn(..) => {
-                    in_trait = true;
-                    item.ident
-                }
-                _ => continue,
-            },
-            _ => continue,
-        };
-        let Some(parent) = tcx.opt_local_parent(def_id) else {
+        if let OwnerNode::Item(item) = owner.node()
+            && let rustc_hir::ItemKind::Trait { bounds, .. } = &item.kind
+        {
+            if is_companion_trait(owner.attrs.get(ItemLocalId::ZERO)) {
+                companion_traits.insert(def_id);
+            }
+            trait_supers.insert(def_id.to_def_id(), bound_trait_ids(bounds));
+            continue;
+        }
+        let OwnerNode::TraitItem(item) = owner.node() else {
             continue;
         };
-        map.insert((parent.to_def_id(), ident.name), def_id.to_def_id());
-        attrs.insert(def_id, owner.attrs.get(ItemLocalId::ZERO));
-        if in_trait && ident.name.as_str().starts_with(VERIFIED_PREFIX) {
-            twin_methods.push((ident.name, parent));
+        let rustc_hir::TraitItemKind::Fn(..) = &item.kind else {
+            continue;
+        };
+        if item.ident.name.as_str().starts_with(VERIFIED_PREFIX)
+            && let Some(parent) = tcx.opt_local_parent(def_id)
+        {
+            companion_methods.push((item.ident.name, parent));
         }
     }
-    let mut twin_traits: HashMap<Symbol, Vec<DefId>> = HashMap::new();
-    for (name, parent) in twin_methods {
+    let mut companions_by_method: HashMap<Symbol, Vec<DefId>> = HashMap::new();
+    for (name, parent) in companion_methods {
         if companion_traits.contains(&parent) {
-            twin_traits.entry(name).or_default().push(parent.to_def_id());
+            companions_by_method.entry(name).or_default().push(parent.to_def_id());
         }
     }
-    external_twin_traits(tcx, &mut twin_traits, &mut trait_supers);
-    (map, attrs, twin_traits, trait_supers)
+    external_companion_traits(tcx, &mut companions_by_method, &mut trait_supers);
+    (companions_by_method, trait_supers)
 }
 
 /// The supertraits a trait of another crate declares.
@@ -206,13 +370,19 @@ fn is_companion_trait(attrs: &[rustc_hir::Attribute]) -> bool {
 ///
 /// A companion trait is usually declared next to the `external_trait_specification`
 /// of the trait it belongs to, which is commonly in another crate.
-fn external_twin_traits<'tcx>(
+fn external_companion_traits<'tcx>(
     tcx: TyCtxt<'tcx>,
-    twin_traits: &mut HashMap<Symbol, Vec<DefId>>,
+    companions_by_method: &mut HashMap<Symbol, Vec<DefId>>,
     trait_supers: &mut HashMap<DefId, Vec<DefId>>,
 ) {
     for cnum in tcx.crates(()) {
         for trait_def_id in tcx.traits(*cnum) {
+            // A companion trait is always named with the reserved prefix, so the
+            // cheap name check rules out the overwhelming majority of the
+            // dependencies' traits before any attribute is decoded.
+            if !tcx.item_name(*trait_def_id).as_str().starts_with(VERIFIED_PREFIX) {
+                continue;
+            }
             // Verus attributes are `Unparsed`, where `get_all_attrs` is
             // acceptable per its deprecation message.
             #[allow(deprecated)]
@@ -223,7 +393,7 @@ fn external_twin_traits<'tcx>(
             for assoc in tcx.associated_items(*trait_def_id).in_definition_order() {
                 let name = assoc.name();
                 if name.as_str().starts_with(VERIFIED_PREFIX) {
-                    twin_traits.entry(name).or_default().push(*trait_def_id);
+                    companions_by_method.entry(name).or_default().push(*trait_def_id);
                 }
             }
             trait_supers.insert(*trait_def_id, foreign_supertraits(tcx, *trait_def_id));
@@ -241,8 +411,6 @@ fn external_twin_traits<'tcx>(
 fn external_target_map<'tcx>(
     tcx: TyCtxt<'tcx>,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-    local_fns: &HashMap<(DefId, Symbol), DefId>,
-    local_attrs: &HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
 ) -> HashMap<DefId, DefId> {
     let mut map = HashMap::new();
     for (def_id, owner) in owners.iter_enumerated() {
@@ -255,15 +423,12 @@ fn external_target_map<'tcx>(
         let rustc_hir::ItemKind::Fn { body, .. } = &item.kind else {
             continue;
         };
-        let Some(attrs) = local_attrs.get(&def_id) else {
-            continue;
-        };
-        let (mut is_external_fn_spec, mut is_stub, mut is_proxy) = (false, false, false);
+        let attrs = owner.attrs.get(ItemLocalId::ZERO);
+        let (mut is_external_fn_spec, mut is_stub) = (false, false);
         for attr in parse_attrs_opt(attrs, None) {
             match attr {
                 Attr::ExternalFnSpecification => is_external_fn_spec = true,
                 Attr::UnverifiedStub => is_stub = true,
-                Attr::UnerasedProxy => is_proxy = true,
                 _ => {}
             }
         }
@@ -276,7 +441,7 @@ fn external_target_map<'tcx>(
         let Some(target) = tail_call_target(body.value) else {
             continue;
         };
-        if let Some(verified) = counterpart_of(tcx, local_fns, def_id.to_def_id(), is_proxy) {
+        if let Some(verified) = counterpart_of(tcx, owners, def_id.to_def_id()) {
             map.insert(target, verified);
         }
     }
@@ -292,7 +457,7 @@ fn tail_call_target(mut expr: &Expr<'_>) -> Option<DefId> {
                 let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else {
                     return None;
                 };
-                return Some(path.res.def_id());
+                return path.res.opt_def_id();
             }
             _ => {
                 return None;
@@ -301,17 +466,13 @@ fn tail_call_target(mut expr: &Expr<'_>) -> Option<DefId> {
     }
 }
 
-impl<'tcx> Ctxt<'tcx> {
+impl<'tcx> Ctxt<'_, 'tcx> {
     /// Attributes of `def_id`.
     ///
     /// Note: for local items we must not go through tcx.hir_attrs, which would
     /// re-enter the hir_crate query we are computing.
     fn attrs(&self, def_id: DefId) -> Option<&'tcx [rustc_hir::Attribute]> {
-        if let Some(local) = def_id.as_local() {
-            self.local_attrs.get(&local).copied()
-        } else {
-            Some(self.tcx.attrs_for_def(def_id))
-        }
+        def_attrs(self.tcx, self.owners, def_id)
     }
 
     /// Is `callee` a call to the `proof_with`/`proof_with_ret` marker of the builtin
@@ -342,28 +503,26 @@ impl<'tcx> Ctxt<'tcx> {
         })
     }
 
-    /// Is `def_id` the unverified stub of a function declared with `with ..`, and is
-    /// it the unerased proxy of a `const fn`?
-    fn stub_kind(&self, def_id: DefId) -> (bool, bool) {
+    /// Is `def_id` the verified counterpart of a function declared with `with ..`?
+    fn is_verified_counterpart(&self, def_id: DefId) -> bool {
         let Some(attrs) = self.attrs(def_id) else {
-            return (false, false);
+            return false;
         };
-        let (mut is_stub, mut is_proxy) = (false, false);
-        for attr in parse_attrs_opt(attrs, None) {
-            match attr {
-                Attr::UnverifiedStub => is_stub = true,
-                Attr::UnerasedProxy => is_proxy = true,
-                _ => {}
-            }
-        }
-        (is_stub, is_proxy)
+        parse_attrs_opt(attrs, None).iter().any(|a| matches!(a, Attr::VerifiedWith))
+    }
+
+    /// Is `def_id` the unverified stub of a function declared with `with ..`?
+    fn is_unverified_stub(&self, def_id: DefId) -> bool {
+        let Some(attrs) = self.attrs(def_id) else {
+            return false;
+        };
+        parse_attrs_opt(attrs, None).iter().any(|a| matches!(a, Attr::UnverifiedStub))
     }
 
     /// Resolve the verified counterpart of a resolved callee.
     fn verified_counterpart(&self, def_id: DefId) -> Option<DefId> {
-        let (is_stub, is_proxy) = self.stub_kind(def_id);
-        let name = counterpart_name(self.tcx.item_name(def_id), is_proxy);
-        if !is_stub {
+        let name = counterpart_name(self.tcx, self.owners, def_id);
+        if !self.is_unverified_stub(def_id) {
             // The callee is not a stub itself: it may be an external function
             // specified by a local `assume_specification`, or a method of an
             // external trait, specified by a proxy.
@@ -373,19 +532,31 @@ impl<'tcx> Ctxt<'tcx> {
             let parent = self.tcx.opt_parent(def_id)?;
             return self.companion_method(parent, name);
         }
-        counterpart_of(self.tcx, &self.local_fns, def_id, is_proxy)
+        counterpart_of(self.tcx, self.owners, def_id)
             .or_else(|| self.companion_method(self.tcx.opt_parent(def_id)?, name))
     }
 
     /// The counterpart of a trait method, which the companion trait of the trait
     /// declares.
     fn companion_method(&self, trait_def_id: DefId, name: Symbol) -> Option<DefId> {
-        self.twin_traits
+        let companion = *self
+            .companions_by_method
             .get(&name)?
             .iter()
-            .find(|companion| self.supertraits(**companion).contains(&trait_def_id))
-            .and_then(|companion| self.local_fns.get(&(*companion, name)))
-            .copied()
+            .find(|companion| self.supertraits(**companion).contains(&trait_def_id))?;
+        match companion.as_local() {
+            // A local companion is read from the owners; `associated_items` would
+            // re-enter the `hir_crate` computation this pass is part of.
+            Some(local) => local_child_fn(self.owners, local, name).map(LocalDefId::to_def_id),
+            // A companion of a dependency crate, indexed by `external_companion_traits`,
+            // is safe to look up through the query since its `DefId` is foreign.
+            None => self
+                .tcx
+                .associated_items(companion)
+                .filter_by_name_unhygienic(name)
+                .next()
+                .map(|assoc| assoc.def_id),
+        }
     }
 
     /// The supertraits of a trait, which for a trait of this crate are read from
@@ -399,24 +570,33 @@ impl<'tcx> Ctxt<'tcx> {
         }
     }
 
-    /// Do these bounds already give the trait that `companion` is the companion
-    /// of, so that a bound on `companion` is what is missing?
+    /// Which traits that `companion` is a companion of are reached by these
+    /// bounds?
     ///
     /// The trait may be reached through a supertrait: a caller written with
     /// `A: Y`, where `trait Y: X`, calls the methods of `X` too.
-    fn bounds_reach(&self, bounds: &[DefId], companion: DefId) -> bool {
+    fn bounds_reach(&self, bounds: &[DefId], companion: DefId) -> FxIndexSet<DefId> {
         let targets = self.supertraits(companion);
         let mut todo: Vec<DefId> = bounds.to_vec();
-        let mut seen: HashSet<DefId> = HashSet::new();
+        let mut seen: FxIndexSet<DefId> = FxIndexSet::default();
         while let Some(bound) = todo.pop() {
-            if targets.contains(&bound) {
-                return true;
-            }
             if seen.insert(bound) {
                 todo.extend(self.supertraits(bound));
             }
         }
-        false
+        targets.into_iter().filter(|target| seen.contains(target)).collect()
+    }
+
+    /// Does this trait require arguments other than its implicit `Self`?
+    fn trait_has_generic_params(&self, trait_def_id: DefId) -> bool {
+        if let Some(local) = trait_def_id.as_local() {
+            let Some(MaybeOwner::Owner(owner)) = self.owners.get(local) else {
+                return false;
+            };
+            return owner.node().generics().is_some_and(|generics| !generics.params.is_empty());
+        }
+        let generics = self.tcx.generics_of(trait_def_id);
+        generics.own_params.len() > usize::from(generics.has_self)
     }
 }
 
@@ -428,35 +608,64 @@ impl<'tcx> Ctxt<'tcx> {
 /// would leak the companion trait into the source, so it is added here instead.
 /// The caller still has to prove it, which only a type whose implementation was
 /// itself verified with `with` satisfies.
-struct Injection {
+struct Injection<'tcx> {
     /// The type parameter the bound is added to.
     param: DefId,
     companion: DefId,
+    /// Arguments written on the trait bound that provides the companion's
+    /// supertrait.
+    args: Option<&'tcx GenericArgs<'tcx>>,
     /// Span of the bound that the call resolved through.
     span: rustc_span::Span,
 }
 
 fn rewrite_owner<'tcx>(
-    ctxt: &Ctxt<'tcx>,
+    ctxt: &Ctxt<'_, 'tcx>,
     inner_owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-    injections: &mut HashMap<LocalDefId, Vec<Injection>>,
+    injections: &mut HashMap<LocalDefId, Vec<Injection<'tcx>>>,
 ) -> Option<MaybeOwner<'tcx>> {
     let tcx = ctxt.tcx;
     let mut bodies = inner_owner.nodes.bodies.clone();
     let mut nodes = inner_owner.nodes.nodes.clone();
     let mut changed = false;
     let mut extra_traits: HashMap<ItemLocalId, Vec<DefId>> = HashMap::new();
+    let in_counterpart = ctxt.is_verified_counterpart(def_id.to_def_id());
 
     for (local_id, body) in inner_owner.nodes.bodies.iter() {
-        let mut folder = Folder { ctxt, updates: Vec::new(), extra_traits: Vec::new() };
+        let mut folder = Folder {
+            ctxt,
+            updates: Vec::new(),
+            reparents: Vec::new(),
+            extra_traits: Vec::new(),
+            in_counterpart,
+        };
         let Some(value) = folder.fold_expr(body.value) else {
             continue;
         };
         for (id, node) in folder.updates.iter() {
             if let Some(parented) = nodes.get_mut(*id) {
                 parented.node = *node;
+            }
+        }
+        // A `proof_with` rewrite collapses the marker call and the real call into a
+        // single node reusing the real call's `ItemLocalId`, so that node and the
+        // extra arguments move to a new parent in the rebuilt tree. Only `.node` is
+        // written back above, so their recorded `ParentedNode::parent` is fixed here
+        // too; otherwise an upward HIR walk (`tcx.parent_hir_id` and friends) from a
+        // rewritten node lands on the marker node that no longer exists in the tree.
+        // The nodes the collapse abandons (the marker call, its callee and the
+        // argument tuple) stay in `nodes` as now-unreachable entries, which is
+        // harmless: every traversal walks the tree of `Body` values and never
+        // iterates `nodes` directly, so nothing reaches them.
+        for (id, reparent) in folder.reparents.iter() {
+            let parent = match reparent {
+                Reparent::To(parent) => Some(*parent),
+                Reparent::AdoptFrom(other) => nodes.get(*other).map(|p| p.parent),
+            };
+            if let (Some(parented), Some(parent)) = (nodes.get_mut(*id), parent) {
+                parented.parent = parent;
             }
         }
         for (id, traits) in folder.extra_traits.iter() {
@@ -509,14 +718,17 @@ fn rewrite_owner<'tcx>(
 /// picks up a bound it does not need, which only makes the signature more
 /// demanding, never less.
 fn collect_injections<'tcx>(
-    ctxt: &Ctxt<'tcx>,
+    ctxt: &Ctxt<'_, 'tcx>,
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     extra_traits: &HashMap<ItemLocalId, Vec<DefId>>,
-    injections: &mut HashMap<LocalDefId, Vec<Injection>>,
+    injections: &mut HashMap<LocalDefId, Vec<Injection<'tcx>>>,
 ) {
     let tcx = ctxt.tcx;
-    let companions: HashSet<DefId> = extra_traits.values().flatten().copied().collect();
+    let mut calls: Vec<_> = extra_traits.iter().collect();
+    calls.sort_by_key(|(id, _)| id.as_u32());
+    let companions: FxIndexSet<DefId> =
+        calls.into_iter().flat_map(|(_, traits)| traits.iter().copied()).collect();
     if companions.is_empty() {
         return;
     }
@@ -536,7 +748,7 @@ fn collect_injections<'tcx>(
         }
     }
 
-    for generics in scopes {
+    for generics in &scopes {
         for predicate in generics.predicates {
             let WherePredicateKind::BoundPredicate(bound) = predicate.kind else {
                 continue;
@@ -548,22 +760,112 @@ fn collect_injections<'tcx>(
                 continue;
             };
             let bounded_by = bound_trait_ids(bound.bounds);
-            for companion in companions.iter() {
+            for companion in &companions {
                 if bounded_by.contains(companion) {
                     // Already spelled out in the source.
                     continue;
                 }
-                if !ctxt.bounds_reach(&bounded_by, *companion) {
+                let reached = ctxt.bounds_reach(&bounded_by, *companion);
+                if reached.is_empty() {
                     continue;
                 }
+                if reached.len() != 1 {
+                    tcx.dcx().span_err(
+                        predicate.span,
+                        format!(
+                            "`proof_with!` cannot determine which supertrait supplies the \
+                             generic arguments for `{}`",
+                            tcx.item_name(*companion)
+                        ),
+                    );
+                    continue;
+                }
+                let target = *reached.first().unwrap();
+                let mut direct = bound.bounds.iter().filter_map(|bound| {
+                    let GenericBound::Trait(poly) = bound else {
+                        return None;
+                    };
+                    (poly.trait_ref.trait_def_id() == Some(target)).then_some(poly)
+                });
+                let args = match (direct.next(), direct.next()) {
+                    (Some(poly), None) if poly.bound_generic_params.is_empty() => {
+                        poly.trait_ref.path.segments.last().and_then(|segment| segment.args)
+                    }
+                    (Some(_), None) => {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            "`proof_with!` cannot inject a companion-trait bound through a \
+                             higher-ranked trait bound",
+                        );
+                        continue;
+                    }
+                    (Some(_), Some(_)) => {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` found multiple `{}` bounds with ambiguous \
+                                 generic arguments",
+                                tcx.item_name(target)
+                            ),
+                        );
+                        continue;
+                    }
+                    (None, _) if ctxt.trait_has_generic_params(target) => {
+                        let has_direct_bound = scopes.iter().any(|generics| {
+                            generics.predicates.iter().any(|predicate| {
+                                let WherePredicateKind::BoundPredicate(bound) = predicate.kind
+                                else {
+                                    return false;
+                                };
+                                type_param_of(bound.bounded_ty) == Some(param)
+                                    && bound.bounds.iter().any(|bound| {
+                                        bound.trait_ref().and_then(|trait_ref| {
+                                            trait_ref.trait_def_id()
+                                        })
+                                            == Some(target)
+                                    })
+                            })
+                        });
+                        if has_direct_bound {
+                            continue;
+                        }
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` cannot infer the generic arguments for `{}` \
+                                 through an indirect supertrait bound; add a direct `{}` bound",
+                                tcx.item_name(*companion),
+                                tcx.item_name(target)
+                            ),
+                        );
+                        continue;
+                    }
+                    (None, _) => None,
+                };
                 let Some(owner) = param.as_local().and_then(|p| tcx.opt_local_parent(p)) else {
                     continue;
                 };
                 let entry = injections.entry(owner).or_default();
-                if entry.iter().any(|i| i.param == param && i.companion == *companion) {
+                if let Some(previous) =
+                    entry.iter().find(|i| i.param == param && i.companion == *companion)
+                {
+                    let same_args = match (previous.args, args) {
+                        (None, None) => true,
+                        (Some(previous), Some(args)) => std::ptr::eq(previous, args),
+                        _ => false,
+                    };
+                    if !same_args {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` found conflicting generic arguments for `{}`",
+                                tcx.item_name(*companion)
+                            ),
+                        );
+                    }
                     continue;
                 }
-                entry.push(Injection { param, companion: *companion, span: predicate.span });
+                entry.push(Injection { param, companion: *companion, args, span: predicate.span });
             }
         }
     }
@@ -588,7 +890,7 @@ fn type_param_of<'tcx>(ty: &'tcx Ty<'tcx>) -> Option<DefId> {
 fn inject_bounds<'tcx>(
     tcx: TyCtxt<'tcx>,
     inner_owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
-    injections: &[Injection],
+    injections: &[Injection<'tcx>],
 ) -> Option<MaybeOwner<'tcx>> {
     let mut nodes = inner_owner.nodes.nodes.clone();
     // An owner without generics cannot take a bound, and `def_id` is only
@@ -598,7 +900,7 @@ fn inject_bounds<'tcx>(
 
     let mut predicates: Vec<WherePredicate<'tcx>> = Vec::new();
     for injection in injections {
-        let Injection { param, companion, span } = injection;
+        let Injection { param, companion, args, span } = injection;
         let base = nodes.next_index().as_u32();
         let id = |offset: u32| rustc_hir::HirId {
             owner: owner_id,
@@ -607,13 +909,14 @@ fn inject_bounds<'tcx>(
         let (predicate_id, ty_id, param_segment_id, trait_ref_id, trait_segment_id) =
             (id(0), id(1), id(2), id(3), id(4));
 
-        let mk_path = |hir_id: rustc_hir::HirId, res: Res| {
+        let mk_path =
+            |hir_id: rustc_hir::HirId, res: Res, args: Option<&'tcx GenericArgs<'tcx>>| {
             let name = tcx.item_name(res.def_id());
             let segment = tcx.hir_arena.alloc(PathSegment {
                 ident: rustc_span::symbol::Ident::new(name, *span),
                 hir_id,
                 res,
-                args: None,
+                args,
                 infer_args: false,
             });
             let path = tcx.hir_arena.alloc(rustc_hir::Path {
@@ -625,14 +928,14 @@ fn inject_bounds<'tcx>(
         };
 
         let (param_segment, param_path) =
-            mk_path(param_segment_id, Res::Def(DefKind::TyParam, *param));
+            mk_path(param_segment_id, Res::Def(DefKind::TyParam, *param), None);
         let bounded_ty = tcx.hir_arena.alloc(Ty {
             hir_id: ty_id,
             span: *span,
             kind: TyKind::Path(QPath::Resolved(None, param_path)),
         });
         let (trait_segment, trait_path) =
-            mk_path(trait_segment_id, Res::Def(DefKind::Trait, *companion));
+            mk_path(trait_segment_id, Res::Def(DefKind::Trait, *companion), *args);
         let trait_ref =
             tcx.hir_arena.alloc(TraitRef { path: trait_path, hir_ref_id: trait_ref_id });
         let bounds = tcx.hir_arena.alloc_slice(&[GenericBound::Trait(PolyTraitRef {
@@ -757,15 +1060,33 @@ fn with_generics<'tcx>(
     }
 }
 
+/// How to fix a moved node's `ParentedNode::parent` during write-back, see the
+/// `reparents` loop in `rewrite_owner`.
+enum Reparent {
+    /// Set the parent to this id.
+    To(ItemLocalId),
+    /// Adopt the parent currently recorded for this id. The call a `proof_with`
+    /// rewrite collapses to takes the marker's place, so it inherits the marker's
+    /// parent, which is only known once `rewrite_owner` holds the `nodes` map.
+    AdoptFrom(ItemLocalId),
+}
+
 /// Rebuilds the spine from the body root down to each rewritten call. HIR is
 /// immutable arena data and type checking walks the expression tree through the
 /// child pointers of each node, so every ancestor of a replaced expression has to
 /// be reallocated with the new child. Hir ids and spans are preserved.
 struct Folder<'a, 'tcx> {
-    ctxt: &'a Ctxt<'tcx>,
+    ctxt: &'a Ctxt<'a, 'tcx>,
     updates: Vec<(ItemLocalId, Node<'tcx>)>,
-    /// Trait candidates to add for a rewritten call, see `Ctxt::twin_traits`.
+    /// Parent fixes for the nodes a `proof_with` collapse moves in the rebuilt
+    /// tree, applied after `updates`, see `rewrite_owner`.
+    reparents: Vec<(ItemLocalId, Reparent)>,
+    /// Trait candidates to add for a rewritten call, see `Ctxt::companions_by_method`.
     extra_traits: Vec<(ItemLocalId, &'a [DefId])>,
+    /// Is the owner being folded itself a verified counterpart? Its `ensures` refers
+    /// to itself, which is the one place a counterpart may be named directly, see
+    /// `reject_direct_call`.
+    in_counterpart: bool,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
@@ -786,6 +1107,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Returns `Some(new)` if anything inside `expr` was rewritten.
     fn fold_expr(&mut self, expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+        self.reject_direct_call(expr);
         if let Some(new) = self.try_rewrite_proof_with(expr) {
             return Some(new);
         }
@@ -885,15 +1207,28 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             ExprKind::Ret(e) => ExprKind::Ret(Some(self.fold_expr((*e)?)?)),
             ExprKind::Become(e) => ExprKind::Become(self.fold_expr(e)?),
             ExprKind::Struct(qpath, fields, tail) => {
-                ExprKind::Struct(qpath, self.fold_fields(fields)?, *tail)
+                let new_fields = self.fold_fields(fields);
+                let new_tail = match tail {
+                    StructTailExpr::Base(base) => self.fold_expr(base).map(StructTailExpr::Base),
+                    StructTailExpr::None
+                    | StructTailExpr::DefaultFields(_)
+                    | StructTailExpr::NoneWithError(_) => None,
+                };
+                if new_fields.is_none() && new_tail.is_none() {
+                    return None;
+                }
+                ExprKind::Struct(qpath, new_fields.unwrap_or(fields), new_tail.unwrap_or(*tail))
             }
             ExprKind::Repeat(e, count) => ExprKind::Repeat(self.fold_expr(e)?, count),
             ExprKind::Yield(e, source) => ExprKind::Yield(self.fold_expr(e)?, *source),
             ExprKind::UnsafeBinderCast(kind, e, ty) => {
                 ExprKind::UnsafeBinderCast(*kind, self.fold_expr(e)?, *ty)
             }
-            // Closures and const blocks are separate owners and are visited on
-            // their own; the remaining variants have no sub-expressions.
+            // A const block is an owner of its own and is visited on its own
+            // iteration. A closure is not an owner, but its body is a separate
+            // entry in the `bodies` of the enclosing owner, which `rewrite_owner`
+            // iterates over, so it is folded there rather than through here.
+            // The remaining variants have no sub-expressions.
             ExprKind::ConstBlock(..)
             | ExprKind::Closure(..)
             | ExprKind::Lit(..)
@@ -904,6 +1239,38 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             | ExprKind::Err(..) => return None,
         };
         Some(self.mk_expr(expr, kind))
+    }
+
+    /// A verified counterpart may only be reached through the stub it belongs to:
+    /// calling it directly would skip the `proof_with` marker and hand the caller
+    /// the extra ghost/tracked outputs without any obligation to supply the inputs.
+    /// The rewrite builds its calls itself and never folds them, so anything named
+    /// here was written by hand.
+    ///
+    /// This only sees a resolved path. A method call is resolved after type
+    /// checking, so `x.counterpart()` is rejected in `rust_to_vir` instead.
+    fn reject_direct_call(&self, expr: &'tcx Expr<'tcx>) {
+        if self.in_counterpart {
+            return;
+        }
+        let ExprKind::Path(QPath::Resolved(_, path)) = &expr.kind else {
+            return;
+        };
+        let Some(def_id) = path.res.opt_def_id() else {
+            return;
+        };
+        if !self.ctxt.is_verified_counterpart(def_id) {
+            return;
+        }
+        self.tcx().dcx().span_err(
+            expr.span,
+            format!(
+                "`{}` is the verified counterpart of a function declared with `with ..` \
+                 and cannot be called directly; call the function it belongs to and pass \
+                 the extra arguments with `proof_with!`",
+                self.tcx().item_name(def_id)
+            ),
+        );
     }
 
     fn fold_exprs(&mut self, exprs: &'tcx [Expr<'tcx>]) -> Option<&'tcx [Expr<'tcx>]> {
@@ -929,8 +1296,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     fn fold_arms(&mut self, arms: &'tcx [Arm<'tcx>]) -> Option<&'tcx [Arm<'tcx>]> {
         let mut new: Option<Vec<Arm<'tcx>>> = None;
         for (i, arm) in arms.iter().enumerate() {
-            if let Some(folded) = self.fold_expr(arm.body) {
-                new.get_or_insert_with(|| arms.to_vec())[i].body = folded;
+            let new_guard = arm.guard.and_then(|g| self.fold_expr(g));
+            let new_body = self.fold_expr(arm.body);
+            if new_guard.is_none() && new_body.is_none() {
+                continue;
+            }
+            let arm = &mut new.get_or_insert_with(|| arms.to_vec())[i];
+            if let Some(guard) = new_guard {
+                arm.guard = Some(guard);
+            }
+            if let Some(body) = new_body {
+                arm.body = body;
             }
         }
         new.map(|v| &*self.tcx().hir_arena.alloc_slice(&v))
@@ -1007,6 +1383,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let call = &marker_args[1];
         let call = self.fold_expr(call).unwrap_or(call);
 
+        // The extra arguments move from the marker's tuple to become direct
+        // arguments of the collapsed call, so they are reparented to it on success.
+        let extra_ids: Vec<ItemLocalId> = extra_args.iter().map(|e| e.hir_id.local_id).collect();
+
         let new_kind = match &call.kind {
             ExprKind::Call(callee, args) => {
                 let mut new_args = args.to_vec();
@@ -1018,11 +1398,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 let mut new_args = args.to_vec();
                 new_args.extend(extra_args);
                 let new_seg = self.rename_segment(seg)?;
-                self.record_twin_traits(call.hir_id.local_id, new_seg.ident.name);
+                self.record_companion_traits(call.hir_id.local_id, new_seg.ident.name);
                 ExprKind::MethodCall(new_seg, receiver, self.alloc_exprs(new_args), *span)
             }
             _ => {
-                self.tcx().dcx().span_warn(
+                self.tcx().dcx().span_err(
                     call.span,
                     "`with` ghost inputs/outputs can only be applied to a function call",
                 );
@@ -1030,7 +1410,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             }
         };
         // Reuse the call's hir id: the marker node disappears from the tree.
-        Some(self.mk_expr(call, new_kind))
+        let new = self.mk_expr(call, new_kind);
+        for id in extra_ids {
+            self.reparents.push((id, Reparent::To(call.hir_id.local_id)));
+        }
+        // The collapsed call stands where the marker did, so it takes the marker's parent.
+        self.reparents.push((call.hir_id.local_id, Reparent::AdoptFrom(expr.hir_id.local_id)));
+        Some(new)
     }
 
     /// Point a resolved callee path at the verified counterpart of the callee.
@@ -1051,7 +1437,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     // the crate attributes and would re-enter the `hir_crate` query.
                     let name = path.segments.last().map(|s| s.ident.to_string());
                     let name = name.unwrap_or_else(|| "function".to_owned());
-                    self.tcx().dcx().span_warn(
+                    self.tcx().dcx().span_err(
                         callee.span,
                         format!(
                             "`{name}` does not accept extra ghost/tracked arguments: \
@@ -1065,7 +1451,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // Resolved during type checking; renaming the segment is enough.
             QPath::TypeRelative(ty, seg) => {
                 let new_seg = self.rename_segment(seg)?;
-                self.record_twin_traits(callee.hir_id.local_id, new_seg.ident.name);
+                self.record_companion_traits(callee.hir_id.local_id, new_seg.ident.name);
                 QPath::TypeRelative(ty, new_seg)
             }
         };
@@ -1110,8 +1496,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Remember that the companion traits declaring `name` have to be treated as
     /// in scope for the rewritten call.
-    fn record_twin_traits(&mut self, id: ItemLocalId, name: Symbol) {
-        if let Some(traits) = self.ctxt.twin_traits.get(&name) {
+    fn record_companion_traits(&mut self, id: ItemLocalId, name: Symbol) {
+        if let Some(traits) = self.ctxt.companions_by_method.get(&name) {
             self.extra_traits.push((id, traits.as_slice()));
         }
     }
@@ -1131,21 +1517,17 @@ fn verified_name(name: Symbol) -> Symbol {
 
 /// The verified counterpart of the unverified stub `def_id`: the function with the
 /// counterpart name in the same module or impl.
-fn counterpart_of(
-    tcx: TyCtxt<'_>,
-    local_fns: &HashMap<(DefId, Symbol), DefId>,
+fn counterpart_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     def_id: DefId,
-    is_unerased_proxy: bool,
 ) -> Option<DefId> {
-    let name = counterpart_name(tcx.item_name(def_id), is_unerased_proxy);
+    let name = counterpart_name(tcx, owners, def_id);
     let parent = tcx.opt_parent(def_id)?;
-    if let Some(found) = local_fns.get(&(parent, name)) {
-        return Some(*found);
-    }
-    if parent.is_local() {
-        // A local counterpart is in `local_fns` already, and the queries below
-        // would re-enter the `hir_crate` computation this pass is part of.
-        return None;
+    if let Some(parent) = parent.as_local() {
+        // The queries below would re-enter the `hir_crate` computation this pass
+        // is part of, so a local counterpart is looked up in the owners instead.
+        return local_child_fn(owners, parent, name).map(LocalDefId::to_def_id);
     }
     match tcx.def_kind(parent) {
         DefKind::Mod => tcx
@@ -1162,11 +1544,19 @@ fn counterpart_of(
     }
 }
 
-/// The name of the verified counterpart of the unverified stub `name`. A `const fn`
+/// The name of the verified counterpart of the unverified stub `def_id`. A `const fn`
 /// is also split into an erased item and an unerased proxy, and both are stubs, but
-/// the counterpart is named after the function the user wrote, without the prefix
-/// the proxy carries.
-fn counterpart_name(name: Symbol, is_unerased_proxy: bool) -> Symbol {
+/// the counterpart is named after the function the user wrote, so the prefix the
+/// proxy carries is dropped first.
+fn counterpart_name<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: DefId,
+) -> Symbol {
+    let is_unerased_proxy = parse_attrs_opt(def_attrs(tcx, owners, def_id).unwrap_or(&[]), None)
+        .iter()
+        .any(|a| matches!(a, Attr::UnerasedProxy));
+    let name = tcx.item_name(def_id);
     let name = name.as_str();
     let name = match is_unerased_proxy {
         true => name.strip_prefix(UNERASED_PROXY_PREFIX).unwrap_or(name),
