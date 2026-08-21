@@ -3796,3 +3796,89 @@ test_verify_one_file! {
         }
     } => Err(err) => assert_postcondition_fails(err)
 }
+
+// A `with` clause written inside `verus!` is handed to the `#[verus_spec]` attribute
+// macro, which is where the split into an unverified stub and a verified counterpart
+// is implemented.
+
+test_verify_one_file! {
+    #[test] test_verus_syntax_group
+        verus_code_str!{
+            use vstd::prelude::*;
+
+            // a free function with `with` inputs, in `verus!` syntax
+            fn free_fn(a: u64) -> (r: u64)
+                with Tracked(b): Tracked<u64>, Ghost(c): Ghost<u32>
+                requires a == 0, b == 1, c == 2,
+                ensures r == a,
+            {
+                a
+            }
+
+            fn call_free() {
+                proof_with!{Tracked(1u64), Ghost(2u32)}
+                let r = free_fn(0);
+                assert(r == 0);
+            }
+
+            // an extra output produced with `proof_with!{|= ..}`
+            fn out_fn(a: u64) -> (r: u64)
+                with Ghost(c): Ghost<u32> -> d: Ghost<u32>
+                requires c == 2,
+                ensures r == a, d@ == c,
+            {
+                proof_with!{|= Ghost(c)}
+                a
+            }
+
+            fn call_out() {
+                proof_with!{Ghost(2u32) => Ghost(d)}
+                let r = out_fn(7);
+                assert(r == 7 && d == 2);
+            }
+
+            // `with` on an inherent method
+            struct S;
+
+            impl S {
+                fn inherent(&self, a: u64) -> (r: u64)
+                    with Ghost(g): Ghost<int>
+                    requires g == 1,
+                    ensures r == a,
+                {
+                    a
+                }
+            }
+
+            fn call_inherent(s: S) {
+                proof_with!{Ghost(1int)}
+                let r = s.inherent(4);
+                assert(r == 4);
+            }
+        }.to_string()
+        // `with` on an `assume_specification` with an extra `Tracked` input
+    => Ok(())
+}
+
+test_verify_one_file! {
+    // The extra argument is needed: a wrong one fails the precondition, and
+    // omitting `proof_with!` reaches the stub with `requires(false)`.
+    #[test] test_with_inside_verus_macro_fails verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64)
+            with Tracked(b): Tracked<u64>
+            requires b == 1,
+        {
+        }
+
+        fn call_wrong() {
+            proof_with!{Tracked(2u64)}
+            test(0); // FAILS
+        }
+
+        fn call_missing() {
+            test(0); // FAILS
+        }
+    } => Err(e) => assert_fails(e, 2)
+}

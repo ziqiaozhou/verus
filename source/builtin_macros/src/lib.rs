@@ -352,7 +352,23 @@ pub fn verus_spec(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    attr_rewrite::rewrite_verus_spec(cfg_erase(), attr.into(), input.into()).into()
+    attr_rewrite::rewrite_verus_spec(cfg_erase(), attr.into(), input.into(), false).into()
+}
+
+/// `#[verus_spec]` as emitted by the `verus!` macro itself.
+///
+/// A `with` clause inside `verus!` is lowered by re-emitting the whole signature
+/// specification as this attribute, so that one implementation splits a function into
+/// an unverified stub and its verified counterpart. It differs from `verus_spec` only
+/// in that it does not warn about appearing inside `verus!`, which is where the
+/// `verus!` macro necessarily puts it.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn verus_spec_internal(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_rewrite::rewrite_verus_spec(cfg_erase(), attr.into(), input.into(), true).into()
 }
 
 /// proof_with add ghost input/output to the next function call.

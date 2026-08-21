@@ -2373,9 +2373,24 @@ mod printing {
     }
 
     #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    impl ToTokens for WithSpecOnFn {
+        fn to_tokens(&self, tokens: &mut TokenStream) {
+            self.with.to_tokens(tokens);
+            self.inputs.to_tokens(tokens);
+            if let Some((arrow, outputs)) = &self.outputs {
+                arrow.to_tokens(tokens);
+                outputs.to_tokens(tokens);
+            }
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
     impl ToTokens for SignatureSpec {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             self.prover.to_tokens(tokens);
+            // Printed in the order `Parse for SignatureSpec` expects, so that a spec
+            // printed here parses back to an equal spec.
+            self.with.to_tokens(tokens);
             self.atomic_spec.to_tokens(tokens);
             self.requires.to_tokens(tokens);
             self.recommends.to_tokens(tokens);

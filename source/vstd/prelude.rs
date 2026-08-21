@@ -31,6 +31,8 @@ pub use verus_builtin_macros::verus_proof_expr;
 pub use verus_builtin_macros::verus_proof_macro_explicit_exprs;
 pub use verus_builtin_macros::verus_proof_macro_exprs;
 pub use verus_builtin_macros::verus_spec;
+#[doc(hidden)]
+pub use verus_builtin_macros::verus_spec_internal;
 pub use verus_builtin_macros::verus_trait_impl;
 pub use verus_builtin_macros::verus_verify;
 
