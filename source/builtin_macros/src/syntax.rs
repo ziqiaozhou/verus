@@ -1219,6 +1219,16 @@ impl Visitor {
         let mut stmts: Vec<Stmt> = Vec::new();
         let mut unwrap_ghost_tracked: Vec<Stmt> = Vec::new();
 
+        // A `with` clause splits the function into an unverified stub and a verified
+        // counterpart that carries the extra ghost or tracked parameters and results.
+        // That split is implemented once, by the `verus_spec` attribute macro, so hand it
+        // the whole signature specification instead of lowering the clauses here: the
+        // counterpart's extra parameters have to be in scope for `requires` and `ensures`,
+        // and its extra results have to be folded into the return pattern before `ensures`
+        // is lowered against it.
+        let with_spec_attr =
+            if sig.spec.with.is_some() { Some(take_sig_spec_as_attr(sig)) } else { None };
+
         let has_body = semi_token.is_none();
         let atomic_perm_clause = self.handle_atomic_spec(sig, vis, &mut stmts);
 
@@ -1437,6 +1447,8 @@ impl Visitor {
         attrs.extend(prover_attr.into_iter());
         attrs.extend(ext_attrs);
         self.filter_attrs(attrs);
+        // Applied last, so that the attribute macro sees the fully lowered function.
+        attrs.extend(with_spec_attr);
 
         // unwrap_ghost_tracked must go first so that unwrapped vars are in scope in other headers
         stmts.splice(0..0, unwrap_ghost_tracked);
@@ -4666,6 +4678,7 @@ impl VisitMut for Visitor {
         );
         fun.block.stmts.splice(0..0, stmts);
         fun.semi_token = None;
+        ensure_verus_spec_attr(&mut fun.attrs, &fun.block, fun.sig.fn_token.span);
         let is_external_code = has_external_code(&fun.attrs);
         if is_external_code {
             self.inside_external_code += 1;
@@ -4691,6 +4704,7 @@ impl VisitMut for Visitor {
         );
         method.block.stmts.splice(0..0, stmts);
         method.semi_token = None;
+        ensure_verus_spec_attr(&mut method.attrs, &method.block, method.sig.fn_token.span);
         let is_external_code = has_external_code(&method.attrs);
         if is_external_code {
             self.inside_external_code += 1;
@@ -4707,6 +4721,7 @@ impl VisitMut for Visitor {
             self.visit_fn(&mut method.attrs, None, &mut method.sig, method.semi_token, true, true);
         if let Some(block) = &mut method.default {
             block.stmts.splice(0..0, stmts);
+            ensure_verus_spec_attr(&mut method.attrs, block, method.sig.fn_token.span);
         } else if self.erase_ghost.keep() && is_spec_method {
             let span = method.sig.fn_token.span;
             stmts.push(Stmt::Expr(
@@ -5660,6 +5675,75 @@ pub(crate) fn generic_to_tokens(generic: &syn::Generics) -> Option<TokenStream> 
     params.to_tokens(&mut ret);
     generic.gt_token.to_tokens(&mut ret);
     Some(ret)
+}
+
+/// Whether a body contains a `proof_with!` marker.
+///
+/// The marker names the extra ghost or tracked arguments of the call that follows it.
+/// Pairing the two is done by the `verus_spec` attribute macro, so a `verus!` function
+/// whose body contains one is handed to that macro even when it has no specification of
+/// its own; see [`ensure_verus_spec_attr`].
+fn block_has_proof_with(block: &Block) -> bool {
+    struct FindProofWith(bool);
+    impl<'ast> verus_syn::visit::Visit<'ast> for FindProofWith {
+        fn visit_stmt_macro(&mut self, node: &'ast verus_syn::StmtMacro) {
+            self.0 |= node.mac.path.is_ident("proof_with");
+            verus_syn::visit::visit_stmt_macro(self, node);
+        }
+    }
+    let mut find = FindProofWith(false);
+    verus_syn::visit::Visit::visit_block(&mut find, block);
+    find.0
+}
+
+fn is_verus_spec_internal_attr(attr: &Attribute) -> bool {
+    attr.path().segments.last().is_some_and(|s| s.ident == "verus_spec_internal")
+}
+
+/// Hand a body containing `proof_with!` to the `verus_spec` attribute macro.
+///
+/// A function that already carries the attribute — because it has a `with` clause of its
+/// own — needs nothing further: one attribute rewrites the whole body.
+fn ensure_verus_spec_attr(attrs: &mut Vec<Attribute>, block: &Block, span: Span) {
+    if attrs.iter().any(is_verus_spec_internal_attr) || !block_has_proof_with(block) {
+        return;
+    }
+    let macros = BuiltinMacros(span);
+    attrs.push(verus_syn::parse_quote_spanned! { span => #[#macros::verus_spec_internal()] });
+}
+
+fn take_sig_spec_as_attr(sig: &mut Signature) -> Attribute {
+    let span = sig.spec.with.span();
+    let spec = std::mem::replace(
+        &mut sig.spec,
+        SignatureSpec {
+            prover: None,
+            atomic_spec: None,
+            requires: None,
+            recommends: None,
+            ensures: None,
+            default_ensures: None,
+            returns: None,
+            decreases: None,
+            invariants: None,
+            unwind: None,
+            with: None,
+        },
+    );
+    // The name of the return value moves to the attribute too, since `ensures` is lowered
+    // there and the counterpart's return type is a tuple of it and the extra results.
+    let ret_pat = match &mut sig.output {
+        ReturnType::Type(_, _, ret_opt, _) => std::mem::take(ret_opt).map(|ret| ret.1),
+        ReturnType::Default => None,
+    };
+    let ret_prefix = match ret_pat {
+        Some(pat) => quote_spanned!(span => #pat =>),
+        None => TokenStream::new(),
+    };
+    let macros = BuiltinMacros(span);
+    verus_syn::parse_quote_spanned! { span =>
+        #[#macros::verus_spec_internal(#ret_prefix #spec)]
+    }
 }
 
 pub(crate) fn sig_specs_attr(

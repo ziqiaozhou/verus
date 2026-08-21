@@ -453,6 +453,7 @@ impl VisitMut for ExecReplacer {
 fn check_misuse_verus_spec(
     attrs: &[syn::Attribute],
     allow_verus_macro: bool,
+    from_verus_macro: bool,
 ) -> Result<bool, proc_macro::TokenStream> {
     let attr_span = proc_macro::Span::call_site();
     let mut verus_macro_applied = false;
@@ -481,7 +482,7 @@ fn check_misuse_verus_spec(
             }
         }
     }
-    if verus_macro_applied {
+    if verus_macro_applied && !from_verus_macro {
         // Leave a warning when user mistakenly mixed them.
         #[cfg(verus_keep_ghost)]
         proc_macro::Diagnostic::spanned(
@@ -835,6 +836,7 @@ pub(crate) fn rewrite_verus_spec(
     erase: EraseGhost,
     outer_attr_tokens: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
+    from_verus_macro: bool,
 ) -> proc_macro::TokenStream {
     if erase.erase_all() {
         return input;
@@ -862,16 +864,16 @@ pub(crate) fn rewrite_verus_spec(
 
     match f {
         VerusSpecTarget::FnOrLoop(f) => {
-            rewrite_verus_spec_on_fun_or_loop(erase, outer_attr_tokens, f)
+            rewrite_verus_spec_on_fun_or_loop(erase, outer_attr_tokens, f, from_verus_macro)
         }
         VerusSpecTarget::ItemConst(i) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true, from_verus_macro) {
                 return error_tokens;
             }
             rewrite_verus_spec_on_item_const(erase, outer_attr_tokens, i)
         }
         VerusSpecTarget::ItemStatic(i) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true, from_verus_macro) {
                 return error_tokens;
             }
             rewrite_verus_spec_on_item_static(erase, outer_attr_tokens, i)
@@ -995,10 +997,11 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
     erase: EraseGhost,
     outer_attr_tokens: proc_macro::TokenStream,
     f: AnyFnOrLoop,
+    from_verus_macro: bool,
 ) -> proc_macro::TokenStream {
     match f {
         AnyFnOrLoop::Fn(mut fun) => {
-            let verus_applied = match check_misuse_verus_spec(&fun.attrs, true) {
+            let verus_applied = match check_misuse_verus_spec(&fun.attrs, true, from_verus_macro) {
                 Ok(verus_applied) => verus_applied,
                 Err(error_tokens) => return error_tokens,
             };
@@ -1234,7 +1237,9 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
         }
         AnyFnOrLoop::TraitMethod(mut method) => {
             // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
-            if let Err(error_tokens) = check_misuse_verus_spec(&method.attrs, true) {
+            if let Err(error_tokens) =
+                check_misuse_verus_spec(&method.attrs, true, from_verus_macro)
+            {
                 return error_tokens;
             }
             let spec_attr =
@@ -1378,7 +1383,7 @@ fn rewrite_verus_spec_on_expr_local(
     let call_with_spec = verus_syn::parse_macro_input!(attr_input as verus_syn::WithSpecOnExpr);
     let tokens = match io_target {
         VerusIOTarget::Local(mut local) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&local.attrs, true) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&local.attrs, true, false) {
                 return error_tokens;
             }
             let syn::Local { init, .. } = &mut local;

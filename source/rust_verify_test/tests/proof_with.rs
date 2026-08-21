@@ -2620,3 +2620,106 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+// A `with` clause written inside `verus!` is handed to the `#[verus_spec]` attribute
+// macro, which is where the split into an unverified stub and a verified counterpart
+// is implemented.
+
+test_verify_one_file! {
+    #[test] test_with_inside_verus_macro verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64) -> (r: u64)
+            with Tracked(b): Tracked<u64>, Ghost(c): Ghost<u32>
+            requires a == 0, b == 1, c == 2,
+            ensures r == a,
+        {
+            a
+        }
+
+        fn call_test() {
+            proof_with!{Tracked(1u64), Ghost(2u32)}
+            let r = test(0);
+            assert(r == 0);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_with_inside_verus_macro_fails_precondition verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64)
+            with Tracked(b): Tracked<u64>
+            requires b == 1,
+        {
+        }
+
+        fn call_test() {
+            proof_with!{Tracked(2u64)}
+            test(0); // FAILS
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    #[test] test_with_outputs_inside_verus_macro verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64) -> (r: u64)
+            with Ghost(c): Ghost<u32> -> d: Ghost<u32>
+            requires c == 2,
+            ensures r == a, d@ == c,
+        {
+            proof_with!{|= Ghost(c)}
+            a
+        }
+
+        fn call_test() {
+            proof_with!{Ghost(2u32) => Ghost(d)}
+            let r = test(7);
+            assert(r == 7);
+            assert(d == 2);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_with_on_method_inside_verus_macro verus_code!{
+        use vstd::prelude::*;
+
+        struct S { a: u64 }
+
+        impl S {
+            fn test(&self) -> (r: u64)
+                with Tracked(b): Tracked<u64>
+                requires self.a == 0, b == 1,
+                ensures r == self.a,
+            {
+                self.a
+            }
+        }
+
+        fn call_test(s: S) requires s.a == 0 {
+            proof_with!{Tracked(1u64)}
+            let r = s.test();
+            assert(r == 0);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_with_inside_verus_macro_needs_extra_args verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64)
+            with Tracked(b): Tracked<u64>
+            requires b == 1,
+        {
+        }
+
+        fn call_test() {
+            test(0); // FAILS
+        }
+    } => Err(e) => assert_one_fails(e)
+}
