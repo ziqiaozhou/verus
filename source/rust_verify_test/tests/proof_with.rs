@@ -98,6 +98,19 @@ test_verify_one_file! {
                 proof!{ assert(x == 7); }
             }
         })
+        // a call inside a closure body, a separate body in the same owner, is
+        // redirected too
+        + &in_mod("closure_call", &(FN_WITH_TRACKED_EQ.to_string() + code_str!{
+            #[verus_verify]
+            fn call_in_closure() {
+                let c = || -> u8 {
+                    proof_with!{Tracked(3u8)}
+                    let y = f(3);
+                    y
+                };
+                let _v = c();
+            }
+        }))
     => Ok(())
 }
 
@@ -1644,6 +1657,190 @@ test_verify_one_file! {
         fn test(s: S) {
             proof_with!{Tracked(1u64)}
             let r = s.m();
+            proof!{ assert(r == 2); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    // Rust picks an inherent method over a trait one, so this call runs the
+    // inherent `m`, which has no counterpart of its own. Verifying it against
+    // the contract of the trait method would be unsound.
+    #[test] test_inherent_shadowing_trait_with_method_rejected
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                ensures r == 5,
+            )]
+            fn m(&self) -> u64 {
+                5
+            }
+        }
+
+        #[verus_verify]
+        fn test(s: S) {
+            proof_with!{Tracked(1u64)}
+            let r = s.m();
+            proof!{ assert(r == 2); }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "is not declared with `#[verus_spec(with ..)]")
+}
+
+// A function `f` that requires its `Tracked` input to equal its argument.
+const FN_WITH_TRACKED_EQ: &str = code_str! {
+    use vstd::prelude::*;
+
+    #[verus_verify]
+    #[verus_spec(r =>
+        with Tracked(t): Tracked<u8>
+        requires x == t,
+        ensures r == x,
+    )]
+    fn f(x: u8) -> u8 {
+        x
+    }
+};
+
+test_verify_one_file! {
+    #[test] test_with_call_inside_closure_fails_precondition
+        FN_WITH_TRACKED_EQ.to_string() + code_str!{
+        #[verus_verify]
+        fn call_in_closure() {
+            let c = || -> u8 {
+                proof_with!{Tracked(4u8)}
+                let y = f(3); // FAILS
+                y
+            };
+            let _v = c();
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    // Rust reaches the inherent `m` of `S` by dereferencing the receiver, so a
+    // smart pointer must not hide the shadowing that the previous test rejects.
+    #[test] test_inherent_shadowing_through_deref_rejected
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                ensures r == 5,
+            )]
+            fn m(&self) -> u64 {
+                5
+            }
+        }
+
+        #[verus_verify]
+        fn test(s: Box<S>) {
+            proof_with!{Tracked(1u64)}
+            let r = s.m();
+            proof!{ assert(r == 2); }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "is not declared with `#[verus_spec(with ..)]")
+}
+
+test_verify_one_file! {
+    // A dereferenced receiver with nothing to shadow the trait method still
+    // reaches the counterpart.
+    #[test] test_with_call_through_deref_receiver
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        fn test(s: Box<S>) {
+            proof_with!{Tracked(1u64)}
+            let r = s.m();
+            proof!{ assert(r == 2); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_inherent_shadowing_trait_with_path_call_rejected
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                ensures r == 5,
+            )]
+            fn m(&self) -> u64 {
+                5
+            }
+        }
+
+        #[verus_verify]
+        fn test(s: S) {
+            proof_with!{Tracked(1u64)}
+            let r = S::m(&s);
+            proof!{ assert(r == 2); }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "resolves to an inherent method")
+}
+
+test_verify_one_file! {
+    // An inherent `with` method of an unrelated type shares the name of a trait
+    // `with` method. The call still resolves to the trait method, so it verifies.
+    #[test] test_unrelated_inherent_with_method_of_same_name
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        struct Unrelated;
+
+        #[verus_verify]
+        impl T for Unrelated {
+            #[verus_spec(with Tracked(b): Tracked<u64>)]
+            fn m(&self) -> u64 {
+                2
+            }
+        }
+
+        #[verus_verify]
+        impl Unrelated {
+            #[verus_spec(r =>
+                with Tracked(b): Tracked<u64>
+                ensures r == 5,
+            )]
+            fn m(&self) -> u64 {
+                5
+            }
+        }
+
+        #[verus_verify]
+        fn test(s: S, u: Unrelated) {
+            proof_with!{Tracked(1u64)}
+            let r = s.m();
+            proof!{ assert(r == 2); }
+
+            proof_with!{Tracked(1u64)}
+            let r2 = u.m();
+            proof!{ assert(r2 == 5); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_qualified_with_call_is_not_shadowed
+        TRAIT_WITH_TRACKED_INPUT.to_string() + code_str!{
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                ensures r == 5,
+            )]
+            fn m(&self) -> u64 {
+                5
+            }
+        }
+
+        #[verus_verify]
+        fn test_qualified(s: S) {
+            proof_with!{Tracked(1u64)}
+            let r = <S as T>::m(&s);
+            proof!{ assert(r == 2); }
+        }
+
+        #[verus_verify]
+        fn test_trait_path(s: S) {
+            proof_with!{Tracked(1u64)}
+            let r = T::m(&s);
             proof!{ assert(r == 2); }
         }
     } => Ok(())
