@@ -53,6 +53,8 @@ pub(crate) fn fn_call_to_vir<'tcx>(
 ) -> Result<vir::ast::Expr, VirErr> {
     let tcx = bctx.ctxt.tcx;
 
+    crate::proof_with::check_call(tcx, bctx.types, expr, f)?;
+
     let expr_typ = || typ_of_node_unadjusted(bctx, expr.span, &expr.hir_id);
 
     let rust_item = verus_items::get_rust_item(tcx, f);

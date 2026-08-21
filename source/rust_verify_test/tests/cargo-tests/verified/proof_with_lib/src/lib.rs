@@ -1,9 +1,6 @@
 use vstd::prelude::*;
 
-// A function with a `with` clause expands into an unverified stub, which keeps
-// the exec signature the caller sees, and a verified counterpart, which takes
-// the extra ghost/tracked parameters. The counterpart must reach the crate
-// metadata so that a dependent crate can redirect a `proof_with!` call to it.
+// The free-function counterpart is exported through crate metadata.
 #[verus_spec(ret =>
     with Tracked(expected): Tracked<u8>
     requires x == expected,
@@ -16,6 +13,7 @@ pub fn negate(b: bool, x: u8) -> bool {
 #[verus_verify]
 pub struct Counter(pub u8);
 
+// The inherent counterpart remains in the same implementation.
 #[verus_verify]
 impl Counter {
     #[verus_spec(ret =>
@@ -29,9 +27,7 @@ impl Counter {
     }
 }
 
-// The counterpart of a trait method belongs to the companion trait declared
-// next to the trait. Both have to reach the crate metadata, as does the
-// implementation of the companion trait.
+// Trait counterparts and their implementations are exported through a companion trait.
 #[verus_verify]
 pub trait Doubler {
     #[verus_spec(ret =>
@@ -50,5 +46,29 @@ impl Doubler for Twice {
     #[verus_spec(with Ghost(g): Ghost<u64>)]
     fn double(&self, a: u64) -> u64 {
         a + a
+    }
+}
+
+// The inherent method deliberately shadows the trait method for cross-crate lookup coverage.
+#[verus_verify]
+pub struct Shadowed;
+
+#[verus_verify]
+impl Doubler for Shadowed {
+    #[verus_spec(with Ghost(g): Ghost<u64>)]
+    fn double(&self, a: u64) -> u64 {
+        a + a
+    }
+}
+
+#[verus_verify]
+impl Shadowed {
+    #[verus_spec(ret =>
+        with Ghost(g): Ghost<u64>
+        requires g < 100, a < 100,
+        ensures ret == a + 1,
+    )]
+    pub fn double(&self, a: u64) -> u64 {
+        a + 1
     }
 }
