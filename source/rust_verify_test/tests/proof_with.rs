@@ -2240,3 +2240,49 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    // A method call is pinned to the companion trait method, so an inherent
+    // method that carries the counterpart name cannot take its place and have
+    // the call verified against a contract the caller never asked for.
+    #[test] test_inherent_impostor_does_not_hijack_method_call code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait T {
+            #[verus_spec(r =>
+                with Tracked(b): Tracked<u64>
+                ensures r == 2,
+            )]
+            fn m(&self) -> u64;
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl T for S {
+            #[verus_spec(with Tracked(b): Tracked<u64>)]
+            fn m(&self) -> u64 {
+                2
+            }
+        }
+
+        #[verus_verify]
+        impl S {
+            #[verus_spec(r =>
+                ensures r == 7,
+            )]
+            fn _VERUS_VERIFIED_m(&self, _b: Tracked<u64>) -> u64 {
+                7
+            }
+        }
+
+        #[verus_verify]
+        fn test(s: S) {
+            proof_with!{Tracked(1u64)}
+            let r = s.m();
+            proof!{ assert(r == 2); }
+        }
+    } => Ok(())
+}
