@@ -118,6 +118,7 @@ impl Clone for crate::AssumeSpecification {
             path: self.path.clone(),
             inputs: self.inputs.clone(),
             output: self.output.clone(),
+            with: self.with.clone(),
             requires: self.requires.clone(),
             ensures: self.ensures.clone(),
             default_ensures: self.default_ensures.clone(),

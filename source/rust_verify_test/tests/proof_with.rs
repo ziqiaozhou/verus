@@ -2723,3 +2723,76 @@ test_verify_one_file! {
         }
     } => Err(e) => assert_one_fails(e)
 }
+
+// `assume_specification` accepts a `with` clause, so that giving an external function
+// extra ghost or tracked arguments does not require the attribute form.
+
+test_verify_one_file! {
+    #[test] test_with_on_assume_specification verus_code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, _x: u8) -> bool {
+            !b
+        }
+
+        assume_specification[negate_bool](b: bool, x: u8) -> (ret: bool)
+            with Tracked(extra): Tracked<u8>
+            requires x == extra,
+            ensures ret == !b,
+        ;
+
+        fn call_negate() {
+            proof_with!{Tracked(3u8)}
+            let r = negate_bool(true, 3);
+            assert(r == false);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_with_on_assume_specification_fails_precondition verus_code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, _x: u8) -> bool {
+            !b
+        }
+
+        assume_specification[negate_bool](b: bool, x: u8) -> (ret: bool)
+            with Tracked(extra): Tracked<u8>
+            requires x == extra,
+            ensures ret == !b,
+        ;
+
+        fn call_negate() {
+            proof_with!{Tracked(4u8)}
+            let r = negate_bool(true, 3); // FAILS
+            assert(r == false);
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    #[test] test_with_outputs_on_assume_specification verus_code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn ext_id(x: u64) -> u64 {
+            x
+        }
+
+        assume_specification[ext_id](x: u64) -> (ret: u64)
+            with Ghost(c): Ghost<u32> -> d: Ghost<u32>
+            requires c == 2,
+            ensures ret == x, d@ == c,
+        ;
+
+        fn call_ext_id() {
+            proof_with!{Ghost(2u32) => Ghost(d)}
+            let r = ext_id(7);
+            assert(r == 7);
+            assert(d == 2);
+        }
+    } => Ok(())
+}

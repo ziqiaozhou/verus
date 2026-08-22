@@ -115,6 +115,7 @@ impl Hash for crate::AssumeSpecification {
         self.path.hash(state);
         self.inputs.hash(state);
         self.output.hash(state);
+        self.with.hash(state);
         self.requires.hash(state);
         self.ensures.hash(state);
         self.default_ensures.hash(state);

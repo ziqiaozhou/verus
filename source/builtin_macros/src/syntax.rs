@@ -2109,6 +2109,7 @@ impl Visitor {
             path,
             inputs,
             output,
+            with,
             requires,
             ensures,
             default_ensures,
@@ -2150,7 +2151,7 @@ impl Visitor {
                 decreases: None,
                 invariants: invariants,
                 unwind: unwind,
-                with: None,
+                with: with,
             },
         };
 

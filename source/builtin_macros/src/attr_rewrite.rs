@@ -1601,6 +1601,15 @@ fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
     let segments: Vec<String> = attr.path().segments.iter().map(|s| s.ident.to_string()).collect();
     match segments.as_slice() {
         [verifier, name] if verifier == "verifier" => is_name(name),
+        // `assume_specification` inside `verus!` is lowered to this spelling.
+        [verus, internal] if verus == "verus" && internal == "internal" => match &attr.meta {
+            syn::Meta::List(list) => list
+                .parse_args::<syn::Path>()
+                .ok()
+                .and_then(|p| p.get_ident().map(|i| is_name(&i.to_string())))
+                .unwrap_or(false),
+            _ => false,
+        },
         [verifier] if verifier == "verifier" => match &attr.meta {
             syn::Meta::List(list) => list
                 .parse_args::<syn::Path>()

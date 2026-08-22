@@ -94,7 +94,8 @@ impl PartialEq for crate::AssumeSpecification {
         self.attrs == other.attrs && self.vis == other.vis
             && self.generics == other.generics && self.qself == other.qself
             && self.path == other.path && self.inputs == other.inputs
-            && self.output == other.output && self.requires == other.requires
+            && self.output == other.output && self.with == other.with
+            && self.requires == other.requires
             && self.ensures == other.ensures
             && self.default_ensures == other.default_ensures
             && self.returns == other.returns && self.invariants == other.invariants
