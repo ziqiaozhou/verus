@@ -1494,11 +1494,11 @@ fn rewrite_with_expr(
                 });
                 *expr = if outputs.is_some() {
                     syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
-                        #verus_builtin::proof_with(#inputs_expr, #expr)
+                        #verus_builtin::proof_with_ret(#inputs_expr, #expr)
                     ))
                 } else {
                     syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() => {
-                        #verus_builtin::proof_with_ret(#inputs_expr, #expr)
+                        #verus_builtin::proof_with(#inputs_expr, #expr)
                     }))
                 };
             }

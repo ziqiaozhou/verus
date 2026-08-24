@@ -18,7 +18,7 @@
 //! fn _VERUS_VERIFIED_f(x: u8, verus_tmp_t: Tracked<u8>) -> u8 { x }
 //!
 //! // proof_with!{t} let y = f(x);
-//! let y = proof_with_ret((t,), f(x));
+//! let y = proof_with((t,), f(x));
 //! let y = _VERUS_VERIFIED_f(x, t);
 //! ```
 //!
@@ -49,7 +49,7 @@
 //! }
 //!
 //! // proof_with!{t} s.m();
-//! proof_with_ret((t,), s.m());
+//! proof_with((t,), s.m());
 //! s._VERUS_VERIFIED_m(t);
 //! ```
 //!
@@ -75,7 +75,7 @@
 //! ) -> u8 { unimplemented!() }
 //!
 //! // proof_with!{t} let z = ext(x);
-//! let z = proof_with_ret((t,), ext(x));
+//! let z = proof_with((t,), ext(x));
 //! let z = _VERUS_VERIFIED_ext_spec(x, t);
 //! ```
 
