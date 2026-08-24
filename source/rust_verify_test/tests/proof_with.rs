@@ -2796,3 +2796,110 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+// A trait method written in `verus!` accepts a `with` clause, for a trait declared here or
+// for an external trait described by a specification trait.
+
+test_verify_one_file! {
+    #[test] test_with_on_trait_method_in_verus_macro verus_code!{
+        use vstd::prelude::*;
+
+        pub trait T {
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                ensures r == a, g2@ == g + 1,
+            ;
+        }
+
+        pub struct S;
+
+        impl T for S {
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+            {
+                proof_decl!{ let ghost sum: int = g + 1; }
+                proof_with!{|= Ghost(sum)}
+                a
+            }
+        }
+
+        fn call_concrete(s: S) {
+            proof_with!{Ghost(1int) => Ghost(g2)}
+            let r = s.f(7);
+            assert(r == 7);
+            assert(g2 == 2);
+        }
+
+        fn call_generic<A: T>(s: A) {
+            proof_with!{Ghost(5int) => Ghost(g2)}
+            let r = s.f(3);
+            assert(r == 3);
+            assert(g2 == 6);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_with_on_trait_method_in_verus_macro_fails_ensures verus_code!{
+        use vstd::prelude::*;
+
+        pub trait T {
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                ensures g2@ == g + 1, // FAILS
+            ;
+        }
+
+        pub struct S;
+
+        impl T for S {
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+            {
+                proof_decl!{ let ghost sum: int = g + 2; }
+                proof_with!{|= Ghost(sum)}
+                a
+            }
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    #[test] test_with_on_external_trait_method_in_verus_macro verus_code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        pub trait T {
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verifier::external_trait_specification]
+        pub trait ExT {
+            type ExternalTraitSpecificationFor: T;
+
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                ensures r == a, g2@ == g + 1,
+            ;
+        }
+
+        pub struct S;
+
+        impl T for S {
+            fn f(&self, a: u64) -> (r: u64)
+                with Ghost(g): Ghost<int> -> g2: Ghost<int>
+            {
+                proof_decl!{ let ghost sum: int = g + 1; }
+                proof_with!{|= Ghost(sum)}
+                a
+            }
+        }
+
+        fn call_it(s: S) {
+            proof_with!{Ghost(1int) => Ghost(g2)}
+            let r = s.f(7);
+            assert(r == 7);
+            assert(g2 == 2);
+        }
+    } => Ok(())
+}

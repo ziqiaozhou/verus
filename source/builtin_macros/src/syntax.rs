@@ -5026,6 +5026,17 @@ impl VisitMut for Visitor {
         self.visit_impl_items_prefilter(&mut imp.items, imp.trait_.is_some());
         self.filter_attrs(&mut imp.attrs);
         verus_syn::visit_mut::visit_item_impl_mut(self, imp);
+        if imp.trait_.is_some() {
+            let span = imp.span();
+            ensure_companion_items_attr(
+                &mut imp.attrs,
+                imp.items.iter().filter_map(|item| match item {
+                    ImplItem::Fn(method) => Some(&method.attrs),
+                    _ => None,
+                }),
+                span,
+            );
+        }
         self.inside_impl = outer_impl;
     }
 
@@ -5034,6 +5045,15 @@ impl VisitMut for Visitor {
         self.visit_trait_items_prefilter(&mut tr.items);
         self.filter_attrs(&mut tr.attrs);
         verus_syn::visit_mut::visit_item_trait_mut(self, tr);
+        let span = tr.span();
+        ensure_companion_items_attr(
+            &mut tr.attrs,
+            tr.items.iter().filter_map(|item| match item {
+                TraitItem::Fn(method) => Some(&method.attrs),
+                _ => None,
+            }),
+            span,
+        );
     }
 
     fn visit_reveal_hide_mut(&mut self, _i: &mut verus_syn::RevealHide) {
@@ -5695,6 +5715,25 @@ fn block_has_proof_with(block: &Block) -> bool {
     let mut find = FindProofWith(false);
     verus_syn::visit::Visit::visit_block(&mut find, block);
     find.0
+}
+
+/// Ask for the companion items of an item whose methods have a `with` clause.
+///
+/// The clause has already been moved to a `verus_spec` attribute on the method by
+/// [`take_sig_spec_as_attr`], which is what the emitted attribute macro reads.
+fn ensure_companion_items_attr<'a>(
+    attrs: &mut Vec<Attribute>,
+    method_attrs: impl Iterator<Item = &'a Vec<Attribute>>,
+    span: Span,
+) {
+    let mut method_attrs = method_attrs;
+    if !method_attrs.any(|attrs| attrs.iter().any(is_verus_spec_internal_attr)) {
+        return;
+    }
+    let macros = BuiltinMacros(span);
+    attrs.push(
+        verus_syn::parse_quote_spanned! { span => #[#macros::verus_companion_items_internal] },
+    );
 }
 
 fn is_verus_spec_internal_attr(attr: &Attribute) -> bool {

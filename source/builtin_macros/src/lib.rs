@@ -355,6 +355,20 @@ pub fn verus_spec(
     attr_rewrite::rewrite_verus_spec(cfg_erase(), attr.into(), input.into(), false).into()
 }
 
+/// The companion trait and companion implementation of an item written in `verus!`.
+///
+/// A `with` clause on a trait method declares its counterpart in a companion trait; both
+/// that trait and the implementation of it are new items, which cannot be produced while
+/// visiting the method that calls for them.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn verus_companion_items_internal(
+    _attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_rewrite::companion_items_for_verus_macro(cfg_erase(), input)
+}
+
 /// `#[verus_spec]` as emitted by the `verus!` macro itself.
 ///
 /// A `with` clause inside `verus!` is lowered by re-emitting the whole signature

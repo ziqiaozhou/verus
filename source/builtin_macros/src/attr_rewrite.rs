@@ -58,6 +58,20 @@ pub const DUAL_SPEC_PREFIX: &str = "__VERUS_SPEC";
 
 const VERUS_SPEC: &str = "verus_spec";
 
+/// `verus_spec` under the name the `verus!` macro applies it by.
+pub(crate) const VERUS_SPEC_INTERNAL: &str = "verus_spec_internal";
+
+/// Whether an attribute is `verus_spec` in either spelling.
+///
+/// `verus!` writes a path rather than a bare name, so the last segment is what is
+/// compared.
+pub(crate) fn is_verus_spec_attr(attr: &syn::Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == VERUS_SPEC || seg.ident == VERUS_SPEC_INTERNAL)
+}
+
 enum VerusIOTarget {
     Local(syn::Local),
     Expr(syn::Expr),
@@ -154,6 +168,81 @@ fn erase_verus_attribute(
         quote_spanned! {span=>
             #[allow(non_camel_case_types)]
             #[verus::internal(verified_trait)]
+            #companion_trait
+        }
+        .to_tokens(&mut new_stream);
+    }
+    new_stream.into()
+}
+
+/// Emits the companion trait and companion implementation of an item written in `verus!`.
+///
+/// A `with` clause on a trait method declares its counterpart in a companion trait, and
+/// implements it in a companion implementation, because the counterpart cannot be added
+/// to the trait being implemented. Both are new items, so neither can be produced while
+/// visiting a method; `verus!` applies this to the enclosing item instead.
+///
+/// The `verus_verify` attribute does the same for a Rust item, but also decides whether
+/// the item is verified at all. An item inside `verus!` is verified already, so only the
+/// split is done here.
+pub(crate) fn companion_items_for_verus_macro(
+    erase: EraseGhost,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    if erase.erase_all() {
+        return input;
+    }
+    let Ok(mut item) = syn::parse::<syn::Item>(input.clone()) else {
+        return input;
+    };
+    let span = item.span();
+    let is_proxy = matches!(&item, syn::Item::Trait(item_trait) if item_trait.attrs.iter().any(|attr| {
+        attr.path().segments.last().is_some_and(|seg| seg.ident == "external_trait_specification")
+    }));
+    let companion_impl = match split_trait_impl(&mut item) {
+        Ok(companion_impl) => companion_impl,
+        Err(error_tokens) => return error_tokens.into(),
+    };
+    let companion_trait = match companion_trait_of(&mut item, is_proxy) {
+        Ok(companion_trait) => companion_trait,
+        Err(error_tokens) => return error_tokens.into(),
+    };
+    if companion_impl.is_none() && companion_trait.is_none() {
+        return input;
+    }
+    // A stub left in a trait implementation inherits its precondition from the trait; this
+    // marker is how the method rewrite learns that.
+    if let syn::Item::Impl(item_impl) = &mut item {
+        if item_impl.trait_.is_some() {
+            for impl_item in item_impl.items.iter_mut() {
+                if let syn::ImplItem::Fn(fun) = impl_item {
+                    if has_with_clause(&fun.attrs).unwrap_or(false) {
+                        fun.attrs.push(crate::syntax::mk_rust_attr_syn(
+                            span,
+                            "allow",
+                            quote_spanned! { span => (unused, verus_trait_impl_method_marker)},
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let mut new_stream = quote_spanned! {span=> #item };
+    // A companion is a new item, so nothing marks it as coming from verified code.
+    if let Some(mut companion_impl) = companion_impl {
+        prepare_items_for_verus_spec(span, &mut companion_impl, true);
+        quote_spanned! {span=>
+            #[verifier::verify]
+            #companion_impl
+        }
+        .to_tokens(&mut new_stream);
+    }
+    if let Some(mut companion_trait) = companion_trait {
+        prepare_items_for_verus_spec(span, &mut companion_trait, true);
+        quote_spanned! {span=>
+            #[allow(non_camel_case_types)]
+            #[verus::internal(verified_trait)]
+            #[verifier::verify]
             #companion_trait
         }
         .to_tokens(&mut new_stream);
@@ -666,7 +755,7 @@ fn external_trait_of_proxy(item_trait: &syn::ItemTrait) -> Option<syn::Path> {
 
 fn has_with_clause(attrs: &[syn::Attribute]) -> Result<bool, TokenStream> {
     for attr in attrs {
-        if attr.path().get_ident().map_or(true, |ident| ident != VERUS_SPEC) {
+        if !is_verus_spec_attr(attr) {
             continue;
         }
         let syn::Meta::List(list) = &attr.meta else {
@@ -702,7 +791,7 @@ pub(crate) fn companion_trait_path(trait_path: &syn::Path) -> syn::Path {
 /// If it's applied earlier, we can infer it via verus::internal(xxx).
 /// If it's applied later, we can find it directly.
 fn add_verus_spec_if_needed(attrs: &mut Vec<syn::Attribute>, span: proc_macro2::Span) {
-    if attrs.iter().any(|attr| attr.path().get_ident().map_or(false, |ident| ident == VERUS_SPEC)) {
+    if attrs.iter().any(is_verus_spec_attr) {
         return;
     }
     attrs.push(crate::syntax::mk_rust_attr_syn(span, VERUS_SPEC, TokenStream::new()));
