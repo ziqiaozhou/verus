@@ -402,6 +402,14 @@ impl<'tcx> Ctxt<'_, 'tcx> {
         })
     }
 
+    /// Is `def_id` the verified counterpart of a function declared with `with ..`?
+    fn is_verified_counterpart(&self, def_id: DefId) -> bool {
+        let Some(attrs) = self.attrs(def_id) else {
+            return false;
+        };
+        parse_attrs_opt(attrs, None).iter().any(|a| matches!(a, Attr::VerifiedWith))
+    }
+
     /// Is `def_id` the unverified stub of a function declared with `with ..`?
     fn is_unverified_stub(&self, def_id: DefId) -> bool {
         let Some(attrs) = self.attrs(def_id) else {
@@ -510,9 +518,11 @@ fn rewrite_owner<'tcx>(
     let mut nodes = inner_owner.nodes.nodes.clone();
     let mut changed = false;
     let mut extra_traits: HashMap<ItemLocalId, Vec<DefId>> = HashMap::new();
+    let in_counterpart = ctxt.is_verified_counterpart(def_id.to_def_id());
 
     for (local_id, body) in inner_owner.nodes.bodies.iter() {
-        let mut folder = Folder { ctxt, updates: Vec::new(), extra_traits: Vec::new() };
+        let mut folder =
+            Folder { ctxt, updates: Vec::new(), extra_traits: Vec::new(), in_counterpart };
         let Some(value) = folder.fold_expr(body.value) else {
             continue;
         };
@@ -828,6 +838,10 @@ struct Folder<'a, 'tcx> {
     updates: Vec<(ItemLocalId, Node<'tcx>)>,
     /// Trait candidates to add for a rewritten call, see `Ctxt::companions_by_method`.
     extra_traits: Vec<(ItemLocalId, &'a [DefId])>,
+    /// Is the owner being folded itself a verified counterpart? Its `ensures` refers
+    /// to itself, which is the one place a counterpart may be named directly, see
+    /// `reject_direct_call`.
+    in_counterpart: bool,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
@@ -848,6 +862,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Returns `Some(new)` if anything inside `expr` was rewritten.
     fn fold_expr(&mut self, expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+        self.reject_direct_call(expr);
         if let Some(new) = self.try_rewrite_proof_with(expr) {
             return Some(new);
         }
@@ -966,6 +981,38 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             | ExprKind::Err(..) => return None,
         };
         Some(self.mk_expr(expr, kind))
+    }
+
+    /// A verified counterpart may only be reached through the stub it belongs to:
+    /// calling it directly would skip the `proof_with` marker and hand the caller
+    /// the extra ghost/tracked outputs without any obligation to supply the inputs.
+    /// The rewrite builds its calls itself and never folds them, so anything named
+    /// here was written by hand.
+    ///
+    /// This only sees a resolved path. A method call is resolved after type
+    /// checking, so `x.counterpart()` is rejected in `rust_to_vir` instead.
+    fn reject_direct_call(&self, expr: &'tcx Expr<'tcx>) {
+        if self.in_counterpart {
+            return;
+        }
+        let ExprKind::Path(QPath::Resolved(_, path)) = &expr.kind else {
+            return;
+        };
+        let Some(def_id) = path.res.opt_def_id() else {
+            return;
+        };
+        if !self.ctxt.is_verified_counterpart(def_id) {
+            return;
+        }
+        self.tcx().dcx().span_err(
+            expr.span,
+            format!(
+                "`{}` is the verified counterpart of a function declared with `with ..` \
+                 and cannot be called directly; call the function it belongs to and pass \
+                 the extra arguments with `proof_with!`",
+                self.tcx().item_name(def_id)
+            ),
+        );
     }
 
     fn fold_exprs(&mut self, exprs: &'tcx [Expr<'tcx>]) -> Option<&'tcx [Expr<'tcx>]> {

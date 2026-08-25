@@ -1552,3 +1552,28 @@ test_verify_one_file_with_options! {
         }
     } => Err(err) => assert_vir_error_msg(err, "postcondition not satisfied")
 }
+
+// --- The verified counterpart is not callable by hand ---
+//
+// It is only reachable through the function it belongs to, with `proof_with!`.
+// Calling it directly would hand the caller the extra ghost/tracked outputs
+// without any obligation to supply the inputs.
+
+test_verify_one_file! {
+    #[test] test_counterpart_direct_call_rejected code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(r =>
+            with Tracked(t): Tracked<u64>
+            ensures r == 1,
+        )]
+        fn f() -> u64 {
+            1
+        }
+
+        #[verus_spec]
+        fn bad() {
+            let _x = _VERUS_VERIFIED_f(Tracked::assume_new());
+        }
+    } => Err(err) => assert_vir_error_msg(err, "cannot be called directly")
+}
