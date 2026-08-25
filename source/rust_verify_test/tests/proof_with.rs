@@ -80,6 +80,24 @@ test_verify_one_file! {
                 gen(0u64);
             }
         }.to_string()
+        // the reserved counterpart name is an ordinary function when the macro did
+        // not generate it (no `f` here has a `with` clause)
+        + &in_mod("counterpart_name_ordinary", code_str!{
+            use vstd::prelude::*;
+
+            #[verus_spec(ret =>
+                ensures ret == 7,
+            )]
+            fn _VERUS_VERIFIED_f() -> u64 {
+                7
+            }
+
+            #[verus_spec]
+            fn caller() {
+                let x = _VERUS_VERIFIED_f();
+                proof!{ assert(x == 7); }
+            }
+        })
     => Ok(())
 }
 

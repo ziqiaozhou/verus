@@ -132,11 +132,13 @@ fn erase_verus_attribute(
             attr.path().segments.last().map_or(false, |seg| seg.ident == "external_trait_specification")
         }));
     let span = item.span();
-    let Ok(companion_impl) = split_trait_impl(&mut item) else {
-        return input;
+    let companion_impl = match split_trait_impl(&mut item) {
+        Ok(companion_impl) => companion_impl,
+        Err(error_tokens) => return error_tokens.into(),
     };
-    let Ok(companion_trait) = companion_trait_of(&mut item, is_proxy) else {
-        return input;
+    let companion_trait = match companion_trait_of(&mut item, is_proxy) {
+        Ok(companion_trait) => companion_trait,
+        Err(error_tokens) => return error_tokens.into(),
     };
     if companion_impl.is_none() && companion_trait.is_none() {
         return input;
@@ -1132,6 +1134,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                     // trait belongs to, so only the rename is left to do here.
                     let x = &fun.sig.ident;
                     fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+                    fun.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
                     fun.attrs.push(crate::syntax::mk_rust_attr_syn(
                         span,
                         "allow",
@@ -1234,6 +1237,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let span = method.sig.ident.span();
             let x = &method.sig.ident;
             method.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+            method.attrs.push(mk_verus_attr_syn(span, quote! { verified_with }));
             method.attrs.push(crate::syntax::mk_rust_attr_syn(
                 span,
                 "allow",

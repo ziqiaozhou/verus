@@ -971,6 +971,11 @@ pub(crate) fn is_unverified_stub(attrs: &[Attribute]) -> bool {
     parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::UnverifiedStub))
 }
 
+/// The marker is authoritative because user functions may also start with `VERIFIED_PREFIX`.
+pub(crate) fn is_verified_counterpart(attrs: &[Attribute]) -> bool {
+    parse_attrs_opt(attrs, None).into_iter().any(|a| matches!(a, Attr::VerifiedWith))
+}
+
 pub(crate) fn parse_attrs_opt(
     attrs: &[Attribute],
     diagnostics: Option<&mut Vec<VirErrAs>>,

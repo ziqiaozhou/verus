@@ -402,28 +402,18 @@ impl<'tcx> Ctxt<'_, 'tcx> {
         })
     }
 
-    /// Is `def_id` the unverified stub of a function declared with `with ..`, and is
-    /// it the unerased proxy of a `const fn`?
-    fn stub_kind(&self, def_id: DefId) -> (bool, bool) {
+    /// Is `def_id` the unverified stub of a function declared with `with ..`?
+    fn is_unverified_stub(&self, def_id: DefId) -> bool {
         let Some(attrs) = self.attrs(def_id) else {
-            return (false, false);
+            return false;
         };
-        let (mut is_stub, mut is_proxy) = (false, false);
-        for attr in parse_attrs_opt(attrs, None) {
-            match attr {
-                Attr::UnverifiedStub => is_stub = true,
-                Attr::UnerasedProxy => is_proxy = true,
-                _ => {}
-            }
-        }
-        (is_stub, is_proxy)
+        parse_attrs_opt(attrs, None).iter().any(|a| matches!(a, Attr::UnverifiedStub))
     }
 
     /// Resolve the verified counterpart of a resolved callee.
     fn verified_counterpart(&self, def_id: DefId) -> Option<DefId> {
-        let (is_stub, _) = self.stub_kind(def_id);
         let name = counterpart_name(self.tcx, self.owners, def_id);
-        if !is_stub {
+        if !self.is_unverified_stub(def_id) {
             // The callee is not a stub itself: it may be an external function
             // specified by a local `assume_specification`, or a method of an
             // external trait, specified by a proxy.

@@ -186,7 +186,10 @@ fn with_fn_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, path: Path) -> Path {
         }
     }
     let renamed = match base.strip_prefix(crate::attributes::VERIFIED_PREFIX) {
-        Some(base) => base.to_owned(),
+        Some(base) if crate::attributes::is_verified_counterpart(def_attrs(tcx, def_id)) => {
+            base.to_owned()
+        }
+        Some(_) => return path,
         None if crate::attributes::is_unverified_stub(def_attrs(tcx, def_id))
             && has_sibling_counterpart(tcx, def_id) =>
         {
