@@ -140,8 +140,7 @@ test_verify_one_file! {
             test(0);
         }
     } => Err(e) => {
-        assert!(e.warnings[0].message.contains("`test` does not accept extra ghost/tracked arguments"));
-        assert_rust_error_msg(e, "this function takes 1 argument but 2 arguments were supplied");
+        assert!(e.errors.iter().any(|x| x.message.contains("`test` does not accept extra ghost/tracked arguments")));
     }
 }
 

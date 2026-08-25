@@ -20,7 +20,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{
     Arm, Block, Expr, ExprField, ExprKind, GenericBound, Generics, ItemLocalId, LetExpr,
     MaybeOwner, Node, OwnerNode, ParentedNode, PathSegment, PolyTraitRef, QPath, Stmt, StmtKind,
-    TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate, WherePredicateKind,
+    StructTailExpr, TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate, WherePredicateKind,
 };
 use rustc_index::IndexVec;
 use rustc_middle::ty::TyCtxt;
@@ -521,14 +521,38 @@ fn rewrite_owner<'tcx>(
     let in_counterpart = ctxt.is_verified_counterpart(def_id.to_def_id());
 
     for (local_id, body) in inner_owner.nodes.bodies.iter() {
-        let mut folder =
-            Folder { ctxt, updates: Vec::new(), extra_traits: Vec::new(), in_counterpart };
+        let mut folder = Folder {
+            ctxt,
+            updates: Vec::new(),
+            reparents: Vec::new(),
+            extra_traits: Vec::new(),
+            in_counterpart,
+        };
         let Some(value) = folder.fold_expr(body.value) else {
             continue;
         };
         for (id, node) in folder.updates.iter() {
             if let Some(parented) = nodes.get_mut(*id) {
                 parented.node = *node;
+            }
+        }
+        // A `proof_with` rewrite collapses the marker call and the real call into a
+        // single node reusing the real call's `ItemLocalId`, so that node and the
+        // extra arguments move to a new parent in the rebuilt tree. Only `.node` is
+        // written back above, so their recorded `ParentedNode::parent` is fixed here
+        // too; otherwise an upward HIR walk (`tcx.parent_hir_id` and friends) from a
+        // rewritten node lands on the marker node that no longer exists in the tree.
+        // The nodes the collapse abandons (the marker call, its callee and the
+        // argument tuple) stay in `nodes` as now-unreachable entries, which is
+        // harmless: every traversal walks the tree of `Body` values and never
+        // iterates `nodes` directly, so nothing reaches them.
+        for (id, reparent) in folder.reparents.iter() {
+            let parent = match reparent {
+                Reparent::To(parent) => Some(*parent),
+                Reparent::AdoptFrom(other) => nodes.get(*other).map(|p| p.parent),
+            };
+            if let (Some(parented), Some(parent)) = (nodes.get_mut(*id), parent) {
+                parented.parent = parent;
             }
         }
         for (id, traits) in folder.extra_traits.iter() {
@@ -829,6 +853,17 @@ fn with_generics<'tcx>(
     }
 }
 
+/// How to fix a moved node's `ParentedNode::parent` during write-back, see the
+/// `reparents` loop in `rewrite_owner`.
+enum Reparent {
+    /// Set the parent to this id.
+    To(ItemLocalId),
+    /// Adopt the parent currently recorded for this id. The call a `proof_with`
+    /// rewrite collapses to takes the marker's place, so it inherits the marker's
+    /// parent, which is only known once `rewrite_owner` holds the `nodes` map.
+    AdoptFrom(ItemLocalId),
+}
+
 /// Rebuilds the spine from the body root down to each rewritten call. HIR is
 /// immutable arena data and type checking walks the expression tree through the
 /// child pointers of each node, so every ancestor of a replaced expression has to
@@ -836,6 +871,9 @@ fn with_generics<'tcx>(
 struct Folder<'a, 'tcx> {
     ctxt: &'a Ctxt<'a, 'tcx>,
     updates: Vec<(ItemLocalId, Node<'tcx>)>,
+    /// Parent fixes for the nodes a `proof_with` collapse moves in the rebuilt
+    /// tree, applied after `updates`, see `rewrite_owner`.
+    reparents: Vec<(ItemLocalId, Reparent)>,
     /// Trait candidates to add for a rewritten call, see `Ctxt::companions_by_method`.
     extra_traits: Vec<(ItemLocalId, &'a [DefId])>,
     /// Is the owner being folded itself a verified counterpart? Its `ensures` refers
@@ -962,7 +1000,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             ExprKind::Ret(e) => ExprKind::Ret(Some(self.fold_expr((*e)?)?)),
             ExprKind::Become(e) => ExprKind::Become(self.fold_expr(e)?),
             ExprKind::Struct(qpath, fields, tail) => {
-                ExprKind::Struct(qpath, self.fold_fields(fields)?, *tail)
+                let new_fields = self.fold_fields(fields);
+                let new_tail = match tail {
+                    StructTailExpr::Base(base) => self.fold_expr(base).map(StructTailExpr::Base),
+                    StructTailExpr::None
+                    | StructTailExpr::DefaultFields(_)
+                    | StructTailExpr::NoneWithError(_) => None,
+                };
+                if new_fields.is_none() && new_tail.is_none() {
+                    return None;
+                }
+                ExprKind::Struct(qpath, new_fields.unwrap_or(fields), new_tail.unwrap_or(*tail))
             }
             ExprKind::Repeat(e, count) => ExprKind::Repeat(self.fold_expr(e)?, count),
             ExprKind::Yield(e, source) => ExprKind::Yield(self.fold_expr(e)?, *source),
@@ -1038,8 +1086,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     fn fold_arms(&mut self, arms: &'tcx [Arm<'tcx>]) -> Option<&'tcx [Arm<'tcx>]> {
         let mut new: Option<Vec<Arm<'tcx>>> = None;
         for (i, arm) in arms.iter().enumerate() {
-            if let Some(folded) = self.fold_expr(arm.body) {
-                new.get_or_insert_with(|| arms.to_vec())[i].body = folded;
+            let new_guard = arm.guard.and_then(|g| self.fold_expr(g));
+            let new_body = self.fold_expr(arm.body);
+            if new_guard.is_none() && new_body.is_none() {
+                continue;
+            }
+            let arm = &mut new.get_or_insert_with(|| arms.to_vec())[i];
+            if let Some(guard) = new_guard {
+                arm.guard = Some(guard);
+            }
+            if let Some(body) = new_body {
+                arm.body = body;
             }
         }
         new.map(|v| &*self.tcx().hir_arena.alloc_slice(&v))
@@ -1116,6 +1173,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let call = &marker_args[1];
         let call = self.fold_expr(call).unwrap_or(call);
 
+        // The extra arguments move from the marker's tuple to become direct
+        // arguments of the collapsed call, so they are reparented to it on success.
+        let extra_ids: Vec<ItemLocalId> = extra_args.iter().map(|e| e.hir_id.local_id).collect();
+
         let new_kind = match &call.kind {
             ExprKind::Call(callee, args) => {
                 let mut new_args = args.to_vec();
@@ -1131,7 +1192,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 ExprKind::MethodCall(new_seg, receiver, self.alloc_exprs(new_args), *span)
             }
             _ => {
-                self.tcx().dcx().span_warn(
+                self.tcx().dcx().span_err(
                     call.span,
                     "`with` ghost inputs/outputs can only be applied to a function call",
                 );
@@ -1139,7 +1200,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             }
         };
         // Reuse the call's hir id: the marker node disappears from the tree.
-        Some(self.mk_expr(call, new_kind))
+        let new = self.mk_expr(call, new_kind);
+        for id in extra_ids {
+            self.reparents.push((id, Reparent::To(call.hir_id.local_id)));
+        }
+        // The collapsed call stands where the marker did, so it takes the marker's parent.
+        self.reparents.push((call.hir_id.local_id, Reparent::AdoptFrom(expr.hir_id.local_id)));
+        Some(new)
     }
 
     /// Point a resolved callee path at the verified counterpart of the callee.
@@ -1160,7 +1227,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     // the crate attributes and would re-enter the `hir_crate` query.
                     let name = path.segments.last().map(|s| s.ident.to_string());
                     let name = name.unwrap_or_else(|| "function".to_owned());
-                    self.tcx().dcx().span_warn(
+                    self.tcx().dcx().span_err(
                         callee.span,
                         format!(
                             "`{name}` does not accept extra ghost/tracked arguments: \
