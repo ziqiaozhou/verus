@@ -49,9 +49,9 @@ pub(crate) fn hir_proof_with_rewrite<'tcx>(
         *owner = crate_.owner(tcx, def_id);
     }
 
-    let ctxt = Ctxt::new(tcx, &new_owners);
-
     let owners = new_owners.clone();
+    let ctxt = Ctxt::new(tcx, &owners);
+
     let mut injections: HashMap<LocalDefId, Vec<Injection>> = HashMap::new();
     for i in 0..new_owners.len() {
         let def_id = LocalDefId { local_def_index: DefIndex::from_usize(i) };
@@ -79,13 +79,12 @@ pub(crate) fn hir_proof_with_rewrite<'tcx>(
     )
 }
 
-struct Ctxt<'tcx> {
+struct Ctxt<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    /// (parent def, item name) -> def id, for all local functions.
-    local_fns: HashMap<(DefId, Symbol), DefId>,
-    /// Attributes of local items. Reading them through `tcx` would re-enter the
+    /// The owners of this crate, as they were before the rewrite. Attributes are
+    /// read from here, since reading them through `tcx` would re-enter the
     /// `hir_crate` query that this pass is part of.
-    local_attrs: HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
+    owners: &'a IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     /// External function -> the verified counterpart declared for it by a local
     /// `assume_specification`. The external function cannot carry a `verified_by`
     /// attribute itself, so the link is indexed the other way round.
@@ -96,18 +95,103 @@ struct Ctxt<'tcx> {
     /// which declares the counterpart and not the method it is the counterpart
     /// of, is never a candidate for the call; the rewrite adds it back, see
     /// `rewrite_owner`.
-    twin_traits: HashMap<Symbol, Vec<DefId>>,
+    companions_by_method: HashMap<Symbol, Vec<DefId>>,
     /// Trait -> the traits it declares as supertraits. Used to find the trait a
     /// companion trait belongs to, and to elaborate the bounds of a caller, see
     /// `Injection`.
     trait_supers: HashMap<DefId, Vec<DefId>>,
 }
 
-impl<'tcx> Ctxt<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>) -> Ctxt<'tcx> {
-        let (local_fns, local_attrs, twin_traits, trait_supers) = local_maps(tcx, owners);
-        let external_targets = external_target_map(tcx, owners, &local_fns, &local_attrs);
-        Ctxt { tcx, local_fns, local_attrs, external_targets, twin_traits, trait_supers }
+/// The attributes of a local item, read from the owners this pass was handed.
+fn owner_attrs<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: LocalDefId,
+) -> Option<&'tcx [rustc_hir::Attribute]> {
+    let MaybeOwner::Owner(owner) = owners.get(def_id)? else {
+        return None;
+    };
+    Some(owner.attrs.get(ItemLocalId::ZERO))
+}
+
+/// The attributes of any item.
+///
+/// `attrs_for_def` only answers for another crate; for a local item rustc reads the
+/// attributes off the HIR owner, which is the `hir_crate` result this pass is
+/// computing, so a local item is looked up in the owners this pass was handed.
+fn def_attrs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: DefId,
+) -> Option<&'tcx [rustc_hir::Attribute]> {
+    match def_id.as_local() {
+        Some(local) => owner_attrs(owners, local),
+        None => Some(tcx.attrs_for_def(def_id)),
+    }
+}
+
+/// The function that the local item `parent` declares under `name`, read from the
+/// owners this pass was handed: `module_children` and `associated_items` would
+/// re-enter the `hir_crate` query that this pass is part of.
+fn local_child_fn<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    parent: LocalDefId,
+    name: Symbol,
+) -> Option<LocalDefId> {
+    let MaybeOwner::Owner(owner) = owners.get(parent)? else {
+        return None;
+    };
+    let children: Vec<LocalDefId> = match owner.node() {
+        OwnerNode::Crate(module) => module.item_ids.iter().map(|id| id.owner_id.def_id).collect(),
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Mod(_, module) => {
+                module.item_ids.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            rustc_hir::ItemKind::Impl(impl_) => {
+                impl_.items.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            rustc_hir::ItemKind::Trait { items, .. } => {
+                items.iter().map(|id| id.owner_id.def_id).collect()
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    children.into_iter().find(|child| local_fn_name(owners, *child) == Some(name))
+}
+
+/// The name of a local function item, or `None` if the item is not a function.
+fn local_fn_name<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: LocalDefId,
+) -> Option<Symbol> {
+    let MaybeOwner::Owner(owner) = owners.get(def_id)? else {
+        return None;
+    };
+    match owner.node() {
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Fn { ident, .. } => Some(ident.name),
+            _ => None,
+        },
+        OwnerNode::ImplItem(item) => match &item.kind {
+            rustc_hir::ImplItemKind::Fn(..) => Some(item.ident.name),
+            _ => None,
+        },
+        OwnerNode::TraitItem(item) => match &item.kind {
+            rustc_hir::TraitItemKind::Fn(..) => Some(item.ident.name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+impl<'a, 'tcx> Ctxt<'a, 'tcx> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        owners: &'a IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    ) -> Ctxt<'a, 'tcx> {
+        let (companions_by_method, trait_supers) = local_maps(tcx, owners);
+        let external_targets = external_target_map(tcx, owners);
+        Ctxt { tcx, owners, external_targets, companions_by_method, trait_supers }
     }
 }
 
@@ -117,64 +201,43 @@ impl<'tcx> Ctxt<'tcx> {
 fn local_maps<'tcx>(
     tcx: TyCtxt<'tcx>,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-) -> (
-    HashMap<(DefId, Symbol), DefId>,
-    HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
-    HashMap<Symbol, Vec<DefId>>,
-    HashMap<DefId, Vec<DefId>>,
-) {
-    let mut map = HashMap::new();
-    let mut attrs = HashMap::new();
+) -> (HashMap<Symbol, Vec<DefId>>, HashMap<DefId, Vec<DefId>>) {
     let mut companion_traits: HashSet<LocalDefId> = HashSet::new();
     let mut trait_supers: HashMap<DefId, Vec<DefId>> = HashMap::new();
-    let mut twin_methods: Vec<(Symbol, LocalDefId)> = Vec::new();
+    let mut companion_methods: Vec<(Symbol, LocalDefId)> = Vec::new();
     for (def_id, owner) in owners.iter_enumerated() {
         let MaybeOwner::Owner(owner) = owner else {
             continue;
         };
-        let mut in_trait = false;
-        let ident = match owner.node() {
-            OwnerNode::Item(item) => match &item.kind {
-                rustc_hir::ItemKind::Fn { ident, .. } => *ident,
-                rustc_hir::ItemKind::Trait { bounds, .. } => {
-                    if is_companion_trait(owner.attrs.get(ItemLocalId::ZERO)) {
-                        companion_traits.insert(def_id);
-                    }
-                    trait_supers.insert(def_id.to_def_id(), bound_trait_ids(bounds));
-                    continue;
-                }
-                _ => continue,
-            },
-            OwnerNode::ImplItem(item) => match &item.kind {
-                rustc_hir::ImplItemKind::Fn(..) => item.ident,
-                _ => continue,
-            },
-            OwnerNode::TraitItem(item) => match &item.kind {
-                rustc_hir::TraitItemKind::Fn(..) => {
-                    in_trait = true;
-                    item.ident
-                }
-                _ => continue,
-            },
-            _ => continue,
-        };
-        let Some(parent) = tcx.opt_local_parent(def_id) else {
+        if let OwnerNode::Item(item) = owner.node()
+            && let rustc_hir::ItemKind::Trait { bounds, .. } = &item.kind
+        {
+            if is_companion_trait(owner.attrs.get(ItemLocalId::ZERO)) {
+                companion_traits.insert(def_id);
+            }
+            trait_supers.insert(def_id.to_def_id(), bound_trait_ids(bounds));
+            continue;
+        }
+        let OwnerNode::TraitItem(item) = owner.node() else {
             continue;
         };
-        map.insert((parent.to_def_id(), ident.name), def_id.to_def_id());
-        attrs.insert(def_id, owner.attrs.get(ItemLocalId::ZERO));
-        if in_trait && ident.name.as_str().starts_with(VERIFIED_PREFIX) {
-            twin_methods.push((ident.name, parent));
+        let rustc_hir::TraitItemKind::Fn(..) = &item.kind else {
+            continue;
+        };
+        if item.ident.name.as_str().starts_with(VERIFIED_PREFIX)
+            && let Some(parent) = tcx.opt_local_parent(def_id)
+        {
+            companion_methods.push((item.ident.name, parent));
         }
     }
-    let mut twin_traits: HashMap<Symbol, Vec<DefId>> = HashMap::new();
-    for (name, parent) in twin_methods {
+    let mut companions_by_method: HashMap<Symbol, Vec<DefId>> = HashMap::new();
+    for (name, parent) in companion_methods {
         if companion_traits.contains(&parent) {
-            twin_traits.entry(name).or_default().push(parent.to_def_id());
+            companions_by_method.entry(name).or_default().push(parent.to_def_id());
         }
     }
-    external_twin_traits(tcx, &mut twin_traits, &mut trait_supers);
-    (map, attrs, twin_traits, trait_supers)
+    external_companion_traits(tcx, &mut companions_by_method, &mut trait_supers);
+    (companions_by_method, trait_supers)
 }
 
 /// The supertraits a trait of another crate declares.
@@ -206,9 +269,9 @@ fn is_companion_trait(attrs: &[rustc_hir::Attribute]) -> bool {
 ///
 /// A companion trait is usually declared next to the `external_trait_specification`
 /// of the trait it belongs to, which is commonly in another crate.
-fn external_twin_traits<'tcx>(
+fn external_companion_traits<'tcx>(
     tcx: TyCtxt<'tcx>,
-    twin_traits: &mut HashMap<Symbol, Vec<DefId>>,
+    companions_by_method: &mut HashMap<Symbol, Vec<DefId>>,
     trait_supers: &mut HashMap<DefId, Vec<DefId>>,
 ) {
     for cnum in tcx.crates(()) {
@@ -223,7 +286,7 @@ fn external_twin_traits<'tcx>(
             for assoc in tcx.associated_items(*trait_def_id).in_definition_order() {
                 let name = assoc.name();
                 if name.as_str().starts_with(VERIFIED_PREFIX) {
-                    twin_traits.entry(name).or_default().push(*trait_def_id);
+                    companions_by_method.entry(name).or_default().push(*trait_def_id);
                 }
             }
             trait_supers.insert(*trait_def_id, foreign_supertraits(tcx, *trait_def_id));
@@ -241,8 +304,6 @@ fn external_twin_traits<'tcx>(
 fn external_target_map<'tcx>(
     tcx: TyCtxt<'tcx>,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-    local_fns: &HashMap<(DefId, Symbol), DefId>,
-    local_attrs: &HashMap<LocalDefId, &'tcx [rustc_hir::Attribute]>,
 ) -> HashMap<DefId, DefId> {
     let mut map = HashMap::new();
     for (def_id, owner) in owners.iter_enumerated() {
@@ -255,15 +316,12 @@ fn external_target_map<'tcx>(
         let rustc_hir::ItemKind::Fn { body, .. } = &item.kind else {
             continue;
         };
-        let Some(attrs) = local_attrs.get(&def_id) else {
-            continue;
-        };
-        let (mut is_external_fn_spec, mut is_stub, mut is_proxy) = (false, false, false);
+        let attrs = owner.attrs.get(ItemLocalId::ZERO);
+        let (mut is_external_fn_spec, mut is_stub) = (false, false);
         for attr in parse_attrs_opt(attrs, None) {
             match attr {
                 Attr::ExternalFnSpecification => is_external_fn_spec = true,
                 Attr::UnverifiedStub => is_stub = true,
-                Attr::UnerasedProxy => is_proxy = true,
                 _ => {}
             }
         }
@@ -276,7 +334,7 @@ fn external_target_map<'tcx>(
         let Some(target) = tail_call_target(body.value) else {
             continue;
         };
-        if let Some(verified) = counterpart_of(tcx, local_fns, def_id.to_def_id(), is_proxy) {
+        if let Some(verified) = counterpart_of(tcx, owners, def_id.to_def_id()) {
             map.insert(target, verified);
         }
     }
@@ -292,7 +350,7 @@ fn tail_call_target(mut expr: &Expr<'_>) -> Option<DefId> {
                 let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else {
                     return None;
                 };
-                return Some(path.res.def_id());
+                return path.res.opt_def_id();
             }
             _ => {
                 return None;
@@ -301,17 +359,13 @@ fn tail_call_target(mut expr: &Expr<'_>) -> Option<DefId> {
     }
 }
 
-impl<'tcx> Ctxt<'tcx> {
+impl<'tcx> Ctxt<'_, 'tcx> {
     /// Attributes of `def_id`.
     ///
     /// Note: for local items we must not go through tcx.hir_attrs, which would
     /// re-enter the hir_crate query we are computing.
     fn attrs(&self, def_id: DefId) -> Option<&'tcx [rustc_hir::Attribute]> {
-        if let Some(local) = def_id.as_local() {
-            self.local_attrs.get(&local).copied()
-        } else {
-            Some(self.tcx.attrs_for_def(def_id))
-        }
+        def_attrs(self.tcx, self.owners, def_id)
     }
 
     /// Is `callee` a call to the `proof_with`/`proof_with_ret` marker of the builtin
@@ -361,8 +415,8 @@ impl<'tcx> Ctxt<'tcx> {
 
     /// Resolve the verified counterpart of a resolved callee.
     fn verified_counterpart(&self, def_id: DefId) -> Option<DefId> {
-        let (is_stub, is_proxy) = self.stub_kind(def_id);
-        let name = counterpart_name(self.tcx.item_name(def_id), is_proxy);
+        let (is_stub, _) = self.stub_kind(def_id);
+        let name = counterpart_name(self.tcx, self.owners, def_id);
         if !is_stub {
             // The callee is not a stub itself: it may be an external function
             // specified by a local `assume_specification`, or a method of an
@@ -373,19 +427,19 @@ impl<'tcx> Ctxt<'tcx> {
             let parent = self.tcx.opt_parent(def_id)?;
             return self.companion_method(parent, name);
         }
-        counterpart_of(self.tcx, &self.local_fns, def_id, is_proxy)
+        counterpart_of(self.tcx, self.owners, def_id)
             .or_else(|| self.companion_method(self.tcx.opt_parent(def_id)?, name))
     }
 
     /// The counterpart of a trait method, which the companion trait of the trait
     /// declares.
     fn companion_method(&self, trait_def_id: DefId, name: Symbol) -> Option<DefId> {
-        self.twin_traits
+        self.companions_by_method
             .get(&name)?
             .iter()
             .find(|companion| self.supertraits(**companion).contains(&trait_def_id))
-            .and_then(|companion| self.local_fns.get(&(*companion, name)))
-            .copied()
+            .and_then(|companion| local_child_fn(self.owners, companion.as_local()?, name))
+            .map(LocalDefId::to_def_id)
     }
 
     /// The supertraits of a trait, which for a trait of this crate are read from
@@ -437,7 +491,7 @@ struct Injection {
 }
 
 fn rewrite_owner<'tcx>(
-    ctxt: &Ctxt<'tcx>,
+    ctxt: &Ctxt<'_, 'tcx>,
     inner_owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
@@ -509,7 +563,7 @@ fn rewrite_owner<'tcx>(
 /// picks up a bound it does not need, which only makes the signature more
 /// demanding, never less.
 fn collect_injections<'tcx>(
-    ctxt: &Ctxt<'tcx>,
+    ctxt: &Ctxt<'_, 'tcx>,
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     extra_traits: &HashMap<ItemLocalId, Vec<DefId>>,
@@ -762,9 +816,9 @@ fn with_generics<'tcx>(
 /// child pointers of each node, so every ancestor of a replaced expression has to
 /// be reallocated with the new child. Hir ids and spans are preserved.
 struct Folder<'a, 'tcx> {
-    ctxt: &'a Ctxt<'tcx>,
+    ctxt: &'a Ctxt<'a, 'tcx>,
     updates: Vec<(ItemLocalId, Node<'tcx>)>,
-    /// Trait candidates to add for a rewritten call, see `Ctxt::twin_traits`.
+    /// Trait candidates to add for a rewritten call, see `Ctxt::companions_by_method`.
     extra_traits: Vec<(ItemLocalId, &'a [DefId])>,
 }
 
@@ -1018,7 +1072,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 let mut new_args = args.to_vec();
                 new_args.extend(extra_args);
                 let new_seg = self.rename_segment(seg)?;
-                self.record_twin_traits(call.hir_id.local_id, new_seg.ident.name);
+                self.record_companion_traits(call.hir_id.local_id, new_seg.ident.name);
                 ExprKind::MethodCall(new_seg, receiver, self.alloc_exprs(new_args), *span)
             }
             _ => {
@@ -1065,7 +1119,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // Resolved during type checking; renaming the segment is enough.
             QPath::TypeRelative(ty, seg) => {
                 let new_seg = self.rename_segment(seg)?;
-                self.record_twin_traits(callee.hir_id.local_id, new_seg.ident.name);
+                self.record_companion_traits(callee.hir_id.local_id, new_seg.ident.name);
                 QPath::TypeRelative(ty, new_seg)
             }
         };
@@ -1110,8 +1164,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Remember that the companion traits declaring `name` have to be treated as
     /// in scope for the rewritten call.
-    fn record_twin_traits(&mut self, id: ItemLocalId, name: Symbol) {
-        if let Some(traits) = self.ctxt.twin_traits.get(&name) {
+    fn record_companion_traits(&mut self, id: ItemLocalId, name: Symbol) {
+        if let Some(traits) = self.ctxt.companions_by_method.get(&name) {
             self.extra_traits.push((id, traits.as_slice()));
         }
     }
@@ -1131,21 +1185,17 @@ fn verified_name(name: Symbol) -> Symbol {
 
 /// The verified counterpart of the unverified stub `def_id`: the function with the
 /// counterpart name in the same module or impl.
-fn counterpart_of(
-    tcx: TyCtxt<'_>,
-    local_fns: &HashMap<(DefId, Symbol), DefId>,
+fn counterpart_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     def_id: DefId,
-    is_unerased_proxy: bool,
 ) -> Option<DefId> {
-    let name = counterpart_name(tcx.item_name(def_id), is_unerased_proxy);
+    let name = counterpart_name(tcx, owners, def_id);
     let parent = tcx.opt_parent(def_id)?;
-    if let Some(found) = local_fns.get(&(parent, name)) {
-        return Some(*found);
-    }
-    if parent.is_local() {
-        // A local counterpart is in `local_fns` already, and the queries below
-        // would re-enter the `hir_crate` computation this pass is part of.
-        return None;
+    if let Some(parent) = parent.as_local() {
+        // The queries below would re-enter the `hir_crate` computation this pass
+        // is part of, so a local counterpart is looked up in the owners instead.
+        return local_child_fn(owners, parent, name).map(LocalDefId::to_def_id);
     }
     match tcx.def_kind(parent) {
         DefKind::Mod => tcx
@@ -1162,11 +1212,19 @@ fn counterpart_of(
     }
 }
 
-/// The name of the verified counterpart of the unverified stub `name`. A `const fn`
+/// The name of the verified counterpart of the unverified stub `def_id`. A `const fn`
 /// is also split into an erased item and an unerased proxy, and both are stubs, but
 /// the counterpart is named after the function the user wrote, without the prefix
 /// the proxy carries.
-fn counterpart_name(name: Symbol, is_unerased_proxy: bool) -> Symbol {
+fn counterpart_name<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: DefId,
+) -> Symbol {
+    let is_unerased_proxy = parse_attrs_opt(def_attrs(tcx, owners, def_id).unwrap_or(&[]), None)
+        .iter()
+        .any(|a| matches!(a, Attr::UnerasedProxy));
+    let name = tcx.item_name(def_id);
     let name = name.as_str();
     let name = match is_unerased_proxy {
         true => name.strip_prefix(UNERASED_PROXY_PREFIX).unwrap_or(name),
