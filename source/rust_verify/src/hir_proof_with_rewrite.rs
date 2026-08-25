@@ -276,6 +276,12 @@ fn external_companion_traits<'tcx>(
 ) {
     for cnum in tcx.crates(()) {
         for trait_def_id in tcx.traits(*cnum) {
+            // A companion trait is always named with the reserved prefix, so the
+            // cheap name check rules out the overwhelming majority of the
+            // dependencies' traits before any attribute is decoded.
+            if !tcx.item_name(*trait_def_id).as_str().starts_with(VERIFIED_PREFIX) {
+                continue;
+            }
             // Verus attributes are `Unparsed`, where `get_all_attrs` is
             // acceptable per its deprecation message.
             #[allow(deprecated)]
@@ -434,12 +440,24 @@ impl<'tcx> Ctxt<'_, 'tcx> {
     /// The counterpart of a trait method, which the companion trait of the trait
     /// declares.
     fn companion_method(&self, trait_def_id: DefId, name: Symbol) -> Option<DefId> {
-        self.companions_by_method
+        let companion = *self
+            .companions_by_method
             .get(&name)?
             .iter()
-            .find(|companion| self.supertraits(**companion).contains(&trait_def_id))
-            .and_then(|companion| local_child_fn(self.owners, companion.as_local()?, name))
-            .map(LocalDefId::to_def_id)
+            .find(|companion| self.supertraits(**companion).contains(&trait_def_id))?;
+        match companion.as_local() {
+            // A local companion is read from the owners; `associated_items` would
+            // re-enter the `hir_crate` computation this pass is part of.
+            Some(local) => local_child_fn(self.owners, local, name).map(LocalDefId::to_def_id),
+            // A companion of a dependency crate, indexed by `external_companion_traits`,
+            // is safe to look up through the query since its `DefId` is foreign.
+            None => self
+                .tcx
+                .associated_items(companion)
+                .filter_by_name_unhygienic(name)
+                .next()
+                .map(|assoc| assoc.def_id),
+        }
     }
 
     /// The supertraits of a trait, which for a trait of this crate are read from

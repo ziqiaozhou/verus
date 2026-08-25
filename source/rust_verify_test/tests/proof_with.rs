@@ -1211,6 +1211,65 @@ test_verify_one_file! {
                 proof!{ assert(r == 2); }
             }
         })
+        // the implementation may live in a different module from the proxy that
+        // declares the counterpart, and the call site in a third, importing only
+        // the external trait
+        + &in_mod("impl_cross_module", code_str!{
+            use vstd::prelude::*;
+
+            mod spec {
+                use vstd::prelude::*;
+
+                #[verifier::external]
+                pub trait T {
+                    fn f(&self, a: u64) -> u64;
+                }
+
+                #[verus_verify]
+                #[verifier::external_trait_specification]
+                pub trait ExT {
+                    type ExternalTraitSpecificationFor: T;
+
+                    #[verus_spec(r =>
+                        with Ghost(g): Ghost<int> -> g2: Ghost<int>
+                        ensures r == a, g2@ == g + 1,
+                    )]
+                    fn f(&self, a: u64) -> u64;
+                }
+            }
+
+            mod imp {
+                use vstd::prelude::*;
+
+                #[verus_verify]
+                pub struct S;
+
+                #[verus_verify]
+                impl super::spec::T for S {
+                    #[verus_spec(with Ghost(g): Ghost<int> -> g2: Ghost<int>)]
+                    fn f(&self, a: u64) -> u64 {
+                        proof_decl!{ let ghost gg: int = g + 1; }
+                        proof_with!{|= Ghost(gg)}
+                        a
+                    }
+                }
+            }
+
+            use imp::S;
+            use spec::T;
+
+            // a third module calls it, by method and by the path of the trait
+            #[verus_verify]
+            fn test() {
+                proof_with!{Ghost(3int) => Ghost(g2)}
+                let r = S.f(7);
+                proof!{ assert(r == 7); assert(g2 == 4); }
+
+                proof_with!{Ghost(3int) => Ghost(g3)}
+                let r2 = spec::T::f(&S, 7);
+                proof!{ assert(r2 == 7); assert(g3 == 4); }
+            }
+        })
     => Ok(())
 }
 
