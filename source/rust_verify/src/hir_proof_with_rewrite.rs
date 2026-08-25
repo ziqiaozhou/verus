@@ -2,16 +2,118 @@
 //! of `f` before rustc type checks the crate.
 //!
 //! `#[verus_spec(with ...)]` generates two functions: the unverified stub `f`,
-//! which keeps the original signature and carries
-//! `#[verus::internal(unverified_stub)]`, and the verified
-//! function `_VERUS_VERIFIED_f`, whose signature also contains the extra
-//! ghost/tracked parameters and returns the extra ghost/tracked outputs, and attributes include
-//! `#[verus::internal(verified_with)]`.
+//! which keeps the signature the user wrote and carries
+//! `#[verus::internal(unverified_stub)]`, and the verified counterpart
+//! `_VERUS_VERIFIED_f`, which carries `#[verus::internal(verified_with)]` and
+//! whose signature also has the extra ghost and tracked parameters and returns
+//! the extra ghost and tracked outputs. Only the stub is compiled; the
+//! counterpart is what gets verified.
 //!
-//! When call `f` in verification mode, we should use `_VERUS_VERIFIED_f`. However,
-//! verus macro is not reliable to rewrite the call: since a call may be
-//! written as `$path::f(..)`, through a `use` alias, or as a method call. Thus, we
-//! need to rewrite the HIR after macro expansion, but before type checking.
+//! A call to `f` has to become a call to `_VERUS_VERIFIED_f`. The macro cannot
+//! do that itself, because at expansion time it does not know what a call site
+//! refers to: it may be written as `$path::f(..)`, go through a `use` alias, or
+//! be a method call whose receiver type is not known yet. The rewrite therefore
+//! happens on the HIR, after macro expansion and after name resolution, but
+//! before type checking, so that rustc still type checks, borrow checks and
+//! lifetime checks the extra arguments of the rewritten call.
+//!
+//! # Pairing a stub with its verified counterpart
+//!
+//! A call names the unverified stub; the rewrite has to find the verified
+//! counterpart the macro generated for it. The two are never linked by a direct
+//! reference, since the stub may come from another crate, so the link is
+//! re-derived from the name and the enclosing item. The code below is what the
+//! macro expands to, with the attributes and the spec statements that do not
+//! take part in the pairing left out. There are three cases.
+//!
+//! ## Free functions and inherent methods
+//!
+//! ```ignore
+//! // #[verus_spec(with Tracked(t): Tracked<u8>)] fn f(x: u8) -> u8 { x }
+//!
+//! #[verus::internal(unverified_stub)]
+//! fn f(x: u8) -> u8 { unimplemented!() }
+//!
+//! #[verus::internal(verified_with)]
+//! fn _VERUS_VERIFIED_f(x: u8, verus_tmp_t: Tracked<u8>) -> u8 { x }
+//! ```
+//!
+//! The two are siblings, so the counterpart is the item named
+//! `_VERUS_VERIFIED_f` under the same parent, see [`counterpart_of`].
+//!
+//! ```ignore
+//! // proof_with!{t} let y = f(x);
+//!
+//! let y = proof_with_ret((t,), f(x));   // before: what this pass receives
+//! let y = _VERUS_VERIFIED_f(x, t);      // after
+//! ```
+//!
+//! ## Trait methods
+//!
+//! The counterpart cannot be added to the trait being called: an external trait
+//! cannot be edited, and editing a local one would change what every
+//! implementation has to provide. It goes into a *companion trait* instead, a
+//! generated subtrait with one implementation per implementation of the original.
+//!
+//! ```ignore
+//! // trait Tr { #[verus_spec(with Tracked(t): Tracked<u8>)] fn m(&self); }
+//! // impl Tr for S { .. }
+//!
+//! trait Tr {
+//!     #[verus::internal(unverified_stub)]
+//!     fn m(&self);
+//! }
+//! #[verus::internal(verified_trait)]
+//! trait _VERUS_VERIFIED_TRAIT_Tr: Tr {
+//!     #[verus::internal(verified_with)]
+//!     fn _VERUS_VERIFIED_m(&self, verus_tmp_t: Tracked<u8>);
+//! }
+//!
+//! impl Tr for S { fn m(&self) { unimplemented!() } }
+//! impl _VERUS_VERIFIED_TRAIT_Tr for S { fn _VERUS_VERIFIED_m(&self, verus_tmp_t: Tracked<u8>) {} }
+//! ```
+//!
+//! ```ignore
+//! // proof_with!{t} s.m();
+//!
+//! proof_with_ret((t,), s.m());       // before
+//! s._VERUS_VERIFIED_m(t);            // after
+//! ```
+//!
+//! The receiver type is unknown before type checking, so the counterpart is not
+//! looked up under an enclosing item; the call is renamed and left to name
+//! resolution. Resolution only considers the traits in scope that declare a
+//! method of the name written in the source, which the companion trait is not, so
+//! [`Ctxt::companions_by_method`] indexes the companion traits by the name they
+//! declare and [`rewrite_owner`] adds them back. A caller generic over `Tr` also
+//! needs a `_VERUS_VERIFIED_TRAIT_Tr` bound, which [`Injection`] adds.
+//!
+//! ## External functions
+//!
+//! The function called belongs to a crate that knows nothing of Verus, so it has
+//! no counterpart and cannot carry an attribute pointing at one. The counterpart
+//! belongs to the local `assume_specification` that specifies it, and the stub of
+//! that specification names the external function in tail position, which is how
+//! [`external_target_map`] indexes the pair.
+//!
+//! ```ignore
+//! // #[verifier::external_fn_specification]
+//! // #[verus_spec(with Tracked(t): Tracked<u8>)] fn ext_spec(x: u8) -> u8 { ext(x) }
+//!
+//! #[verifier::external_fn_specification]
+//! #[verus::internal(unverified_stub)]
+//! fn ext_spec(x: u8) -> u8 { ext(x) }   // the tail call names the external function
+//!
+//! #[verus::internal(verified_with)]
+//! fn _VERUS_VERIFIED_ext_spec(x: u8, verus_tmp_t: Tracked<u8>) -> u8 { unimplemented!() }
+//! ```
+//!
+//! ```ignore
+//! // proof_with!{t} let z = ext(x);
+//!
+//! let z = proof_with_ret((t,), ext(x));        // before
+//! let z = _VERUS_VERIFIED_ext_spec(x, t);      // after
+//! ```
 
 use crate::attributes::{Attr, parse_attrs_opt};
 use rustc_data_structures::fx::FxIndexSet;
@@ -1125,8 +1227,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             ExprKind::UnsafeBinderCast(kind, e, ty) => {
                 ExprKind::UnsafeBinderCast(*kind, self.fold_expr(e)?, *ty)
             }
-            // Closures and const blocks are separate owners and are visited on
-            // their own; the remaining variants have no sub-expressions.
+            // A const block is an owner of its own and is visited on its own
+            // iteration. A closure is not an owner, but its body is a separate
+            // entry in the `bodies` of the enclosing owner, which `rewrite_owner`
+            // iterates over, so it is folded there rather than through here.
+            // The remaining variants have no sub-expressions.
             ExprKind::ConstBlock(..)
             | ExprKind::Closure(..)
             | ExprKind::Lit(..)
@@ -1444,8 +1549,8 @@ fn counterpart_of<'tcx>(
 
 /// The name of the verified counterpart of the unverified stub `def_id`. A `const fn`
 /// is also split into an erased item and an unerased proxy, and both are stubs, but
-/// the counterpart is named after the function the user wrote, without the prefix
-/// the proxy carries.
+/// the counterpart is named after the function the user wrote, so the prefix the
+/// proxy carries is dropped first.
 fn counterpart_name<'tcx>(
     tcx: TyCtxt<'tcx>,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,

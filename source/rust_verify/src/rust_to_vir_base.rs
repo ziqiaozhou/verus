@@ -161,16 +161,15 @@ pub(crate) fn def_id_to_vir_path_option<'tcx>(
     path
 }
 
-/// A function declared with `#[verus_spec(with ..)]` is split in two: the stub `f`,
-/// which keeps the signature the user wrote, and the verified counterpart
-/// `_VERUS_VERIFIED_f`, which carries the extra ghost/tracked parameters and the
-/// specification. Swap the two names, so that the function the user verifies is the
-/// one named `f` in messages, `--verify-function` and the profiler.
+/// Maps generated pairs so the verified counterpart, which holds the specification, retains
+/// the source name in VIR. This keeps diagnostics, `--verify-function`, and profiler output
+/// aligned with the user's function rather than a generated `_VERUS_VERIFIED_` name.
 ///
-/// This has to happen for definitions and for call sites alike, so it belongs here
-/// rather than in `check_item_fn`. The specification of a trait method and the
-/// unerased proxy of a `const fn` are separate items whose names embed the name of
-/// the function, so rename what follows their prefix.
+/// Attribute markers disambiguate user-written names that begin with `VERIFIED_PREFIX`.
+/// Definitions and call sites both pass through this function, so the mapping cannot live only
+/// in `check_item_fn`. Trait-method specification items and `const fn` unerased proxies are
+/// separate items whose names embed the function name, so only the portion after their prefix
+/// is renamed.
 fn with_fn_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, path: Path) -> Path {
     use rustc_hir::def::DefKind;
     if !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
@@ -209,13 +208,10 @@ pub(crate) fn is_with_fn_renamed<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool
     }
 }
 
-/// Does the counterpart of this stub claim its name? A function, an inherent method
-/// and a method of a trait declared in this crate all give their name up, since the
-/// counterpart is a sibling item or a method of the companion trait.
-///
-/// A method of an `external_trait_specification` is the exception: it is named after
-/// the external method it specifies, and that name is what call sites of the external
-/// method compute, so it cannot move.
+/// A free function, inherent method, or method of a trait declared in this crate can give up
+/// its name because its counterpart is a sibling item or a companion-trait method.
+/// An `external_trait_specification` method cannot because it is named after the external
+/// method it specifies, and call sites compute exactly that name.
 fn has_sibling_counterpart<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
     use rustc_hir::def::DefKind;
     let Some(parent) = tcx.opt_parent(def_id) else {
