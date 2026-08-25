@@ -673,6 +673,25 @@ test_verify_one_file! {
                 }
             }
 
+            // the companion bound carries the generic arguments of the bound the
+            // method is called through
+            #[verus_verify]
+            trait Tr<A> {
+                #[verus_spec(with Ghost(g): Ghost<u64>)]
+                fn m(&self, a: A);
+            }
+
+            #[verus_verify]
+            impl Tr<u64> for S {
+                #[verus_spec(with Ghost(g): Ghost<u64>)]
+                fn m(&self, _a: u64) {}
+            }
+
+            #[verus_spec]
+            fn call_generic_args<A: Tr<u64>>(x: &A) {
+                proof_with!{Ghost(1u64)}
+                x.m(1u64);
+            }
 
             // the companion bound the rewrite adds to a generic caller has to be
             // satisfied by a concrete argument, which only a real call checks
@@ -681,6 +700,7 @@ test_verify_one_file! {
                 call_generic(&S);
                 call_generic(&Fwd(S));
                 call_via_subtrait(&S);
+                call_generic_args(&S);
                 let w = Wrapper(S);
                 w.call();
             }

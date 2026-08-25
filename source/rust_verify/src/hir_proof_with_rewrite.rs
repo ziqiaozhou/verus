@@ -14,13 +14,15 @@
 //! need to rewrite the HIR after macro expansion, but before type checking.
 
 use crate::attributes::{Attr, parse_attrs_opt};
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::steal::Steal;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{
-    Arm, Block, Expr, ExprField, ExprKind, GenericBound, Generics, ItemLocalId, LetExpr,
-    MaybeOwner, Node, OwnerNode, ParentedNode, PathSegment, PolyTraitRef, QPath, Stmt, StmtKind,
-    StructTailExpr, TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate, WherePredicateKind,
+    Arm, Block, Expr, ExprField, ExprKind, GenericArgs, GenericBound, Generics, ItemLocalId,
+    LetExpr, MaybeOwner, Node, OwnerNode, ParentedNode, PathSegment, PolyTraitRef, QPath, Stmt,
+    StmtKind, StructTailExpr, TraitRef, Ty, TyKind, WhereBoundPredicate, WherePredicate,
+    WherePredicateKind,
 };
 use rustc_index::IndexVec;
 use rustc_middle::ty::TyCtxt;
@@ -52,7 +54,7 @@ pub(crate) fn hir_proof_with_rewrite<'tcx>(
     let owners = new_owners.clone();
     let ctxt = Ctxt::new(tcx, &owners);
 
-    let mut injections: HashMap<LocalDefId, Vec<Injection>> = HashMap::new();
+    let mut injections: HashMap<LocalDefId, Vec<Injection<'tcx>>> = HashMap::new();
     for i in 0..new_owners.len() {
         let def_id = LocalDefId { local_def_index: DefIndex::from_usize(i) };
         let MaybeOwner::Owner(inner_owner) = new_owners[def_id] else {
@@ -469,24 +471,33 @@ impl<'tcx> Ctxt<'_, 'tcx> {
         }
     }
 
-    /// Do these bounds already give the trait that `companion` is the companion
-    /// of, so that a bound on `companion` is what is missing?
+    /// Which traits that `companion` is a companion of are reached by these
+    /// bounds?
     ///
     /// The trait may be reached through a supertrait: a caller written with
     /// `A: Y`, where `trait Y: X`, calls the methods of `X` too.
-    fn bounds_reach(&self, bounds: &[DefId], companion: DefId) -> bool {
+    fn bounds_reach(&self, bounds: &[DefId], companion: DefId) -> FxIndexSet<DefId> {
         let targets = self.supertraits(companion);
         let mut todo: Vec<DefId> = bounds.to_vec();
-        let mut seen: HashSet<DefId> = HashSet::new();
+        let mut seen: FxIndexSet<DefId> = FxIndexSet::default();
         while let Some(bound) = todo.pop() {
-            if targets.contains(&bound) {
-                return true;
-            }
             if seen.insert(bound) {
                 todo.extend(self.supertraits(bound));
             }
         }
-        false
+        targets.into_iter().filter(|target| seen.contains(target)).collect()
+    }
+
+    /// Does this trait require arguments other than its implicit `Self`?
+    fn trait_has_generic_params(&self, trait_def_id: DefId) -> bool {
+        if let Some(local) = trait_def_id.as_local() {
+            let Some(MaybeOwner::Owner(owner)) = self.owners.get(local) else {
+                return false;
+            };
+            return owner.node().generics().is_some_and(|generics| !generics.params.is_empty());
+        }
+        let generics = self.tcx.generics_of(trait_def_id);
+        generics.own_params.len() > usize::from(generics.has_self)
     }
 }
 
@@ -498,10 +509,13 @@ impl<'tcx> Ctxt<'_, 'tcx> {
 /// would leak the companion trait into the source, so it is added here instead.
 /// The caller still has to prove it, which only a type whose implementation was
 /// itself verified with `with` satisfies.
-struct Injection {
+struct Injection<'tcx> {
     /// The type parameter the bound is added to.
     param: DefId,
     companion: DefId,
+    /// Arguments written on the trait bound that provides the companion's
+    /// supertrait.
+    args: Option<&'tcx GenericArgs<'tcx>>,
     /// Span of the bound that the call resolved through.
     span: rustc_span::Span,
 }
@@ -511,7 +525,7 @@ fn rewrite_owner<'tcx>(
     inner_owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
-    injections: &mut HashMap<LocalDefId, Vec<Injection>>,
+    injections: &mut HashMap<LocalDefId, Vec<Injection<'tcx>>>,
 ) -> Option<MaybeOwner<'tcx>> {
     let tcx = ctxt.tcx;
     let mut bodies = inner_owner.nodes.bodies.clone();
@@ -609,10 +623,13 @@ fn collect_injections<'tcx>(
     def_id: LocalDefId,
     owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
     extra_traits: &HashMap<ItemLocalId, Vec<DefId>>,
-    injections: &mut HashMap<LocalDefId, Vec<Injection>>,
+    injections: &mut HashMap<LocalDefId, Vec<Injection<'tcx>>>,
 ) {
     let tcx = ctxt.tcx;
-    let companions: HashSet<DefId> = extra_traits.values().flatten().copied().collect();
+    let mut calls: Vec<_> = extra_traits.iter().collect();
+    calls.sort_by_key(|(id, _)| id.as_u32());
+    let companions: FxIndexSet<DefId> =
+        calls.into_iter().flat_map(|(_, traits)| traits.iter().copied()).collect();
     if companions.is_empty() {
         return;
     }
@@ -632,7 +649,7 @@ fn collect_injections<'tcx>(
         }
     }
 
-    for generics in scopes {
+    for generics in &scopes {
         for predicate in generics.predicates {
             let WherePredicateKind::BoundPredicate(bound) = predicate.kind else {
                 continue;
@@ -644,22 +661,112 @@ fn collect_injections<'tcx>(
                 continue;
             };
             let bounded_by = bound_trait_ids(bound.bounds);
-            for companion in companions.iter() {
+            for companion in &companions {
                 if bounded_by.contains(companion) {
                     // Already spelled out in the source.
                     continue;
                 }
-                if !ctxt.bounds_reach(&bounded_by, *companion) {
+                let reached = ctxt.bounds_reach(&bounded_by, *companion);
+                if reached.is_empty() {
                     continue;
                 }
+                if reached.len() != 1 {
+                    tcx.dcx().span_err(
+                        predicate.span,
+                        format!(
+                            "`proof_with!` cannot determine which supertrait supplies the \
+                             generic arguments for `{}`",
+                            tcx.item_name(*companion)
+                        ),
+                    );
+                    continue;
+                }
+                let target = *reached.first().unwrap();
+                let mut direct = bound.bounds.iter().filter_map(|bound| {
+                    let GenericBound::Trait(poly) = bound else {
+                        return None;
+                    };
+                    (poly.trait_ref.trait_def_id() == Some(target)).then_some(poly)
+                });
+                let args = match (direct.next(), direct.next()) {
+                    (Some(poly), None) if poly.bound_generic_params.is_empty() => {
+                        poly.trait_ref.path.segments.last().and_then(|segment| segment.args)
+                    }
+                    (Some(_), None) => {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            "`proof_with!` cannot inject a companion-trait bound through a \
+                             higher-ranked trait bound",
+                        );
+                        continue;
+                    }
+                    (Some(_), Some(_)) => {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` found multiple `{}` bounds with ambiguous \
+                                 generic arguments",
+                                tcx.item_name(target)
+                            ),
+                        );
+                        continue;
+                    }
+                    (None, _) if ctxt.trait_has_generic_params(target) => {
+                        let has_direct_bound = scopes.iter().any(|generics| {
+                            generics.predicates.iter().any(|predicate| {
+                                let WherePredicateKind::BoundPredicate(bound) = predicate.kind
+                                else {
+                                    return false;
+                                };
+                                type_param_of(bound.bounded_ty) == Some(param)
+                                    && bound.bounds.iter().any(|bound| {
+                                        bound
+                                            .trait_ref()
+                                            .and_then(|trait_ref| trait_ref.trait_def_id())
+                                            == Some(target)
+                                    })
+                            })
+                        });
+                        if has_direct_bound {
+                            continue;
+                        }
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` cannot infer the generic arguments for `{}` \
+                                 through an indirect supertrait bound; add a direct `{}` bound",
+                                tcx.item_name(*companion),
+                                tcx.item_name(target)
+                            ),
+                        );
+                        continue;
+                    }
+                    (None, _) => None,
+                };
                 let Some(owner) = param.as_local().and_then(|p| tcx.opt_local_parent(p)) else {
                     continue;
                 };
                 let entry = injections.entry(owner).or_default();
-                if entry.iter().any(|i| i.param == param && i.companion == *companion) {
+                if let Some(previous) =
+                    entry.iter().find(|i| i.param == param && i.companion == *companion)
+                {
+                    let same_args = match (previous.args, args) {
+                        (None, None) => true,
+                        (Some(previous), Some(args)) => std::ptr::eq(previous, args),
+                        _ => false,
+                    };
+                    if !same_args {
+                        tcx.dcx().span_err(
+                            predicate.span,
+                            format!(
+                                "`proof_with!` found conflicting generic arguments for `{}`",
+                                tcx.item_name(*companion)
+                            ),
+                        );
+                    }
                     continue;
                 }
-                entry.push(Injection { param, companion: *companion, span: predicate.span });
+                entry.push(Injection { param, companion: *companion, args, span: predicate.span });
             }
         }
     }
@@ -684,7 +791,7 @@ fn type_param_of<'tcx>(ty: &'tcx Ty<'tcx>) -> Option<DefId> {
 fn inject_bounds<'tcx>(
     tcx: TyCtxt<'tcx>,
     inner_owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
-    injections: &[Injection],
+    injections: &[Injection<'tcx>],
 ) -> Option<MaybeOwner<'tcx>> {
     let mut nodes = inner_owner.nodes.nodes.clone();
     // An owner without generics cannot take a bound, and `def_id` is only
@@ -694,7 +801,7 @@ fn inject_bounds<'tcx>(
 
     let mut predicates: Vec<WherePredicate<'tcx>> = Vec::new();
     for injection in injections {
-        let Injection { param, companion, span } = injection;
+        let Injection { param, companion, args, span } = injection;
         let base = nodes.next_index().as_u32();
         let id = |offset: u32| rustc_hir::HirId {
             owner: owner_id,
@@ -703,32 +810,33 @@ fn inject_bounds<'tcx>(
         let (predicate_id, ty_id, param_segment_id, trait_ref_id, trait_segment_id) =
             (id(0), id(1), id(2), id(3), id(4));
 
-        let mk_path = |hir_id: rustc_hir::HirId, res: Res| {
-            let name = tcx.item_name(res.def_id());
-            let segment = tcx.hir_arena.alloc(PathSegment {
-                ident: rustc_span::symbol::Ident::new(name, *span),
-                hir_id,
-                res,
-                args: None,
-                infer_args: false,
-            });
-            let path = tcx.hir_arena.alloc(rustc_hir::Path {
-                span: *span,
-                res,
-                segments: std::slice::from_ref(segment),
-            });
-            (&*segment, &*path)
-        };
+        let mk_path =
+            |hir_id: rustc_hir::HirId, res: Res, args: Option<&'tcx GenericArgs<'tcx>>| {
+                let name = tcx.item_name(res.def_id());
+                let segment = tcx.hir_arena.alloc(PathSegment {
+                    ident: rustc_span::symbol::Ident::new(name, *span),
+                    hir_id,
+                    res,
+                    args,
+                    infer_args: false,
+                });
+                let path = tcx.hir_arena.alloc(rustc_hir::Path {
+                    span: *span,
+                    res,
+                    segments: std::slice::from_ref(segment),
+                });
+                (&*segment, &*path)
+            };
 
         let (param_segment, param_path) =
-            mk_path(param_segment_id, Res::Def(DefKind::TyParam, *param));
+            mk_path(param_segment_id, Res::Def(DefKind::TyParam, *param), None);
         let bounded_ty = tcx.hir_arena.alloc(Ty {
             hir_id: ty_id,
             span: *span,
             kind: TyKind::Path(QPath::Resolved(None, param_path)),
         });
         let (trait_segment, trait_path) =
-            mk_path(trait_segment_id, Res::Def(DefKind::Trait, *companion));
+            mk_path(trait_segment_id, Res::Def(DefKind::Trait, *companion), *args);
         let trait_ref =
             tcx.hir_arena.alloc(TraitRef { path: trait_path, hir_ref_id: trait_ref_id });
         let bounds = tcx.hir_arena.alloc_slice(&[GenericBound::Trait(PolyTraitRef {
