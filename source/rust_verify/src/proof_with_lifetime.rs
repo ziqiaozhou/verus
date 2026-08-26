@@ -101,7 +101,7 @@ pub(crate) fn check_proof_with_lifetime<'tcx>(
     // --- Step 2: Get the actual arg type with real regions ---
 
     let caller_def_id = bctx.fun_id;
-    let caller_poly_sig = tcx.fn_sig(caller_def_id).instantiate_identity();
+    let caller_poly_sig = tcx.fn_sig(caller_def_id).instantiate_identity().skip_normalization();
     let caller_liberated = tcx.liberate_late_bound_regions(caller_def_id, caller_poly_sig);
     let caller_inputs = caller_liberated.inputs();
 
@@ -113,7 +113,7 @@ pub(crate) fn check_proof_with_lifetime<'tcx>(
 
     // --- Step 3: Build callee→caller region mapping from exec args ---
 
-    let callee_poly_sig = tcx.fn_sig(callee_def_id).instantiate_identity();
+    let callee_poly_sig = tcx.fn_sig(callee_def_id).instantiate_identity().skip_normalization();
     let callee_sig_inputs = callee_poly_sig.skip_binder().inputs();
 
     // Extract call arg HirIds from the HIR
@@ -216,6 +216,7 @@ pub(crate) fn check_proof_with_lifetime<'tcx>(
                         ),
                         caller_shorter,
                         caller_longer,
+                        rustc_middle::ty::VisibleForLeakCheck::Yes,
                     );
                 }
             }

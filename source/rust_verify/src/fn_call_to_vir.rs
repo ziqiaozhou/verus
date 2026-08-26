@@ -34,8 +34,7 @@ use vir::ast::{
     Div0Behavior, ExprX, FieldOpr, FunX, HeaderExpr, HeaderExprX, InequalityOp, IntRange,
     IntegerTypeBoundKind, LogicalOp, MaskSpec, Mode, ModeCoercion, ModeWrapperMode, MultiOp,
     OverflowBehavior, Place, PlaceX, Quant, SpannedTyped, Typ, TypDecoration, TypX, UnaryOp,
-    UnaryOpr, VarBinder,
-    VarBinderX, VarIdent, VariantCheck, VirErr,
+    UnaryOpr, VarBinder, VarBinderX, VarIdent, VariantCheck, VirErr,
 };
 use vir::ast_util::{
     const_int_from_string, mk_tuple_typ, mk_tuple_x, typ_to_diagnostic_str, types_equal,
@@ -426,7 +425,8 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
                     let tcx = bctx.ctxt.tcx;
                     let expected_ty_instantiated =
                         rustc_middle::ty::EarlyBinder::bind(*expected_ty)
-                            .instantiate(tcx, node_substs);
+                            .instantiate(tcx, node_substs)
+                            .skip_normalization();
                     let actual_ty = bctx.types.node_type(pending_arg.arg_hir_id);
                     use rustc_middle::ty::TypeFoldable;
                     let expected_erased = expected_ty_instantiated.fold_with(
