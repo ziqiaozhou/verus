@@ -121,8 +121,9 @@ pub(crate) fn rewrite_verus_attribute(
         // trait/impl markers are: they tell `#[verus_spec]` that a method is a
         // trait item, which decides whether its `with` shims are emitted.
         let mut item = syn::parse_macro_input!(input as Item);
-        prepare_items_for_verus_spec(proc_macro2::Span::call_site(), &mut item, false);
-        return item.to_token_stream().into();
+        let siblings =
+            prepare_items_for_verus_spec(proc_macro2::Span::call_site(), &mut item, false);
+        return quote! { #siblings #item }.into();
     }
 
     let mut item = syn::parse_macro_input!(input as Item);
@@ -198,10 +199,11 @@ pub(crate) fn rewrite_verus_attribute(
     }
 
     // Inject #[verus_spec] where missing and stamp impl methods with the sentinel marker.
-    prepare_items_for_verus_spec(args.span(), &mut item, true);
+    let siblings = prepare_items_for_verus_spec(args.span(), &mut item, true);
     let mut new_stream = quote_spanned! {item.span()=>
         #(#attributes)*
         #item
+        #siblings
     };
     spec_fun.map(|f| f.to_tokens(&mut new_stream));
     new_stream.into()
@@ -445,7 +447,14 @@ fn is_verus_marker_attr(attr: &syn::Attribute, marker: &str) -> bool {
     })
 }
 
-fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item, inject_spec: bool) {
+/// Stamp the markers `#[verus_spec]` needs, and return the items that must be
+/// emitted beside `i` -- the shim trait of a trait whose methods carry a `with`
+/// clause.
+fn prepare_items_for_verus_spec(
+    span: proc_macro2::Span,
+    i: &mut syn::Item,
+    inject_spec: bool,
+) -> proc_macro2::TokenStream {
     // Without `#[verus_spec]` to consume it, the marker sentinel is a malformed
     // `allow` that would reach rustc, so in stub-erase mode (where no spec is
     // injected) only already-annotated items may be stamped.
@@ -462,6 +471,7 @@ fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item, inje
             }
         };
     }
+    let mut siblings = proc_macro2::TokenStream::new();
     match i {
         syn::Item::Const(syn::ItemConst { attrs, .. })
         | syn::Item::Static(syn::ItemStatic { attrs, .. })
@@ -507,9 +517,13 @@ fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item, inje
                     stamp!(attrs, marker);
                 }
             }
+            if !is_external_trait_spec {
+                mk_with_shim_trait(t).to_tokens(&mut siblings);
+            }
         }
         _ => {}
     }
+    siblings
 }
 
 fn is_verus_proof_stmt(stmt: &syn::Stmt) -> bool {
@@ -903,8 +917,6 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let mut new_stream = TokenStream::new();
             if let Some(with) = spec_attr.spec.with.as_ref() {
                 let ident = method.sig.ident.clone();
-                mk_with_shim_fns(&syn::Visibility::Inherited, &method.sig, with, &ident)
-                    .to_tokens(&mut new_stream);
                 mk_with_arg_shim_fn(&syn::Visibility::Inherited, &method.sig, with, &ident)
                     .to_tokens(&mut new_stream);
             }
@@ -967,15 +979,12 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             }
             let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig, true, false);
 
-            // The shim is a defaulted method of the same trait, so it is in scope
-            // wherever a call to the original compiles and every impl inherits it.
-            // Like the ghost stubs, it must survive stub-erase mode so that a
-            // downstream crate can see it.
+            // The call-site shims live on the trait's shim trait; only the
+            // conformance companion belongs here. Like the ghost stubs, it must
+            // survive stub-erase mode so that a downstream crate can see it.
             if !erase.erase_all() {
                 if let Some(ref with) = with_clause {
                     let ident = method.sig.ident.clone();
-                    mk_with_shim_fns(&syn::Visibility::Inherited, &method.sig, with, &ident)
-                        .to_tokens(&mut new_stream);
                     mk_with_arg_shim_fn(&syn::Visibility::Inherited, &method.sig, with, &ident)
                         .to_tokens(&mut new_stream);
                 }
@@ -1195,6 +1204,75 @@ pub(crate) const WITH_RET_SHIM: &str = "_VERUS_WITH_RET_";
 /// The prefix of the companion carrying a trait method's declared extras as its
 /// return type, against which an impl's own extras are checked.
 pub(crate) const WITH_ARG_SHIM: &str = "_VERUS_WITH_ARG_";
+/// The prefix of the trait carrying the shims of a trait's methods.
+pub(crate) const WITH_SHIM_TRAIT: &str = "_VERUS_WITH_TR_";
+
+/// The `with` clause a trait method declares in its `#[verus_spec]` attribute.
+/// The attribute is parsed again when the method itself expands, so a malformed
+/// one is reported there; here it simply contributes no shims.
+fn trait_method_with_clause(attrs: &[syn::Attribute]) -> Option<verus_syn::WithSpecOnFn> {
+    for attr in attrs {
+        if !attr.path().is_ident(VERUS_SPEC) {
+            continue;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let spec: verus_syn::SignatureSpecAttr = verus_syn::parse2(list.tokens.clone()).ok()?;
+        return spec.spec.with;
+    }
+    None
+}
+
+/// The shim trait of `t`, holding the call-site shims of every method that
+/// declares a `with` clause, plus the blanket impl that puts it on every
+/// implementor of `t`.
+///
+/// The shims cannot stay on `t` itself: keeping the user's trait surface free of
+/// them is what will let an implementor of a *foreign* trait, which never
+/// mentions any trait Verus generates, still reach them. `?Sized` on the blanket
+/// impl keeps `dyn T` an implementor. The conformance companion stays on `t`,
+/// because each impl has to be able to override it.
+fn mk_with_shim_trait(t: &syn::ItemTrait) -> proc_macro2::TokenStream {
+    let mut methods = proc_macro2::TokenStream::new();
+    for item in &t.items {
+        let syn::TraitItem::Fn(f) = item else {
+            continue;
+        };
+        let Some(with) = trait_method_with_clause(&f.attrs) else {
+            continue;
+        };
+        let ident = f.sig.ident.clone();
+        mk_with_shim_fns(&syn::Visibility::Inherited, &f.sig, &with, &ident)
+            .to_tokens(&mut methods);
+    }
+    if methods.is_empty() {
+        return methods;
+    }
+
+    let span = t.ident.span();
+    let vis = &t.vis;
+    let orig = &t.ident;
+    let name = syn::Ident::new(&format!("{WITH_SHIM_TRAIT}{orig}"), span);
+    let (impl_generics, ty_generics, where_clause) = t.generics.split_for_impl();
+    let ty_generics = ty_generics.to_token_stream();
+    let mut blanket_generics = t.generics.clone();
+    blanket_generics.params.push(syn::parse_quote!(__VerusWithSelf: #orig #ty_generics + ?Sized));
+    let (blanket_impl_generics, _, _) = blanket_generics.split_for_impl();
+    quote_spanned!(span =>
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, unused)]
+        #[verus::internal(with_shim_trait)]
+        #vis trait #name #impl_generics : #orig #ty_generics #where_clause {
+            #methods
+        }
+
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, unused)]
+        #[verus::internal(with_shim_trait)]
+        impl #blanket_impl_generics #name #ty_generics for __VerusWithSelf #where_clause {}
+    )
+}
 
 /// The extra parameters of a `with` clause, as they appear in a shim signature.
 /// The patterns the user wrote (`Tracked(b)`) are not usable as parameter
@@ -1215,8 +1293,9 @@ fn with_shim_extra_params(with: &verus_syn::WithSpecOnFn) -> Vec<proc_macro2::To
 }
 
 /// The shims belonging to a free function, inherent method or trait method with
-/// a `with` clause. A trait impl inherits its shim from the trait's defaulted
-/// method and cannot declare a method the trait does not have.
+/// a `with` clause. A trait impl inherits its shim from the trait and cannot
+/// declare a method the trait does not have; a trait method's call-site shims go
+/// on the trait's shim trait, so only its conformance companion is emitted here.
 fn mk_with_shim_fns_for(
     vis: &syn::Visibility,
     sig: &syn::Signature,
@@ -1236,12 +1315,13 @@ fn mk_with_shim_fns_for(
     let Some(target_ident) = target_ident else {
         return stream;
     };
-    mk_with_shim_fns(vis, sig, with, &target_ident).to_tokens(&mut stream);
     // Only a trait method has impls that must be held to its clause; elsewhere
     // the shim and the bindings come from the same macro text and agree by
     // construction.
     if is_trait_fn {
         mk_with_arg_shim_fn(vis, sig, with, &target_ident).to_tokens(&mut stream);
+    } else {
+        mk_with_shim_fns(vis, sig, with, &target_ident).to_tokens(&mut stream);
     }
     stream
 }

@@ -410,6 +410,8 @@ pub(crate) enum Attr {
     // Companion carrying a trait method's `with` extras as its return type, so
     // that an impl's own extras can be checked against them by rustc
     WithArgShim,
+    // The trait holding a trait method's shims, and its blanket impl
+    WithShimTrait,
     // The statement holding that check; it exists for rustc only
     WithConform,
 }
@@ -931,6 +933,9 @@ pub(crate) fn parse_attrs(
                     AttrTree::Fun(_, arg, None) if arg == "with_arg_shim" => {
                         v.push(Attr::WithArgShim)
                     }
+                    AttrTree::Fun(_, arg, None) if arg == "with_shim_trait" => {
+                        v.push(Attr::WithShimTrait)
+                    }
                     AttrTree::Fun(_, arg, None) if arg == "with_conform" => {
                         v.push(Attr::WithConform)
                     }
@@ -1383,18 +1388,26 @@ pub(crate) fn is_with_shim(
     Ok(false)
 }
 
-/// Either kind of `with` shim: both exist only as call targets for rustc and
-/// neither may become a VIR function.
+/// Any `with` artifact rustc alone consumes: the two call-site shims, the
+/// conformance companion, and the shim trait holding a trait method's shims.
+/// None of them may become a VIR item.
 pub(crate) fn is_any_with_shim(attrs: &[Attribute]) -> Result<bool, VirErr> {
     for attr in parse_attrs(attrs, None)? {
         match attr {
-            Attr::WithShim | Attr::WithArgShim => {
+            Attr::WithShim | Attr::WithArgShim | Attr::WithShimTrait => {
                 return Ok(true);
             }
             _ => {}
         }
     }
     Ok(false)
+}
+
+pub(crate) fn is_with_shim_trait(attrs: &[Attribute]) -> bool {
+    let Ok(attrs) = parse_attrs(attrs, None) else {
+        return false;
+    };
+    attrs.iter().any(|attr| matches!(attr, Attr::WithShimTrait))
 }
 
 pub(crate) fn is_with_arg_shim(attrs: &[Attribute]) -> bool {

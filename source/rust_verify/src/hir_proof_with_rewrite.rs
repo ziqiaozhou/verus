@@ -25,10 +25,22 @@ const WITH_RET_SHIM_PREFIX: &str = "_VERUS_WITH_RET_";
 /// plants in an impl method's body, so this pass leaves it alone; a call the user
 /// wrote is rejected once the callee is resolved, in `fn_call_to_vir`.
 const WITH_ARG_SHIM_PREFIX: &str = "_VERUS_WITH_ARG_";
+/// A trait method's shims live on this sibling of the trait, blanket-implemented
+/// for every implementor, rather than on the trait itself.
+const WITH_SHIM_TRAIT_PREFIX: &str = "_VERUS_WITH_TR_";
 
 fn shim_name(target: Symbol, with_outputs: bool) -> Symbol {
     let prefix = if with_outputs { WITH_RET_SHIM_PREFIX } else { WITH_SHIM_PREFIX };
     Symbol::intern(&format!("{prefix}{target}"))
+}
+
+fn shim_trait_name(trait_name: Symbol) -> Symbol {
+    Symbol::intern(&format!("{WITH_SHIM_TRAIT_PREFIX}{trait_name}"))
+}
+
+fn is_with_shim_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    debug_assert!(!def_id.is_local());
+    crate::attributes::is_with_shim_trait(tcx.attrs_for_def(def_id))
 }
 
 pub(crate) fn hir_proof_with_rewrite<'tcx>(
@@ -109,14 +121,19 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
         }
     }
 
-    /// The shim standing in for `callee_def_id`: the sibling of the same parent
-    /// named `_VERUS_WITH_<name>` (or `_VERUS_WITH_RET_<name>`).
+    /// The shim standing in for `callee_def_id`, named `_VERUS_WITH_<name>` (or
+    /// `_VERUS_WITH_RET_<name>`): the sibling of the same parent, or, for a trait
+    /// method, the method of the trait's shim trait.
     fn find_shim(&self, callee_def_id: DefId, with_outputs: bool) -> Option<DefId> {
         if !matches!(self.tcx.def_kind(callee_def_id), DefKind::Fn | DefKind::AssocFn) {
             return None;
         }
         let name = shim_name(self.tcx.item_name(callee_def_id), with_outputs);
         let parent = self.tcx.opt_parent(callee_def_id)?;
+        let parent = match self.tcx.def_kind(parent) {
+            DefKind::Trait => self.find_shim_trait(parent)?,
+            _ => parent,
+        };
         let shim = match parent.as_local() {
             // Local child queries would re-enter `hir_crate`.
             Some(local_parent) => local_child_fn(self.owners, local_parent, name)?.to_def_id(),
@@ -137,6 +154,26 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
         };
         self.is_with_shim(shim).then_some(shim)
     }
+
+    /// The shim trait generated beside `trait_def_id`, holding the shims of its
+    /// methods. Absent when the trait declares no `with` clause at all.
+    fn find_shim_trait(&self, trait_def_id: DefId) -> Option<DefId> {
+        let name = shim_trait_name(self.tcx.item_name(trait_def_id));
+        let module = self.tcx.opt_parent(trait_def_id)?;
+        let shim_trait = match module.as_local() {
+            Some(local_module) => local_child_trait(self.owners, local_module, name)?.to_def_id(),
+            None => self
+                .tcx
+                .module_children(module)
+                .iter()
+                .find(|child| child.ident.name == name)
+                .and_then(|child| child.res.opt_def_id())?,
+        };
+        let is_shim_trait = parse_attrs_opt(self.attrs(shim_trait), None)
+            .iter()
+            .any(|a| matches!(a, Attr::WithShimTrait));
+        is_shim_trait.then_some(shim_trait)
+    }
 }
 
 /// The shim standing in for a function in another crate. Unlike `Ctxt::find_shim`
@@ -155,6 +192,10 @@ pub(crate) fn find_extern_with_shim<'tcx>(
     }
     let name = shim_name(tcx.item_name(callee_def_id), with_outputs);
     let parent = tcx.opt_parent(callee_def_id)?;
+    let parent = match tcx.def_kind(parent) {
+        DefKind::Trait => find_extern_shim_trait(tcx, parent)?,
+        _ => parent,
+    };
     let shim = match tcx.def_kind(parent) {
         DefKind::Trait | DefKind::Impl { .. } => tcx
             .associated_items(parent)
@@ -170,6 +211,18 @@ pub(crate) fn find_extern_with_shim<'tcx>(
     let is_shim =
         parse_attrs_opt(tcx.attrs_for_def(shim), None).iter().any(|a| matches!(a, Attr::WithShim));
     is_shim.then_some(shim)
+}
+
+/// The shim trait generated beside a foreign trait.
+fn find_extern_shim_trait<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId) -> Option<DefId> {
+    let name = shim_trait_name(tcx.item_name(trait_def_id));
+    let module = tcx.opt_parent(trait_def_id)?;
+    let shim_trait = tcx
+        .module_children(module)
+        .iter()
+        .find(|child| child.ident.name == name)
+        .and_then(|child| child.res.opt_def_id())?;
+    is_with_shim_trait(tcx, shim_trait).then_some(shim_trait)
 }
 
 /// Local children must bypass `module_children` and `associated_items`, which
@@ -199,6 +252,45 @@ fn local_child_fn<'tcx>(
         _ => return None,
     };
     children.into_iter().find(|child| local_fn_name(owners, *child) == Some(name))
+}
+
+/// A local trait declared in `parent` (a module or the crate root).
+fn local_child_trait<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    parent: LocalDefId,
+    name: Symbol,
+) -> Option<LocalDefId> {
+    let MaybeOwner::Owner(owner) = owners.get(parent)? else {
+        return None;
+    };
+    let item_ids = match owner.node() {
+        OwnerNode::Crate(module) => module.item_ids,
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Mod(_, module) => module.item_ids,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    item_ids
+        .iter()
+        .map(|id| id.owner_id.def_id)
+        .find(|child| local_trait_name(owners, *child) == Some(name))
+}
+
+fn local_trait_name<'tcx>(
+    owners: &IndexVec<LocalDefId, MaybeOwner<'tcx>>,
+    def_id: LocalDefId,
+) -> Option<Symbol> {
+    let MaybeOwner::Owner(owner) = owners.get(def_id)? else {
+        return None;
+    };
+    match owner.node() {
+        OwnerNode::Item(item) => match &item.kind {
+            rustc_hir::ItemKind::Trait { ident, .. } => Some(ident.name),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn local_fn_name<'tcx>(
@@ -241,10 +333,17 @@ fn rewrite_owner<'tcx>(
     let mut bodies = inner_owner.nodes.bodies.clone();
     let mut nodes = inner_owner.nodes.nodes.clone();
     let mut changed = false;
+    let mut extra_traits: Vec<(ItemLocalId, DefId)> = Vec::new();
 
     // Every body of the owner, which covers closures as well as the item itself.
     for (local_id, body) in inner_owner.nodes.bodies.iter() {
-        let mut folder = Folder { ctxt, updates: Vec::new(), reparents: Vec::new() };
+        let mut folder = Folder {
+            ctxt,
+            owner: inner_owner,
+            updates: Vec::new(),
+            reparents: Vec::new(),
+            extra_traits: Vec::new(),
+        };
         let Some(value) = folder.fold_expr(body.value) else {
             continue;
         };
@@ -264,6 +363,7 @@ fn rewrite_owner<'tcx>(
                 parented.parent = parent;
             }
         }
+        extra_traits.extend(folder.extra_traits.iter().copied());
         let body = tcx.hir_arena.alloc(rustc_hir::Body { params: body.params, value });
         bodies[local_id] = body;
         changed = true;
@@ -277,7 +377,7 @@ fn rewrite_owner<'tcx>(
         nodes,
         bodies,
     };
-    let trait_map = inner_owner
+    let mut trait_map: rustc_hir::ItemLocalMap<&'tcx [rustc_hir::TraitCandidate<'tcx>]> = inner_owner
         .trait_map
         .items()
         .map(|(&id, candidates)| {
@@ -286,6 +386,22 @@ fn rewrite_owner<'tcx>(
             (id, candidates)
         })
         .collect();
+    // A shim trait is not named by the user, so it is put in scope here rather
+    // than by an import. Reusing the recorded imports keeps the import that
+    // brought the original trait in from being reported as unused.
+    for (id, shim_trait) in extra_traits {
+        let mut candidates = trait_map.get(&id).map(|c| c.to_vec()).unwrap_or_default();
+        if candidates.iter().any(|c| c.def_id == shim_trait) {
+            continue;
+        }
+        let import_ids = candidates.first().map(|c| c.import_ids).unwrap_or(&[]);
+        candidates.push(rustc_hir::TraitCandidate {
+            def_id: shim_trait,
+            import_ids,
+            lint_ambiguous: false,
+        });
+        trait_map.insert(id, tcx.hir_arena.alloc_slice(&candidates));
+    }
     // `OwnerInfo` cannot be copied because `delayed_lints` is a `Steal`; the
     // original lints have already been emitted.
     let owner_info = tcx.hir_arena.alloc(rustc_hir::OwnerInfo {
@@ -305,8 +421,11 @@ fn rewrite_owner<'tcx>(
 /// Immutable HIR requires reallocating each ancestor of a rewritten expression.
 struct Folder<'a, 'tcx> {
     ctxt: &'a Ctxt<'a, 'tcx>,
+    owner: &'tcx rustc_hir::OwnerInfo<'tcx>,
     updates: Vec<(ItemLocalId, Node<'tcx>)>,
     reparents: Vec<(ItemLocalId, Reparent)>,
+    /// Shim traits that must be in scope at a rewritten method call.
+    extra_traits: Vec<(ItemLocalId, DefId)>,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
@@ -604,6 +723,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             ExprKind::MethodCall(seg, receiver, args, span) => {
                 let mut new_args = args.to_vec();
                 new_args.extend(extras);
+                self.bring_shim_traits_into_scope(call.hir_id.local_id);
                 let new_seg = self.rename_segment(seg, with_outputs);
                 ExprKind::MethodCall(new_seg, receiver, self.alloc_exprs(new_args), *span)
             }
@@ -640,6 +760,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // The qualifying type resolves later, so only the name can be changed
             // here; an absent shim then surfaces as an unresolved method.
             QPath::TypeRelative(ty, seg) => {
+                self.bring_shim_traits_into_scope(callee.hir_id.local_id);
                 QPath::TypeRelative(ty, self.rename_segment(seg, with_outputs))
             }
             QPath::Resolved(self_ty, path) => {
@@ -679,8 +800,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         Some(self.mk_expr(callee, ExprKind::Path(new_qpath)))
     }
 
-    /// A method's shim lives in the same trait or inherent impl, so the call
-    /// resolves the same way once the name is changed.
+    /// A trait method's shim lives on a shim trait the user never names, so
+    /// method resolution would not consider it. Every trait that was in scope for
+    /// the original call contributes its shim trait, if it has one; the receiver's
+    /// type is not known before type checking, so the choice among them is left to
+    /// method resolution, exactly as it is for the original call.
+    fn bring_shim_traits_into_scope(&mut self, id: ItemLocalId) {
+        let Some(candidates) = self.owner.trait_map.get(&id) else {
+            return;
+        };
+        let shim_traits: Vec<DefId> = candidates
+            .iter()
+            .filter_map(|candidate| self.ctxt.find_shim_trait(candidate.def_id))
+            .collect();
+        self.extra_traits.extend(shim_traits.into_iter().map(|def_id| (id, def_id)));
+    }
+
+    /// An inherent method's shim lives in the same impl, so the call resolves the
+    /// same way once the name is changed.
     fn rename_segment(
         &mut self,
         seg: &'tcx PathSegment<'tcx>,

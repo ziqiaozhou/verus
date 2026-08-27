@@ -109,6 +109,8 @@ pub(crate) struct Visitor {
     // `with` shims emitted while visiting the members of an impl or a trait
     additional_impl_items: Vec<ImplItem>,
     additional_trait_items: Vec<TraitItem>,
+    // Shim traits and their blanket impls, emitted next to the trait they serve
+    pending_shim_traits: Vec<Item>,
 }
 
 // For exec "let pat = init" declarations, recursively find Tracked(x), Ghost(x), x in pat
@@ -2361,6 +2363,7 @@ impl Visitor {
     }
 
     fn visit_items_post(&mut self, items: &mut Vec<Item>) {
+        items.append(&mut self.pending_shim_traits);
         let mut i = 0;
         while i < items.len() {
             if let Item::Enum(enum_) = &mut items[i] {
@@ -4459,6 +4462,7 @@ fn extract_with_types(block: &Block) -> WithTypes {
 
 pub(crate) const WITH_SHIM_PREFIX: &str = "_VERUS_WITH_";
 pub(crate) const WITH_RET_SHIM_PREFIX: &str = "_VERUS_WITH_RET_";
+pub(crate) const WITH_SHIM_TRAIT_PREFIX: &str = "_VERUS_WITH_TR_";
 
 /// The pieces of a shim signature: the executable parameters followed by the
 /// extras, and the return type the corresponding marker produces.
@@ -4543,9 +4547,8 @@ fn mk_with_shim_impl_item(
     verus_syn::parse::Parser::parse2(ImplItem::parse, item.to_token_stream()).ok()
 }
 
-/// A trait method's shim is a defaulted method of the same trait: the trait is
-/// necessarily in scope wherever the call compiles, every impl inherits the
-/// default, and a default body on the original method stays legal.
+/// A trait method's shim is a defaulted method of a separate shim trait that is
+/// blanket-implemented for every implementor of the original.
 fn mk_with_shim_trait_item(
     sig: &Signature,
     types: &WithTypes,
@@ -4562,6 +4565,58 @@ fn mk_with_shim_trait_item(
         }
     );
     verus_syn::parse::Parser::parse2(TraitItem::parse, item.to_token_stream()).ok()
+}
+
+/// The shim trait carrying the shims of a trait's methods, and its blanket impl.
+///
+/// The shims cannot stay in the user's trait: an impl of a *foreign* trait would
+/// never carry them, and keeping the trait's own surface free of them is what
+/// makes that extension possible. A blanket impl over `Self: Tr` puts them on
+/// every implementor, including `dyn Tr`, hence the `?Sized`. The trait's own
+/// generics and where clause are reproduced so that the shim signatures, which
+/// may mention them, still typecheck.
+fn mk_with_shim_trait(tr: &ItemTrait, shims: &[TraitItem]) -> Option<Vec<Item>> {
+    let orig = &tr.ident;
+    let name = syn::Ident::new(&format!("{WITH_SHIM_TRAIT_PREFIX}{orig}"), orig.span());
+    let vis = &tr.vis;
+    let vis: syn::Visibility = syn::parse_quote!(#vis);
+    let params = &tr.generics;
+    let mut generics: syn::Generics = syn::parse2(quote!(#params)).ok()?;
+    generics.where_clause = match &tr.generics.where_clause {
+        Some(w) => Some(syn::parse2(quote!(#w)).ok()?),
+        None => None,
+    };
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, ty_generics, where_clause) = (
+        impl_generics.to_token_stream(),
+        ty_generics.to_token_stream(),
+        where_clause.to_token_stream(),
+    );
+
+    let mut blanket_generics = generics.clone();
+    blanket_generics
+        .params
+        .push(syn::parse_quote!(__VerusWithSelf: #orig #ty_generics + ?Sized));
+    let (blanket_impl_generics, _, _) = blanket_generics.split_for_impl();
+
+    let shim_trait: syn::Item = syn::parse_quote_spanned!(tr.trait_token.span =>
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, unused)]
+        #[verus::internal(with_shim_trait)]
+        #vis trait #name #impl_generics : #orig #ty_generics #where_clause {
+            #(#shims)*
+        }
+    );
+    let blanket: syn::Item = syn::parse_quote_spanned!(tr.trait_token.span =>
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, unused)]
+        #[verus::internal(with_shim_trait)]
+        impl #blanket_impl_generics #name #ty_generics for __VerusWithSelf #where_clause {}
+    );
+    let parse = |item: syn::Item| {
+        verus_syn::parse::Parser::parse2(Item::parse, item.to_token_stream()).ok()
+    };
+    Some(vec![parse(shim_trait)?, parse(blanket)?])
 }
 
 fn with_shim_attrs() -> proc_macro2::TokenStream {
@@ -5356,7 +5411,18 @@ impl VisitMut for Visitor {
         let outer_shims = std::mem::take(&mut self.additional_trait_items);
         verus_syn::visit_mut::visit_item_trait_mut(self, tr);
         let shims = std::mem::replace(&mut self.additional_trait_items, outer_shims);
-        tr.items.extend(shims);
+        if shims.is_empty() {
+            return;
+        }
+        match mk_with_shim_trait(tr, &shims) {
+            Some(items) => self.pending_shim_traits.extend(items),
+            None => {
+                let err = "failed to generate the `with` shim trait for this trait";
+                self.pending_shim_traits.push(parse_quote_spanned!(tr.trait_token.span =>
+                    const _FAILED_TO_BUILD_WITH_SHIM_TRAIT: () = compile_error!(#err);
+                ));
+            }
+        }
     }
 
     fn visit_reveal_hide_mut(&mut self, _i: &mut verus_syn::RevealHide) {
@@ -5678,6 +5744,7 @@ pub(crate) fn rewrite_items_inner(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     visitor.visit_items_prefilter(items);
     let mut index = 0;
@@ -5721,6 +5788,7 @@ pub(crate) fn rewrite_impl_items(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     visitor.visit_impl_items_prefilter(&mut items.items, for_trait);
     for mut item in &mut items.items {
@@ -5758,6 +5826,7 @@ pub(crate) fn rewrite_expr(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     visitor.visit_expr_mut(&mut expr);
     expr.to_tokens(&mut new_stream);
@@ -5793,6 +5862,7 @@ pub(crate) fn rewrite_proof_decl(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     for mut ss in stmts {
         match ss {
@@ -5850,6 +5920,7 @@ pub(crate) fn rewrite_expr_node(erase_ghost: EraseGhost, inside_ghost: bool, exp
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     visitor.visit_expr_mut(expr);
 }
@@ -6106,6 +6177,7 @@ pub(crate) fn sig_specs_attr(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
 
     if let Some(pat) = &ret_pat {
@@ -6155,6 +6227,7 @@ pub(crate) fn while_loop_spec_attr(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     let mut spec_attr = spec_attr;
     visitor.visit_loop_spec(&mut spec_attr);
@@ -6191,6 +6264,7 @@ pub(crate) fn for_loop_spec_attr(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     let mut spec_attr = spec_attr;
     visitor.visit_loop_spec(&mut spec_attr);
@@ -6253,6 +6327,7 @@ pub(crate) fn proof_block(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     visitor.visit_block_mut(&mut invoke);
     invoke.to_tokens(&mut new_stream);
@@ -6281,6 +6356,7 @@ pub(crate) fn proof_macro_exprs(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     for element in &mut invoke.elements.elements {
         match element {
@@ -6315,6 +6391,7 @@ pub(crate) fn inv_au_macro_exprs(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
 
     invoke
@@ -6360,6 +6437,7 @@ pub(crate) fn proof_macro_explicit_exprs(
         additional_items: Vec::new(),
         additional_impl_items: Vec::new(),
         additional_trait_items: Vec::new(),
+        pending_shim_traits: Vec::new(),
     };
     for element in &mut invoke.elements.elements {
         match element {

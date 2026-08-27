@@ -3140,3 +3140,228 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+// ---- the shim trait ----
+//
+// A trait method's shims live on a separate trait, blanket-implemented for
+// every implementor of the original. The tests below pin the three things that
+// makes load-bearing: the shim trait is found without the user naming it, the
+// blanket impl reaches every receiver a call can have, and the shim's target is
+// recovered through the supertrait rather than from a sibling.
+
+// The user imports the trait, never the shim trait beside it, so a call can only
+// compile if the pass puts the shim trait in scope itself.
+test_verify_one_file! {
+    #[test] test_trait_shim_trait_not_imported code!{
+        use vstd::prelude::*;
+
+        mod defs {
+            use vstd::prelude::*;
+
+            #[verus_verify]
+            pub trait X {
+                #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+                fn f(&self, a: u64) -> u64;
+            }
+
+            #[verus_verify]
+            pub struct S;
+
+            #[verus_verify]
+            impl X for S {
+                #[verus_spec(with Ghost(g): Ghost<u64>)]
+                fn f(&self, a: u64) -> u64 { a }
+            }
+        }
+
+        use defs::{S, X};
+
+        #[verus_spec]
+        fn caller(s: &S) {
+            proof_with!{Ghost(3u64)}
+            let r = s.f(7);
+            proof!{ assert(r == 7); }
+
+            proof_with!{Ghost(3u64)}
+            let r2 = X::f(s, 8);
+            proof!{ assert(r2 == 8); }
+
+            proof_with!{Ghost(3u64)}
+            let r3 = S::f(s, 9);
+            proof!{ assert(r3 == 9); }
+        }
+    } => Ok(())
+}
+
+// A caller generic over the trait reaches the shim through the blanket impl, and
+// is checked against the *trait's* extras.
+test_verify_one_file! {
+    #[test] test_trait_shim_through_generic_bound code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verus_spec]
+        fn caller<T: X>(t: &T) {
+            proof_with!{Ghost(3u64)}
+            let r = t.f(7);
+            proof!{ assert(r == 7); }
+        }
+
+        #[verus_spec]
+        fn caller_wrong_type<T: X>(t: &T) {
+            proof_with!{Ghost(3u32)}
+            let r = t.f(7);
+        }
+    } => Err(e) => assert_rust_error_msg(e, "mismatched types")
+}
+
+// `dyn X` is an implementor too, which is why the blanket impl is over `?Sized`.
+test_verify_one_file! {
+    #[test] test_trait_shim_through_dyn_receiver code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verus_spec]
+        fn caller(t: &dyn X) {
+            proof_with!{Ghost(3u64)}
+            let r = t.f(7);
+            proof!{ assert(r == 7); }
+        }
+    } => Ok(())
+}
+
+// The shim trait reproduces the trait's generics and where clause, so a shim
+// signature that mentions them still typechecks, and the extras are still
+// checked against what the call site supplies.
+test_verify_one_file! {
+    #[test] test_trait_shim_generic_trait code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X<T> where T: Copy {
+            #[verus_spec(with Ghost(g): Ghost<T>)]
+            fn f(&self, a: T) -> T;
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl X<u64> for S {
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn f(&self, a: u64) -> u64 { a }
+        }
+
+        #[verus_spec]
+        fn caller(s: &S) {
+            proof_with!{Ghost(3u64)}
+            let r = s.f(7);
+        }
+
+        #[verus_spec]
+        fn caller_wrong_type(s: &S) {
+            proof_with!{Ghost(3u32)}
+            let r = s.f(7);
+        }
+    } => Err(e) => assert_rust_error_msg(e, "mismatched types")
+}
+
+// A method that needs `Self: Sized` keeps that bound on its shim, and a
+// by-value receiver still works through the blanket impl.
+test_verify_one_file! {
+    #[test] test_trait_shim_self_sized_method code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn consume(self, a: u64) -> u64 where Self: Sized;
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl X for S {
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn consume(self, a: u64) -> u64 where Self: Sized { a }
+        }
+
+        #[verus_spec]
+        fn caller(s: S) {
+            proof_with!{Ghost(3u64)}
+            let r = s.consume(7);
+            proof!{ assert(r == 7); }
+        }
+    } => Ok(())
+}
+
+// The shims are no longer items of the trait, so a method that takes one of the
+// reserved names is accepted there -- but it is in scope at every call site the
+// shim trait is, so a call that needs the shim is ambiguous rather than silently
+// redirected to the user's method.
+test_verify_one_file! {
+    #[test] test_trait_declaring_reserved_shim_name_is_ambiguous code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn f(&self, a: u64) -> u64;
+
+            #[verus_spec]
+            #[allow(non_snake_case)]
+            fn _VERUS_WITH_f(&self, a: u64, g: Ghost<u64>) -> u64 { 1 }
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl X for S {
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn f(&self, a: u64) -> u64 { a }
+        }
+
+        #[verus_spec]
+        fn caller(s: &S) {
+            proof_with!{Ghost(3u64)}
+            let r = s.f(7);
+            proof!{ assert(r == 7); }
+        }
+    } => Err(e) => assert_rust_error_msg(e, "multiple applicable items in scope")
+}
+
+// The trait's own surface is unchanged, so a trait method with a `with` clause
+// is still overridable and the impl is still held to the trait's clause by the
+// conformance companion, which stays on the trait.
+test_verify_one_file! {
+    #[test] test_trait_shim_impl_still_conforms code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn f(&self, a: u64) -> u64 { a }
+        }
+
+        #[verus_verify]
+        struct S;
+
+        #[verus_verify]
+        impl X for S {
+            #[verus_spec(with Ghost(g): Ghost<u32>)]
+            fn f(&self, a: u64) -> u64 { a }
+        }
+    } => Err(e) => assert_rust_error_msg(e, "mismatched types")
+}

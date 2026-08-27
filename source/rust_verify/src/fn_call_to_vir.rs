@@ -63,9 +63,49 @@ fn with_shim_attrs<'tcx>(
     }
 }
 
+/// The method a shim trait's shim stands in for: the associated function of the
+/// same name in one of the shim trait's supertraits, which is where the trait the
+/// shims were generated for sits. Sizedness bounds and any other supertrait
+/// without such a method are not candidates; anything but exactly one candidate
+/// is a shape this pass did not produce and is rejected rather than guessed at.
+fn find_original_in_supertrait(
+    tcx: rustc_middle::ty::TyCtxt<'_>,
+    shim_trait: DefId,
+    original_sym: rustc_span::Symbol,
+) -> Option<DefId> {
+    let mut found: Option<DefId> = None;
+    for (clause, _) in tcx.explicit_super_predicates_of(shim_trait).skip_binder() {
+        let Some(trait_pred) = clause.as_trait_clause() else {
+            continue;
+        };
+        let supertrait = trait_pred.def_id();
+        if supertrait == shim_trait {
+            continue;
+        }
+        let Some(assoc) = tcx
+            .associated_items(supertrait)
+            .filter_by_name_unhygienic(original_sym)
+            .find(|assoc| matches!(assoc.kind, rustc_middle::ty::AssocKind::Fn { .. }))
+        else {
+            continue;
+        };
+        if found.is_some_and(|f| f != assoc.def_id) {
+            return None;
+        }
+        found = Some(assoc.def_id);
+    }
+    found
+}
+
+fn is_with_shim_trait(tcx: rustc_middle::ty::TyCtxt<'_>, def_id: DefId) -> bool {
+    crate::attributes::is_with_shim_trait(with_shim_attrs(tcx, def_id))
+}
+
 /// The function a `with` shim stands in for: the sibling of the same name under
-/// the same parent. The shim's body is `unimplemented!()` and carries no trace of
-/// the target, so the name and the parent are the only link.
+/// the same parent, or — for a trait method, whose shims live on a separate
+/// blanket-implemented shim trait — the method of that trait's supertrait. The
+/// shim's body is `unimplemented!()` and carries no trace of the target, so the
+/// name and the parent are the only link.
 fn find_original_fn_for_shim(
     tcx: rustc_middle::ty::TyCtxt<'_>,
     shim_def_id: DefId,
@@ -78,6 +118,9 @@ fn find_original_fn_for_shim(
     let original_sym = rustc_span::Symbol::intern(original_name);
 
     let parent_def_id = tcx.opt_parent(shim_def_id)?;
+    if is_with_shim_trait(tcx, parent_def_id) {
+        return find_original_in_supertrait(tcx, parent_def_id, original_sym);
+    }
 
     let is_fn = |def_id: DefId| {
         matches!(
