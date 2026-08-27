@@ -1,0 +1,17 @@
+[package]
+name = "with_extras_bad_impl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vstd = { path = "../../../../../vstd" }
+with_extras_lib = { path = "../with_extras_lib" }
+
+[package.metadata.verus]
+verify = true
+# A downstream impl whose extra disagrees with the upstream trait's must be
+# rejected. Nothing but the `_VERUS_WITH_ARG_` companion relates the two, and an
+# upstream crate's own checking structurally cannot see this impl.
+test_expect_error = "expected `(Ghost<u32>,)`, found `(Ghost<u64>,)`"
+
+[workspace]

@@ -1,0 +1,11 @@
+[package]
+name = "with_extras_unverified"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+with_extras_lib = { path = "../../verified/with_extras_lib" }
+
+[package.metadata.verus]
+
+[workspace]

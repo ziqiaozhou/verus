@@ -1,0 +1,16 @@
+[package]
+name = "with_extras_bad_call"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vstd = { path = "../../../../../vstd" }
+with_extras_lib = { path = "../with_extras_lib" }
+
+[package.metadata.verus]
+verify = true
+# The extras a downstream caller may pass come from the upstream shim's
+# parameter list, so supplying the wrong number is an ordinary arity error.
+test_expect_error = "this function takes 2 arguments but 3 arguments were supplied"
+
+[workspace]

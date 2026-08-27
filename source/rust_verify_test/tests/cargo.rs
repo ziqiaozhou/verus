@@ -66,6 +66,26 @@ fn run_cargo_verus_for_dir(dir: &str) {
     args.push("--");
     args.extend(&extra_verus_args);
     let run = run_cargo_verus_with_target(&args, &test_dir, target_dir.path());
+
+    // A crate that must be rejected names the text its diagnostic has to
+    // contain, so the test cannot pass because the crate failed to build for
+    // an unrelated reason.
+    if let Some(expected) = find_verus_config(&toml_table, "test_expect_error") {
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            !run.status.success(),
+            "expected `cargo verus verify` in {} to fail, but it succeeded",
+            dir
+        );
+        assert!(
+            stderr.contains(expected),
+            "expected the failure in {} to mention {:?}, got:\n{}",
+            dir,
+            expected,
+            stderr
+        );
+        return;
+    }
     assert!(run.status.success());
 
     let mut args = vec!["build"];
