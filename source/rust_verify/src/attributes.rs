@@ -405,6 +405,13 @@ pub(crate) enum Attr {
     MigratePostconditionsWithMutRefs(bool),
     TrackedSwap,
     TrackedTakeOption,
+    // Shim for `with` clause checking (free functions)
+    WithShim,
+    // Companion carrying a trait method's `with` extras as its return type, so
+    // that an impl's own extras can be checked against them by rustc
+    WithArgShim,
+    // The statement holding that check; it exists for rustc only
+    WithConform,
 }
 
 fn get_trigger_arg(span: Span, attr_tree: &AttrTree) -> Result<u64, VirErr> {
@@ -920,6 +927,13 @@ pub(crate) fn parse_attrs(
                     AttrTree::Fun(_, arg, None) if arg == "loop_isolation_boundary" => {
                         v.push(Attr::LoopIsolationBoundary)
                     }
+                    AttrTree::Fun(_, arg, None) if arg == "with_shim" => v.push(Attr::WithShim),
+                    AttrTree::Fun(_, arg, None) if arg == "with_arg_shim" => {
+                        v.push(Attr::WithArgShim)
+                    }
+                    AttrTree::Fun(_, arg, None) if arg == "with_conform" => {
+                        v.push(Attr::WithConform)
+                    }
                     _ => {
                         return err_span(span, "unrecognized internal attribute");
                     }
@@ -1352,6 +1366,49 @@ pub(crate) fn is_internal_trait(
         }
     }
     Ok(false)
+}
+
+pub(crate) fn is_with_shim(
+    attrs: &[Attribute],
+    diagnostics: Option<&mut Vec<VirErrAs>>,
+) -> Result<bool, VirErr> {
+    for attr in parse_attrs(attrs, diagnostics)? {
+        match attr {
+            Attr::WithShim => {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Either kind of `with` shim: both exist only as call targets for rustc and
+/// neither may become a VIR function.
+pub(crate) fn is_any_with_shim(attrs: &[Attribute]) -> Result<bool, VirErr> {
+    for attr in parse_attrs(attrs, None)? {
+        match attr {
+            Attr::WithShim | Attr::WithArgShim => {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn is_with_arg_shim(attrs: &[Attribute]) -> bool {
+    let Ok(attrs) = parse_attrs(attrs, None) else {
+        return false;
+    };
+    attrs.iter().any(|attr| matches!(attr, Attr::WithArgShim))
+}
+
+pub(crate) fn is_with_conform(attrs: &[Attribute]) -> bool {
+    let Ok(attrs) = parse_attrs(attrs, None) else {
+        return false;
+    };
+    attrs.iter().any(|attr| matches!(attr, Attr::WithConform))
 }
 
 /// Get the attributes needed to determine if the item is external.

@@ -1754,6 +1754,7 @@ pub(crate) fn expr_to_vir_with_adjustments<'tcx>(
                     autospec: autospec_usage,
                     const_var: false,
                     assume_external_allowed: false,
+                    extra_ret_dest: false,
                 };
                 let call_target = CallTarget::Fun(
                     vir::ast::CallTargetKind::Static,
@@ -2377,6 +2378,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                             autospec: AutospecUsage::Final,
                             const_var: false,
                             assume_external_allowed: false,
+                            extra_ret_dest: false,
                         };
                         (
                             CallTarget::Fun(
@@ -2450,6 +2452,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                     autospec: autospec_usage,
                     const_var: false,
                     assume_external_allowed: false,
+                    extra_ret_dest: false,
                 };
                 let call_target = CallTarget::Fun(
                     vir::ast::CallTargetKind::Static,
@@ -2551,6 +2554,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                         autospec: autospec_usage,
                         const_var: false,
                         assume_external_allowed: false,
+                        extra_ret_dest: false,
                     };
                     let call_target = CallTarget::Fun(
                         vir::ast::CallTargetKind::Static,
@@ -3374,6 +3378,7 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                         autospec: AutospecUsage::Final,
                         const_var: false,
                         assume_external_allowed: false,
+                        extra_ret_dest: false,
                     };
                     // special fast path
                     let call_target = CallTarget::Fun(
@@ -4003,6 +4008,15 @@ pub(crate) fn stmt_to_vir<'tcx>(
                     return Ok(vec![]);
                 }
             }
+            // Skip declare_with() stmts (handled as extra params)
+            if bctx.declare_with_hir_ids.contains(&stmt.hir_id) {
+                return Ok(vec![]);
+            }
+            // The trait/impl `with` conformance check is a call the compiler
+            // region-checks and VIR never sees.
+            if crate::attributes::is_with_conform(bctx.ctxt.tcx.hir_attrs(stmt.hir_id)) {
+                return Ok(vec![]);
+            }
 
             let_stmt_to_vir(bctx, pat, init, els, bctx.ctxt.tcx.hir_attrs(stmt.hir_id))
         }
@@ -4285,6 +4299,7 @@ pub(crate) fn maybe_do_ptr_cast<'tcx>(
                 autospec: autospec_usage,
                 const_var: false,
                 assume_external_allowed: false,
+                extra_ret_dest: false,
             };
             let call_target = CallTarget::Fun(
                 vir::ast::CallTargetKind::Static,

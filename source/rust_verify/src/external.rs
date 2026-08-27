@@ -239,6 +239,25 @@ impl<'a, 'tcx> VisitMod<'a, 'tcx> {
     fn visit_general(&mut self, general_item: GeneralItem<'tcx>, hir_id: HirId, span: Span) {
         let attrs = self.ctxt.tcx.hir_attrs(hir_id);
 
+        // A `with` shim exists only so that rustc checks a call site's extras. It
+        // has no body worth verifying and, were it a VIR function, its lack of a
+        // contract would make it an unconditional axiom producing the original's
+        // return value.
+        if crate::attributes::is_any_with_shim(attrs).unwrap_or(false) {
+            let def_id = hir_id.expect_owner().to_def_id();
+            let path_opt =
+                def_id_to_vir_path_option(self.ctxt.tcx, Some(&self.ctxt.verus_items), def_id);
+            let path_string = match &path_opt {
+                Some(path) => vir::ast_util::path_as_friendly_rust_name(&path),
+                None => format!("{:?}", def_id),
+            };
+            self.items.push(CrateItem {
+                id: general_item.id(),
+                verif: VerifOrExternal::External { path: path_opt, path_string, explicit: true },
+            });
+            return;
+        }
+
         let eattrs = match self.ctxt.get_external_attrs(attrs) {
             Ok(eattrs) => eattrs,
             Err(err) => {
