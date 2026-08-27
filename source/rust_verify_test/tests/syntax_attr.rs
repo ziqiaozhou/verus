@@ -367,7 +367,7 @@ test_verify_one_file! {
     #[test] test_with code!{
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut int>,
+                Tracked(y): Tracked<&'a mut int>,
                 Ghost(w): Ghost<u32>,
                 -> z: Ghost<u32>
             requires
@@ -378,28 +378,30 @@ test_verify_one_file! {
                 ret == x,
                 z@ == x,
         )]
-        fn test_mut_tracked(x: u32) -> u32 {
+        fn test_mut_tracked<'a>(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
         #[verus_spec]
         fn test_call_mut_tracked(x: u32) {
             proof_decl!{
-                let tracked mut y = 0;
+                let tracked mut y: int = 0;
+                let ghost mut z: u32 = 0;
             }
-            {#[verus_spec(with Tracked(&mut y), Ghost(0) => _)]
+
+            {#[verus_spec(with Tracked(&mut y), Ghost(0u32) => _)]
             test_mut_tracked(1);
             };
 
-            if x < 100 && #[verus_spec(with Tracked(&mut y), Ghost(0) => _)]test_mut_tracked(x) == 0 {
+            if x < 100 && #[verus_spec(with Tracked(&mut y), Ghost(0u32) => _)]test_mut_tracked(x) == 0 {
                 return;
             }
 
-            #[verus_spec(with Tracked(&mut y), Ghost(0) => Ghost(z))]
+            #[verus_spec(with Tracked(&mut y), Ghost(0u32) => Ghost(z): Ghost<u32>)]
             let _ = test_mut_tracked(1);
 
             proof!{
@@ -412,37 +414,38 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     #[test] test_trait_signature code!{
+        #[verus_verify]
         trait X {
             #[verus_spec(ret =>
                 with
-                    Tracked(y): Tracked<&mut u32>,
+                    Tracked(y): Tracked<&'a mut u32>,
                     Ghost(w): Ghost<u32>,
                     -> z: Ghost<u32>
             )]
-            fn f(&self, x: u32) -> bool;
+            fn f<'a>(&self, x: u32) -> bool;
         }
-    } => Err(e) => assert_any_vir_error_msg(e, "`with` does not support trait")
+    } => Ok(())
 }
 
 test_verify_one_file! {
     #[test] test_unverified_code_signature code!{
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut int>,
+                Tracked(y): Tracked<&'a mut int>,
                 Ghost(w): Ghost<u32>,
                 -> z: Ghost<u32>
         )]
-        fn test_mut_tracked(x: u32) -> u32 {
+        fn test_mut_tracked<'a>(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
         #[verifier::external]
         fn external_call_with_dummy(x: u32) -> u32 {
-            #[verus_spec(with Tracked::assume_new(), Ghost::assume_new() => _)]
+            #[verus_spec(with Tracked::<&mut int>::assume_new(), Ghost::<u32>::assume_new() => _)]
             test_mut_tracked(0)
         }
 
@@ -457,15 +460,15 @@ test_verify_one_file! {
     #[test] test_verified_call_unverified_signature code!{
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut int>,
+                Tracked(y): Tracked<&'a mut int>,
                 Ghost(w): Ghost<u32>,
                 -> z: Ghost<u32>
         )]
-        fn test_mut_tracked(x: u32) -> u32 {
+        fn test_mut_tracked<'a>(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
@@ -483,7 +486,7 @@ test_verify_one_file! {
     #[test] test_with2 code!{
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut int>,
+                Tracked(y): Tracked<&'a mut int>,
                 Ghost(w): Ghost<u32>,
                 ->  z: Ghost<u32>
             requires
@@ -494,21 +497,21 @@ test_verify_one_file! {
                 ret == x,
                 z@ == x,
         )]
-        fn test_mut_tracked(x: u32) -> u32 {
+        fn test_mut_tracked<'a>(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            #[verus_spec(with |= Ghost(x))]
             x
         }
 
         #[verus_spec]
         fn test_cal_mut_tracked(x: u32) {
             proof_decl!{
-                let ghost mut z = 0u32;
-                let tracked mut y = 0;
+                let ghost mut z: u32 = 0u32;
+                let tracked mut y: int = 0;
             }
-            if #[verus_spec(with Tracked(&mut y), Ghost(0) => Ghost(z))] test_mut_tracked(1) == 0 {
+            if #[verus_spec(with Tracked(&mut y), Ghost(0u32) => Ghost(z): Ghost<u32>)] test_mut_tracked(1) == 0 {
                 proof!{
                     assert(z == 1);
                 }
@@ -516,6 +519,7 @@ test_verify_one_file! {
             }
 
             proof!{
+                assert(z == 1);
                 assert(y == 1);
             }
         }
@@ -526,7 +530,7 @@ test_verify_one_file! {
     #[test] test_proof_with code!{
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut int>,
+                Tracked(y): Tracked<&'a mut int>,
                 Ghost(w): Ghost<u32>,
                 ->  z: Ghost<u32>
             requires
@@ -537,22 +541,22 @@ test_verify_one_file! {
                 ret == x,
                 z@ == x,
         )]
-        fn test_mut_tracked(x: u32) -> u32 {
+        fn test_mut_tracked<'a>(x: u32) -> u32 {
             proof!{
                 *y = x as int;
+                z = Ghost(x);
             }
-            proof_with!{|= Ghost(x)}
             x
         }
 
         #[verus_spec]
         fn test_cal_mut_tracked(x: u32) {
             proof_decl!{
-                let ghost mut z = 0u32;
-                let tracked mut y = 0;
+                let ghost mut z: u32 = 0u32;
+                let tracked mut y: int = 0;
             }
             if {
-                proof_with!{Tracked(&mut y), Ghost(0) => Ghost(z)} test_mut_tracked(1)
+                proof_with!{Tracked(&mut y), Ghost(0u32) => Ghost(z): Ghost<u32>} test_mut_tracked(1)
             } == 0 {
                 proof!{
                     assert(z == 1);
@@ -571,16 +575,16 @@ test_verify_one_file! {
     #[test] test_proof_with_try code!{
         use vstd::prelude::*;
         #[verus_spec(
-            with Tracked(y): Tracked<&mut u32>
+            with Tracked(y): Tracked<&'a mut u32>
         )]
-        fn f() -> Result<(), ()> {
+        fn f<'a>() -> Result<(), ()> {
             Ok(())
         }
 
         #[verus_spec(
-            with Tracked(y): Tracked<&mut u32>
+            with Tracked(y): Tracked<&'a mut u32>
         )]
-        fn test_try_call() -> Result<(), ()> {
+        fn test_try_call<'a>() -> Result<(), ()> {
             proof_with!{Tracked(y)}
             let _ = f()?;
             Ok(())
@@ -909,13 +913,13 @@ test_verify_one_file! {
         impl Foo {
             #[verus_spec(ret =>
                 with
-                    Tracked(c): Tracked<&mut ()>
+                    Tracked(c): Tracked<&'a mut ()>
                 requires
                     true,
                 ensures
                     ret == 1,
             )]
-            fn test(a: u64, b: u64) -> u64 {
+            fn test<'a>(a: u64, b: u64) -> u64 {
                 1
             }
         }
@@ -932,13 +936,13 @@ test_verify_one_file! {
             #[verus_verify]
             #[verus_spec(ret =>
                 with
-                    Tracked(c): Tracked<&mut ()>
+                    Tracked(c): Tracked<&'a mut ()>
                 requires
                     true,
                 ensures
                     ret == 1,
             )]
-            fn test(a: u64, b: u64) -> u64 {
+            fn test<'a>(a: u64, b: u64) -> u64 {
                 1
             }
         }
@@ -1151,23 +1155,23 @@ test_verify_one_file! {
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
                 Ghost(w): Ghost<u32>,
             requires
                 x < 100,
             ensures
         )]
-        fn foo(x: u32) -> u32 {
+        fn foo<'a>(x: u32) -> u32 {
             (x + 1)
         }
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
             requires
                 x < 100,
         )]
-        fn bar(x: u32) -> u32 {
+        fn bar<'a>(x: u32) -> u32 {
             (x + 1)
         }
     } => Ok(())
@@ -1179,7 +1183,7 @@ test_verify_one_file! {
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
                 Ghost(w): Ghost<u32>,
                     -> z: Ghost<u32>,
             requires
@@ -1188,14 +1192,14 @@ test_verify_one_file! {
                 ret == x + 1,
                 z@ == x,
             )]
-        fn foo(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+        fn foo<'a>(x: u32) -> u32 {
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
                 Ghost(w): Ghost<u32>
                     -> z: Ghost<u32>,
             requires
@@ -1204,14 +1208,14 @@ test_verify_one_file! {
                 ret == x + 1,
                 z@ == x,
         )]
-        fn bar(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+        fn bar<'a>(x: u32) -> u32 {
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
                 Ghost(w): Ghost<u32>,
                     -> z: Ghost<u32>
             requires
@@ -1220,14 +1224,14 @@ test_verify_one_file! {
                 ret == x + 1,
                 z@ == x,
         )]
-        fn baz(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+        fn baz<'a>(x: u32) -> u32 {
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
 
         #[verus_spec(ret =>
             with
-                Tracked(y): Tracked<&mut u32>,
+                Tracked(y): Tracked<&'a mut u32>,
                 Ghost(w): Ghost<u32>
                     -> z: Ghost<u32>
             requires
@@ -1236,8 +1240,8 @@ test_verify_one_file! {
                 ret == x + 1,
                 z@ == x,
         )]
-        fn qux(x: u32) -> u32 {
-            proof_with!(|= Ghost(x));
+        fn qux<'a>(x: u32) -> u32 {
+            proof!{ z = Ghost(x); }
             (x + 1)
         }
     } => Ok(())
@@ -1255,13 +1259,20 @@ test_verify_one_file! {
             ensures ret == 1u64, y@ == 3u8, z@ == 2u32,
         )]
         fn test() -> u64 {
-            proof_with!{|= (Ghost(3u8), Ghost(2u32))}
+            proof!{
+                y = Ghost(3u8);
+                z = Ghost(2u32);
+            }
             1
         }
 
         #[verus_spec]
         fn call_test() {
-            proof_with!{=> (Ghost(y), Ghost(z))}
+            proof_decl!{
+                let ghost y: u8;
+                let ghost z: u32;
+            }
+            proof_with!{=> (Ghost(y), Ghost(z)): (Ghost<u8>, Ghost<u32>)}
             let r = test();
             proof!{
                 assert(r == 1);
@@ -1487,7 +1498,7 @@ test_verify_one_file! {
             pub y: Ghost<int>,
         }
 
-        // Test combined struct fields and |= follow output in a single proof_with!
+        // Test combined struct fields and output assignment
         #[verus_spec(s =>
             with
                 -> g: Ghost<int>
@@ -1500,19 +1511,18 @@ test_verify_one_file! {
         )]
         fn make_struct_with_follows(x: u32) -> TestStruct
         {
-            proof_decl! {
-                let ghost g = 3 * x;
+            proof! {
+                g = Ghost(3 * x as int);
             }
             proof_with! {
                 y: Ghost(2 * (x + 1)),
-                |= Ghost(g)
             }
             TestStruct{
                 x: x + 1,
             }
         }
 
-        // Test combined struct fields and |= follow output with let binding
+        // Test combined struct fields and output assignment with let binding
         #[verus_spec(s =>
             with
                 -> g: Ghost<int>
@@ -1525,14 +1535,13 @@ test_verify_one_file! {
         )]
         fn make_struct_with_follows_let(x: u32) -> TestStruct
         {
-            proof_decl! {
-                let ghost g = 3 * x;
+            proof! {
+                g = Ghost(3 * x as int);
             }
             proof_with! { y: Ghost(2 * (x + 1))}
             let s = TestStruct{
                 x: x + 1,
             };
-            proof_with! { |= Ghost(g) }
             s
         }
     } => Ok(())
@@ -1562,9 +1571,31 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     // Regression test for https://github.com/verus-lang/verus/issues/2283
-    // proof_with! with only |= follow output before a struct constructor
-    // should not attempt to parse the follow as struct fields.
+    // Assigning to the named output before a struct constructor should work
+    // without the `|=` follow syntax.
     #[test] test_proof_with_follows_only_before_struct code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        pub struct S {}
+
+        #[verus_spec(
+            with
+                -> res: Ghost<int>
+            ensures
+                res == 0,
+        )]
+        pub fn f() -> S {
+            proof!{ res = Ghost(0int); }
+            S {}
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    // The `|= ...` follow-expression syntax is no longer supported.
+    // Users should assign directly to the named output via `proof!{ name = ... }`.
+    #[test] test_proof_with_follows_rejected code!{
         use vstd::prelude::*;
 
         #[verus_verify]
@@ -1580,7 +1611,7 @@ test_verify_one_file! {
             proof_with!(|= Ghost(0int));
             S {}
         }
-    } => Ok(())
+    } => Err(e) => assert_any_vir_error_msg(e, "the `|= ...` follow-expression is no longer supported")
 }
 
 test_verify_one_file! {
