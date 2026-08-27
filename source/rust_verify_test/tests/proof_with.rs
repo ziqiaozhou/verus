@@ -563,6 +563,26 @@ test_verify_one_file! {
     } => Err(e) => assert_vir_error_msg(e, "`callee` is not declared with extra ghost/tracked arguments")
 }
 
+// The name is reserved only when the macro is actually generating the shim,
+// which happens exactly when `callee` carries a `with` clause. A hand-written
+// shim then collides, and rustc blames the `with` clause that generated it.
+test_verify_one_file! {
+    #[test] test_hand_written_shim_collides_with_generated_shim code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with Ghost(c): Ghost<u64>)]
+        fn callee(a: u64) -> u64 { 1 }
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, unused)]
+        #[verus::internal(with_shim)]
+        #[verifier::external_body]
+        fn _VERUS_WITH_callee(a: u64, __verus_with_in_0: Ghost<u64>) -> u64 {
+            unimplemented!()
+        }
+    } => Err(err) => assert_rust_error_msg(err, "the name `_VERUS_WITH_callee` is defined multiple times")
+}
+
 // ---- declare_ret_with / proof_with_ret tests ----
 
 test_verify_one_file! {
