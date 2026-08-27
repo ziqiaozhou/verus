@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use rustc_ast::IsAuto;
+use rustc_hir::def_id::DefId;
 use rustc_hir::{
     ConstItemRhs, ForeignItem, ForeignItemId, ForeignItemKind, ImplItemKind, Item, ItemId,
     ItemKind, MaybeOwner, Mutability, OwnerNode,
@@ -464,6 +465,10 @@ pub fn crate_to_vir<'a, 'tcx>(
 
     // Find all modules that contain at least 1 item of interest
     let mut used_modules = HashSet::<Path>::new();
+    // Before any body is lowered, so that a call is not rejected for being
+    // lowered ahead of its callee's definition.
+    crate::rust_to_vir_func::pre_register_local_with_params(&ctxt);
+
     for crate_item in crate_items.items.iter() {
         match &crate_item.verif {
             VerifOrExternal::VerusAware {
@@ -602,6 +607,13 @@ pub fn crate_to_vir<'a, 'tcx>(
         }
     }
 
+    // Only when nothing else failed: an item whose own `with` clause was
+    // rejected never registered its extras, and would be reported a second time
+    // here as declaring none.
+    if errors.is_empty() {
+        check_trait_impl_with_clauses(&ctxt, &mut errors);
+    }
+
     if errors.len() > 0 {
         return Err(errors);
     }
@@ -631,4 +643,67 @@ pub fn crate_to_vir<'a, 'tcx>(
     let warning_ctx = WarningCtx { fun_warn_configs };
 
     Ok((ctxt, warning_ctx, Arc::new(vir)))
+}
+
+/// The types of a trait impl method's extras are checked against the trait
+/// method's by rustc, through the `_VERUS_WITH_ARG_` companion the macro plants
+/// in the impl's body. Their *number* is not: a count the companion cannot see
+/// (an impl written with a bare `declare_with()`, or extra outputs) would reach
+/// `vir::modes` and trip its assertion, so count them here.
+///
+/// The comparison is driven from the impl methods rustc knows about, not from
+/// the keys of the registries: an impl method that declares *no* extras never
+/// registers, and it is exactly that absence — a missing `with` clause against a
+/// trait method that has one — we are looking for.
+fn check_trait_impl_with_clauses<'tcx>(ctxt: &Context<'tcx>, errors: &mut Vec<VirErr>) {
+    let tcx = ctxt.tcx;
+    let declared = |map: &HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>, id: DefId| {
+        map.get(&id).cloned().unwrap_or_default()
+    };
+    let mut ids: Vec<DefId> = Vec::new();
+    for impl_item_id in tcx.hir_crate_items(()).impl_items() {
+        let id = impl_item_id.owner_id.to_def_id();
+        if matches!(tcx.def_kind(id), rustc_hir::def::DefKind::AssocFn) {
+            ids.push(id);
+        }
+    }
+    ids.sort_by_key(|id| (id.krate, id.index));
+    let maps = [
+        (&ctxt.declare_with_params, "extra ghost/tracked argument"),
+        (&ctxt.declare_ret_with_params, "extra ghost/tracked return value"),
+    ];
+    for (map, what) in maps {
+        for id in ids.iter().copied() {
+            let Some(trait_method) = tcx.associated_item(id).trait_item_def_id() else {
+                continue;
+            };
+            // The trait may be in another crate, where the extras are only
+            // visible through its shim.
+            crate::rust_to_vir_func::register_extern_with_params(ctxt, trait_method);
+            let impl_id = tcx.parent(id);
+            if !matches!(tcx.def_kind(impl_id), rustc_hir::def::DefKind::Impl { of_trait: true }) {
+                continue;
+            }
+            let ours = declared(&map.borrow(), id);
+            let theirs = declared(&map.borrow(), trait_method);
+            let span = tcx.def_span(id);
+            if ours.len() != theirs.len() {
+                let mut msg = format!(
+                    "this method declares {} {}(s) but the trait method declares {}",
+                    ours.len(),
+                    what,
+                    theirs.len()
+                );
+                // A call site is checked against the trait's shim, which only
+                // exists if the trait method itself declares the extras.
+                if theirs.is_empty() {
+                    msg.push_str(
+                        "; a `with` clause must be declared on the trait method, \
+                         where callers can see it, not only on the impl",
+                    );
+                }
+                errors.push(crate::util::err_span_bare(span, msg));
+            }
+        }
+    }
 }

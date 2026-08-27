@@ -74,6 +74,10 @@ pub(crate) fn external_trait_specification_of<'tcx>(
     let mut ex_trait_ref_for: Option<TraitRef> = None;
     for trait_item_id in trait_items {
         let trait_item = tcx.hir_trait_item(*trait_item_id);
+        // A `with` shim is a call target for rustc only; VIR never sees it.
+        if crate::attributes::is_any_with_shim(tcx.hir_attrs(trait_item.hir_id()))? {
+            continue;
+        }
         let TraitItem { ident, kind, span, .. } = trait_item;
         match kind {
             TraitItemKind::Type(_generic_bounds, None) => {
@@ -245,6 +249,10 @@ pub(crate) fn translate_trait<'tcx>(
 
     for trait_item_id in trait_items {
         let trait_item = tcx.hir_trait_item(*trait_item_id);
+        // A `with` shim is a call target for rustc only; VIR never sees it.
+        if crate::attributes::is_any_with_shim(tcx.hir_attrs(trait_item.hir_id()))? {
+            continue;
+        }
         let TraitItem {
             ident,
             owner_id,

@@ -221,6 +221,7 @@ fn handle_autospec<'tcx>(
                 typ_bounds: functionx.typ_bounds.clone(),
                 params: Arc::new(spec_params),
                 ret: spec_ret_param,
+                extra_ret_params: Arc::new(vec![]),
                 ens_has_return: true,
                 require: functionx.require.clone(), // requires becomes recommends
                 ensure: (Arc::new(vec![]), Arc::new(vec![])),
@@ -293,6 +294,7 @@ fn mk_bctx<'tcx>(
     migrate_postcondition_vars: Option<HashSet<VarIdent>>,
     param_names: Vec<VarIdent>,
     external_opaque_type_map: Option<HashMap<Path, Path>>,
+    declare_with_hir_ids: HashSet<HirId>,
 ) -> BodyCtxt<'tcx> {
     BodyCtxt {
         ctxt: ctxt.clone(),
@@ -313,6 +315,507 @@ fn mk_bctx<'tcx>(
         unwrap_param_map: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
         external_opaque_type_map,
         label_map: std::rc::Rc::new(std::cell::RefCell::new((HashMap::new(), 0))),
+        pending_tracked_args: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        declare_with_hir_ids: std::rc::Rc::new(declare_with_hir_ids),
+    }
+}
+
+/// The written type argument of `declare_with::<T>()`, when the call site spells
+/// it out with a turbofish instead of annotating the `let`.
+fn declare_with_turbofish_ty<'tcx>(init: &Expr<'tcx>) -> Option<&'tcx rustc_hir::Ty<'tcx>> {
+    let ExprKind::Call(fun, _) = &init.kind else {
+        return None;
+    };
+    let ExprKind::Path(rustc_hir::QPath::Resolved(None, path)) = &fun.kind else {
+        return None;
+    };
+    let args = path.segments.last()?.args?;
+    args.args.iter().find_map(|arg| match arg {
+        rustc_hir::GenericArg::Type(ty) => Some(ty.as_unambig_ty()),
+        _ => None,
+    })
+}
+
+/// A lifetime the user did not write is resolved in the callee's own body rather
+/// than being fixed by the caller, so an extra declared with one could outlive
+/// what the caller actually granted.
+fn elided_lifetime_in_ty<'tcx>(ty: &'tcx rustc_hir::Ty<'tcx>) -> Option<Span> {
+    struct Finder {
+        found: Option<Span>,
+    }
+    impl<'v> rustc_hir::intravisit::Visitor<'v> for Finder {
+        fn visit_lifetime(&mut self, lifetime: &'v rustc_hir::Lifetime) {
+            if lifetime.syntax != rustc_hir::LifetimeSyntax::ExplicitBound {
+                self.found.get_or_insert(lifetime.ident.span);
+            }
+        }
+    }
+    use rustc_hir::intravisit::VisitorExt;
+    let mut finder = Finder { found: None };
+    finder.visit_ty_unambig(ty);
+    finder.found.map(|span| if span.is_dummy() { ty.span } else { span })
+}
+
+/// A trait method without a body carries its `with` clause on the `VERUS_SPEC__`
+/// companion the macro generates, but call sites resolve to the method itself,
+/// so the extras must be registered under both.
+fn declare_with_registration_ids<'tcx>(ctxt: &Context<'tcx>, id: DefId) -> Vec<DefId> {
+    let mut ids = vec![id];
+    let name = ctxt.tcx.item_name(id).as_str().to_string();
+    if let Some(original) = name.strip_prefix(VERUS_SPEC) {
+        let parent = ctxt.tcx.parent(id);
+        if matches!(ctxt.tcx.def_kind(parent), rustc_hir::def::DefKind::Trait) {
+            for assoc in ctxt.tcx.associated_items(parent).in_definition_order() {
+                if assoc.name().as_str() == original {
+                    ids.push(assoc.def_id);
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Register every local function's `with` extras before any body is lowered.
+///
+/// Extras are discovered by scanning a function's own body, and bodies are
+/// lowered in item order, so a caller lowered before its callee would otherwise
+/// see a callee with no extras — making a correct program's acceptance depend on
+/// definition order.
+pub(crate) fn pre_register_local_with_params<'tcx>(ctxt: &Context<'tcx>) {
+    let tcx = ctxt.tcx;
+    for local in tcx.hir_body_owners() {
+        let def_id = local.to_def_id();
+        if !matches!(
+            tcx.def_kind(def_id),
+            rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn
+        ) {
+            continue;
+        }
+        let body = tcx.hir_body_owned_by(local);
+        let mut targets = declare_with_registration_ids(ctxt, def_id);
+
+        // An `assume_specification` proxy declares extras on behalf of the
+        // function it proxies, which is what call sites resolve to.
+        let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(local));
+        let is_proxy =
+            ctxt.get_verifier_attrs(attrs).map_or(false, |vattrs| vattrs.external_fn_specification);
+        if is_proxy {
+            if let Some(sig) = tcx.hir_node_by_def_id(local).fn_sig() {
+                if let Ok((external_id, _, _)) =
+                    get_external_def_id(ctxt, def_id, &body.id(), body, &FnOrConstSig::sig(sig))
+                {
+                    targets.push(external_id);
+                }
+            }
+        }
+
+        // Errors here are reported when the body is lowered; this pass only
+        // registers what it can read.
+        if let Ok((extras, _)) = pre_scan_declare_with_params(ctxt, def_id, body) {
+            register_with_modes(ctxt, &ctxt.declare_with_params, &targets, &extras);
+        }
+        if let Ok((extras, _)) = pre_scan_declare_ret_with_params(ctxt, def_id, body) {
+            register_with_modes(ctxt, &ctxt.declare_ret_with_params, &targets, &extras);
+        }
+    }
+}
+
+fn register_with_modes<'tcx>(
+    _ctxt: &Context<'tcx>,
+    map: &std::cell::RefCell<
+        std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>,
+    >,
+    targets: &[DefId],
+    extras: &[(vir::ast::Param, Option<Mode>, rustc_middle::ty::Ty<'tcx>)],
+) {
+    if extras.is_empty() {
+        return;
+    }
+    let modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> = extras
+        .iter()
+        .map(|(p, _, ty)| (matches!(p.x.unwrapped_info, Some((Mode::Proof, _))), *ty))
+        .collect();
+    for target in targets {
+        map.borrow_mut().insert(*target, modes.clone());
+    }
+}
+
+/// `Ghost<T>`/`Tracked<T>` seen as a `rustc_middle` type: `Some(is_tracked)`.
+///
+/// This is the cross-crate view of "what is an extra", and it is narrower than
+/// the local one: `is_mut_ty` also looks through a `&mut`, while this matches
+/// only a wrapper at the top. The two therefore disagree in principle, and
+/// because `extras_of` is all-or-nothing a single unmatched extra drops the
+/// whole list, leaving the callee looking as if it takes none. That fails
+/// closed — the call site is rejected rather than mis-lowered — and no surface
+/// is known that reaches it, since a `with` extra must be written as a
+/// `Ghost`/`Tracked` binding. Recorded here so the divergence is a known
+/// limitation rather than a later mystery.
+fn with_wrapper_is_tracked<'tcx>(
+    ctxt: &Context<'tcx>,
+    ty: rustc_middle::ty::Ty<'tcx>,
+) -> Option<bool> {
+    let rustc_middle::ty::TyKind::Adt(adt_def, _) = ty.kind() else {
+        return None;
+    };
+    match ctxt.get_verus_item(adt_def.did()) {
+        Some(VerusItem::BuiltinType(BuiltinTypeItem::Tracked)) => Some(true),
+        Some(VerusItem::BuiltinType(BuiltinTypeItem::Ghost)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Recover a foreign callee's extras from its shim.
+///
+/// A local function's extras come from scanning its body for `declare_with()`,
+/// which is impossible for another crate. The shim carries the same information
+/// in its signature — the extras follow the executable parameters — and is the
+/// very item rustc checked the call site against, so reading it here keeps the
+/// caller's two views of the callee consistent by construction.
+pub(crate) fn register_extern_with_params<'tcx>(ctxt: &Context<'tcx>, f: DefId) {
+    if f.is_local() || !ctxt.extern_with_scanned.borrow_mut().insert(f) {
+        return;
+    }
+    let tcx = ctxt.tcx;
+    let extras_of =
+        |tys: &[rustc_middle::ty::Ty<'tcx>]| -> Option<Vec<(bool, rustc_middle::ty::Ty<'tcx>)>> {
+            tys.iter().map(|ty| Some((with_wrapper_is_tracked(ctxt, *ty)?, *ty))).collect()
+        };
+
+    if let Some(shim) = crate::hir_proof_with_rewrite::find_extern_with_shim(tcx, f, false) {
+        let n_exec = tcx.fn_sig(f).skip_binder().inputs().skip_binder().len();
+        let inputs = tcx.fn_sig(shim).skip_binder().inputs().skip_binder();
+        if let Some(extras) = inputs.get(n_exec..).and_then(extras_of) {
+            if !extras.is_empty() {
+                ctxt.declare_with_params.borrow_mut().insert(f, extras);
+            }
+        }
+    }
+
+    // The extra outputs live in the second component of the `_VERUS_WITH_RET_`
+    // shim's `(ret, (extras...))` return type.
+    if let Some(shim) = crate::hir_proof_with_rewrite::find_extern_with_shim(tcx, f, true) {
+        let output = tcx.fn_sig(shim).skip_binder().output().skip_binder();
+        if let rustc_middle::ty::TyKind::Tuple(parts) = output.kind() {
+            if let Some(rustc_middle::ty::TyKind::Tuple(outs)) = parts.get(1).map(|t| t.kind()) {
+                let outs: Vec<_> = outs.iter().collect();
+                if let Some(extras) = extras_of(&outs) {
+                    if !extras.is_empty() {
+                        ctxt.declare_ret_with_params.borrow_mut().insert(f, extras);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Lower the written type of a `with` extra.
+///
+/// The type must be written out and must name its lifetimes: `lower_ty`
+/// preserves the function's own regions, while typeck's `node_type()` erases
+/// them, and an elided lifetime is inferred in the callee rather than taken from
+/// the caller, which would let the extra escape to `'static`. Both `declare_with`
+/// and `declare_ret_with` go through here so the rule cannot hold on one path
+/// and lapse on the other.
+fn lower_written_with_ty<'tcx>(
+    ctxt: &Context<'tcx>,
+    written_ty: Option<&'tcx rustc_hir::Ty<'tcx>>,
+    what: &str,
+    span: Span,
+) -> Result<rustc_middle::ty::Ty<'tcx>, VirErr> {
+    let Some(written_ty) = written_ty else {
+        return err_span(
+            span,
+            format!("{what}() needs its type written out, as `let x: Tracked<T> = {what}();`"),
+        );
+    };
+    if let Some(span) = elided_lifetime_in_ty(written_ty) {
+        return err_span(
+            span,
+            "the type of a `with` parameter must name its lifetimes explicitly, because an elided lifetime here is inferred in the callee rather than taken from the caller",
+        );
+    }
+    Ok(rustc_hir_analysis::lower_ty(ctxt.tcx, written_ty))
+}
+
+/// Pre-scan the HIR body for `declare_with()` let-stmts.
+/// Returns (extra_vir_params, hir_ids_to_skip) so that:
+/// 1. Extra params can be appended to `vir_params` before body conversion
+/// 2. `stmt_to_vir` can skip these let-stmts during body conversion
+fn pre_scan_declare_with_params<'tcx>(
+    ctxt: &Context<'tcx>,
+    id: DefId,
+    body: &Body<'tcx>,
+) -> Result<
+    (Vec<(vir::ast::Param, Option<Mode>, rustc_middle::ty::Ty<'tcx>)>, HashSet<HirId>),
+    VirErr,
+> {
+    let mut extra_params = Vec::new();
+    let mut hir_ids = HashSet::new();
+
+    // Navigate into the body's top-level block
+    let stmts = match &body.value.kind {
+        ExprKind::Block(block, _) => block.stmts,
+        _ => return Ok((extra_params, hir_ids)),
+    };
+
+    for stmt in stmts {
+        if let rustc_hir::StmtKind::Let(rustc_hir::LetStmt {
+            pat,
+            init: Some(init),
+            ty: hir_ty,
+            ..
+        }) = &stmt.kind
+        {
+            // Check if init is a call to declare_with()
+            let verus_item = match &init.kind {
+                ExprKind::Call(fun, _) => match &fun.kind {
+                    ExprKind::Path(rustc_hir::QPath::Resolved(
+                        None,
+                        rustc_hir::Path { res: rustc_hir::def::Res::Def(_, fun_id), .. },
+                    )) => ctxt.get_verus_item(*fun_id).cloned(),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let is_declare_with = match verus_item {
+                Some(VerusItem::DeclareWith) => true,
+                _ => false,
+            };
+            if !is_declare_with {
+                continue;
+            }
+
+            // Require simple binding pattern
+            let (is_mut_var, name) = pat_to_mut_var(pat)?;
+
+            // Either the let annotation or the turbofish argument of `declare_with`.
+            let written_ty = (*hir_ty).or_else(|| declare_with_turbofish_ty(init));
+            let ty = lower_written_with_ty(ctxt, written_ty, "declare_with", init.span)?;
+
+            // Derive is_tracked from the type (Tracked<T> vs Ghost<T>) via ADT DefId
+            let is_tracked = match ty.kind() {
+                rustc_middle::ty::TyKind::Adt(adt_def, _)
+                    if matches!(
+                        ctxt.get_verus_item(adt_def.did()),
+                        Some(VerusItem::BuiltinType(crate::verus_items::BuiltinTypeItem::Tracked))
+                    ) =>
+                {
+                    true
+                }
+                rustc_middle::ty::TyKind::Adt(adt_def, _)
+                    if matches!(
+                        ctxt.get_verus_item(adt_def.did()),
+                        Some(VerusItem::BuiltinType(crate::verus_items::BuiltinTypeItem::Ghost))
+                    ) =>
+                {
+                    false
+                }
+                _ => {
+                    return err_span(
+                        init.span,
+                        "declare_with() must be assigned to a Tracked<T> or Ghost<T> type",
+                    );
+                }
+            };
+            let inner_mode = if is_tracked { Mode::Proof } else { Mode::Spec };
+
+            // Handle &mut types - check if the type contains a mutable reference
+            let is_ref_mut = is_mut_ty(ctxt, ty);
+            let is_mut = is_ref_mut.is_some();
+            // Use mid_ty_to_vir on the FULL type (matching normal param processing in
+            // check_fn_decl). Don't manually unwrap the MutRef — it must be preserved
+            // in the typ so that VIR can properly generate mut_ref_current% / update% AIR.
+            let typ = ctxt.mid_ty_to_vir(id, pat.span, &ty, None)?;
+
+            // All declare_with params are inputs — unwrap Ghost/Tracked as usual
+            let outer_name = vir::ast_util::air_unique_var(&format!(
+                "declare_with_{}",
+                vir::def::user_local_name(&name)
+            ));
+            let unwrapped_info = Some((inner_mode, outer_name));
+            let param_mode = Mode::Exec;
+            let vir_param = ctxt.spanned_new(
+                pat.span,
+                ParamX {
+                    name: name.clone(),
+                    typ,
+                    mode: param_mode,
+                    unwrapped_info,
+                    user_mut: is_mut_var || is_mut,
+                },
+            );
+
+            extra_params.push((vir_param, None, ty));
+            hir_ids.insert(stmt.hir_id);
+        }
+    }
+
+    Ok((extra_params, hir_ids))
+}
+
+/// Pre-scan the HIR body for `declare_ret_with()` let-stmts.
+/// Returns (extra_ret_info, hir_ids_to_skip) so that:
+/// 1. Extra return types can be registered in `declare_ret_with_params`
+/// 2. `stmt_to_vir` can skip these let-stmts during body conversion
+fn pre_scan_declare_ret_with_params<'tcx>(
+    ctxt: &Context<'tcx>,
+    id: DefId,
+    body: &Body<'tcx>,
+) -> Result<
+    (Vec<(vir::ast::Param, Option<Mode>, rustc_middle::ty::Ty<'tcx>)>, HashSet<HirId>),
+    VirErr,
+> {
+    let mut extra_params = Vec::new();
+    let mut hir_ids = HashSet::new();
+    let mut ret_with_locals: Vec<(HirId, VarIdent, Span)> = Vec::new();
+
+    let stmts = match &body.value.kind {
+        ExprKind::Block(block, _) => block.stmts,
+        _ => return Ok((extra_params, hir_ids)),
+    };
+
+    for stmt in stmts {
+        if let rustc_hir::StmtKind::Let(rustc_hir::LetStmt {
+            pat,
+            init: Some(init),
+            ty: hir_ty,
+            ..
+        }) = &stmt.kind
+        {
+            let verus_item = match &init.kind {
+                ExprKind::Call(fun, _) => match &fun.kind {
+                    ExprKind::Path(rustc_hir::QPath::Resolved(
+                        None,
+                        rustc_hir::Path { res: rustc_hir::def::Res::Def(_, fun_id), .. },
+                    )) => ctxt.get_verus_item(*fun_id).cloned(),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let is_declare_ret_with = match verus_item {
+                Some(VerusItem::DeclareRetWith) => true,
+                _ => false,
+            };
+            if !is_declare_ret_with {
+                continue;
+            }
+
+            let (is_mut_var, name) = pat_to_mut_var(pat)?;
+
+            if !is_mut_var {
+                return err_span(
+                    pat.span,
+                    "declare_ret_with() variable must be declared as `let mut`",
+                );
+            }
+
+            let written_ty = (*hir_ty).or_else(|| declare_with_turbofish_ty(init));
+            let ty = lower_written_with_ty(ctxt, written_ty, "declare_ret_with", init.span)?;
+
+            // Derive is_tracked from the type (Tracked<T> vs Ghost<T>) via ADT DefId
+            let is_tracked = match ty.kind() {
+                rustc_middle::ty::TyKind::Adt(adt_def, _)
+                    if matches!(
+                        ctxt.get_verus_item(adt_def.did()),
+                        Some(VerusItem::BuiltinType(BuiltinTypeItem::Tracked))
+                    ) =>
+                {
+                    true
+                }
+                rustc_middle::ty::TyKind::Adt(adt_def, _)
+                    if matches!(
+                        ctxt.get_verus_item(adt_def.did()),
+                        Some(VerusItem::BuiltinType(BuiltinTypeItem::Ghost))
+                    ) =>
+                {
+                    false
+                }
+                _ => {
+                    return err_span(
+                        init.span,
+                        "declare_ret_with() must be assigned to a Tracked<T> or Ghost<T> type",
+                    );
+                }
+            };
+            let inner_mode = if is_tracked { Mode::Proof } else { Mode::Spec };
+
+            let typ = ctxt.mid_ty_to_vir(id, pat.span, &ty, None)?;
+
+            let outer_name = vir::ast_util::air_unique_var(&format!(
+                "declare_ret_with_{}",
+                vir::def::user_local_name(&name)
+            ));
+            let unwrapped_info = Some((inner_mode, outer_name));
+            let param_mode = Mode::Exec;
+            // Extra return params are always mutable — they're output variables
+            // that the callee assigns before returning.
+            let vir_param = ctxt.spanned_new(
+                pat.span,
+                ParamX {
+                    name: name.clone(),
+                    typ,
+                    mode: param_mode,
+                    unwrapped_info,
+                    user_mut: true,
+                },
+            );
+
+            extra_params.push((vir_param, None, ty));
+            hir_ids.insert(stmt.hir_id);
+            ret_with_locals.push((pat.hir_id, name, pat.span));
+        }
+    }
+
+    // Verify each `declare_ret_with()` variable is assigned at least once in
+    // the body. Without an assignment, the extra ret value is uninitialized,
+    // which is unsound and a clear authoring mistake. A `VERUS_SPEC__` companion
+    // is exempt: it stands for a trait method that has no body, and the impls
+    // are what assign the extra output.
+    let is_trait_decl_spec = declare_with_registration_ids(ctxt, id).len() > 1;
+    if !ret_with_locals.is_empty() && !is_trait_decl_spec {
+        let mut assigned: HashSet<HirId> = HashSet::new();
+        let mut visitor = AssignedLocalsVisitor { assigned: &mut assigned };
+        rustc_hir::intravisit::Visitor::visit_body(&mut visitor, body);
+        for (local_id, name, span) in &ret_with_locals {
+            if !assigned.contains(local_id) {
+                return err_span(
+                    *span,
+                    format!(
+                        "declare_ret_with() variable must be assigned to in the function body: `{}`",
+                        vir::def::user_local_name(name)
+                    ),
+                );
+            }
+        }
+    }
+
+    Ok((extra_params, hir_ids))
+}
+
+/// Collects the `HirId`s of bindings that appear on the LHS of any
+/// assignment (`x = ...` or `x op= ...`) in a body.
+struct AssignedLocalsVisitor<'a> {
+    assigned: &'a mut HashSet<HirId>,
+}
+
+impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for AssignedLocalsVisitor<'_> {
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        match &expr.kind {
+            ExprKind::Assign(lhs, _, _) | ExprKind::AssignOp(_, lhs, _) => {
+                if let ExprKind::Path(rustc_hir::QPath::Resolved(
+                    None,
+                    rustc_hir::Path { res: rustc_hir::def::Res::Local(hir_id), .. },
+                )) = &lhs.kind
+                {
+                    self.assigned.insert(*hir_id);
+                }
+            }
+            _ => {}
+        }
+        rustc_hir::intravisit::walk_expr(self, expr);
     }
 }
 
@@ -328,6 +831,7 @@ fn body_to_vir<'tcx>(
     param_names: Vec<VarIdent>,
     external_opaque_type_map: Option<HashMap<Path, Path>>,
     is_async: bool,
+    declare_with_hir_ids: HashSet<HirId>,
 ) -> Result<vir::ast::Expr, VirErr> {
     let bctx = mk_bctx(
         ctxt,
@@ -339,6 +843,7 @@ fn body_to_vir<'tcx>(
         migrate_postcondition_vars,
         param_names,
         external_opaque_type_map,
+        declare_with_hir_ids,
     );
     let body_expr =
         if is_async { extract_desugared_async_body(&bctx.ctxt, body)? } else { &body.value };
@@ -1747,6 +2252,7 @@ pub(crate) fn check_item_fn<'tcx>(
         if do_migration { Some(migrate_postcondition_vars) } else { None };
 
     let n_params = vir_params.len();
+    let mut extra_ret_params_for_func: Vec<vir::ast::Param> = vec![];
 
     let (vir_body, header, body_hir_id) = match &body_id {
         CheckItemFnEither::BodyId(body_id) => {
@@ -1755,8 +2261,116 @@ pub(crate) fn check_item_fn<'tcx>(
                 rustc_hir::IsAsync::Async(..) => true,
             };
             let body = find_body(ctxt, body_id);
+
+            // Pre-scan for declare_with() calls
+            let (declare_with_extra_params, declare_with_hir_ids) =
+                pre_scan_declare_with_params(ctxt, id, body)?;
+            let declare_with_modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> =
+                declare_with_extra_params
+                    .iter()
+                    .map(|(p, _, ty)| {
+                        // unwrapped_info mode: Proof = Tracked, Spec = Ghost
+                        match p.x.unwrapped_info {
+                            Some((Mode::Proof, _)) => (true, *ty),
+                            Some((Mode::Spec, _)) => (false, *ty),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect();
+            for (p, _mode, _) in declare_with_extra_params {
+                vir_params.push(p);
+            }
+
+            // Register declare_with extra param modes early so callers can find them
+            // even if body_to_vir fails for this function.
+            if !declare_with_modes.is_empty() {
+                let target_id = proxy_id.unwrap_or(id);
+                for target_id in declare_with_registration_ids(ctxt, target_id) {
+                    ctxt.declare_with_params
+                        .borrow_mut()
+                        .insert(target_id, declare_with_modes.clone());
+                }
+
+                // For unerased_proxy functions (const fn proxies), also register under
+                // the original function's DefId, since call sites resolve to the original.
+                if vattrs.unerased_proxy {
+                    let proxy_name = ctxt.tcx.item_name(id).as_str().to_string();
+                    let prefix = "VERUS_UNERASED_PROXY__";
+                    if let Some(original_name) = proxy_name.strip_prefix(prefix) {
+                        let parent = ctxt.tcx.parent(id);
+                        // Find sibling with matching name by iterating HIR items in the parent
+                        for item_id in ctxt.tcx.hir_free_items() {
+                            let child_def_id = item_id.owner_id.to_def_id();
+                            if let Some(name) = ctxt.tcx.opt_item_name(child_def_id) {
+                                if name.as_str() == original_name
+                                    && child_def_id != id
+                                    && ctxt.tcx.parent(child_def_id) == parent
+                                {
+                                    ctxt.declare_with_params
+                                        .borrow_mut()
+                                        .insert(child_def_id, declare_with_modes.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pre-scan for declare_ret_with() calls
+            let (declare_ret_with_extra_params, declare_ret_with_hir_ids) =
+                pre_scan_declare_ret_with_params(ctxt, id, body)?;
+            extra_ret_params_for_func =
+                declare_ret_with_extra_params.iter().map(|(p, _, _)| p.clone()).collect();
+            let declare_ret_with_modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> =
+                declare_ret_with_extra_params
+                    .iter()
+                    .map(|(p, _, ty)| match p.x.unwrapped_info {
+                        Some((Mode::Proof, _)) => (true, *ty),
+                        Some((Mode::Spec, _)) => (false, *ty),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+
+            // Register declare_ret_with extra return modes early so callers can find them
+            if !declare_ret_with_modes.is_empty() {
+                let target_id = proxy_id.unwrap_or(id);
+                for target_id in declare_with_registration_ids(ctxt, target_id) {
+                    ctxt.declare_ret_with_params
+                        .borrow_mut()
+                        .insert(target_id, declare_ret_with_modes.clone());
+                }
+
+                if vattrs.unerased_proxy {
+                    let proxy_name = ctxt.tcx.item_name(id).as_str().to_string();
+                    let prefix = "VERUS_UNERASED_PROXY__";
+                    if let Some(original_name) = proxy_name.strip_prefix(prefix) {
+                        let parent = ctxt.tcx.parent(id);
+                        for item_id in ctxt.tcx.hir_free_items() {
+                            let child_def_id = item_id.owner_id.to_def_id();
+                            if let Some(name) = ctxt.tcx.opt_item_name(child_def_id) {
+                                if name.as_str() == original_name
+                                    && child_def_id != id
+                                    && ctxt.tcx.parent(child_def_id) == parent
+                                {
+                                    ctxt.declare_ret_with_params
+                                        .borrow_mut()
+                                        .insert(child_def_id, declare_ret_with_modes.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Merge hir_ids to skip from both declare_with and declare_ret_with
+            let mut all_declare_hir_ids = declare_with_hir_ids;
+            all_declare_hir_ids.extend(declare_ret_with_hir_ids);
+
             let external_body = vattrs.external_body || vattrs.external_fn_specification;
-            let param_names = vir_params.iter().map(|p| p.x.name.clone()).collect::<Vec<_>>();
+            let mut param_names = vir_params.iter().map(|p| p.x.name.clone()).collect::<Vec<_>>();
+            for (p, _, _) in &declare_ret_with_extra_params {
+                param_names.push(p.x.name.clone());
+            }
             let mut vir_body = body_to_vir(
                 ctxt,
                 id,
@@ -1769,6 +2383,7 @@ pub(crate) fn check_item_fn<'tcx>(
                 param_names,
                 assume_specification_opaque_type_map.clone(),
                 is_async,
+                all_declare_hir_ids,
             )?;
             let header =
                 vir::headers::read_header(&mut vir_body, &vir::headers::HeaderAllows::All)?;
@@ -1893,6 +2508,9 @@ pub(crate) fn check_item_fn<'tcx>(
             paramx.unwrapped_info = Some((unwrap.mode, unwrap.outer_name.clone()));
             *param = vir::def::Spanned::new(param.span.clone(), paramx);
         }
+    }
+    for param in extra_ret_params_for_func.iter() {
+        all_param_names.push(param.x.name.clone());
     }
     for name in all_param_names.iter() {
         if all_param_name_set.contains(name) {
@@ -2109,6 +2727,7 @@ pub(crate) fn check_item_fn<'tcx>(
         typ_bounds,
         params,
         ret,
+        extra_ret_params: Arc::new(extra_ret_params_for_func),
         // async function always refer to return value in ensures
         ens_has_return: is_async || ens_has_return,
         require: if mode == Mode::Spec { Arc::new(recommend) } else { header.require },
@@ -2200,6 +2819,7 @@ fn fix_external_fn_specification_trait_method_decl_typs(
             mut typ_bounds,
             mut params,
             mut ret,
+            mut extra_ret_params,
             ens_has_return,
             require,
             ensure,
@@ -2239,6 +2859,10 @@ fn fix_external_fn_specification_trait_method_decl_typs(
 
         ret = ret.new_x(ParamX { typ: subst_typ(&typ_substs, &ret.x.typ), ..ret.x.clone() });
 
+        extra_ret_params = Arc::new(crate::util::vec_map(&extra_ret_params, |p| {
+            p.new_x(ParamX { typ: subst_typ(&typ_substs, &p.x.typ), ..p.x.clone() })
+        }));
+
         unsupported_err_unless!(require.len() == 0, span, "requires clauses");
         unsupported_err_unless!(ensure.0.len() + ensure.1.len() == 0, span, "ensures clauses");
         unsupported_err_unless!(returns.is_some(), span, "returns clauses");
@@ -2263,6 +2887,7 @@ fn fix_external_fn_specification_trait_method_decl_typs(
             typ_bounds,
             params,
             ret,
+            extra_ret_params,
             ens_has_return,
             require,
             ensure,
@@ -2899,6 +3524,7 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         vec![],
         None,
         false,
+        HashSet::new(),
     )?;
     let header = vir::headers::read_header(
         &mut vir_body,
@@ -2989,6 +3615,7 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         typ_bounds,
         params: Arc::new(vec![]),
         ret,
+        extra_ret_params: Arc::new(vec![]),
         ens_has_return,
         require: Arc::new(vec![]),
         ensure: (ensure, Arc::new(vec![])),
@@ -3106,6 +3733,7 @@ pub(crate) fn check_foreign_item_fn<'tcx>(
         typ_bounds,
         params,
         ret,
+        extra_ret_params: Arc::new(vec![]),
         ens_has_return,
         require: Arc::new(vec![]),
         ensure: (Arc::new(vec![]), Arc::new(vec![])),

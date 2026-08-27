@@ -8,7 +8,7 @@ use rustc_mir_build_verus::verus::BodyErasure;
 use rustc_span::SpanData;
 use rustc_span::def_id::DefId;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,6 +16,22 @@ use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender;
 use vir::ast::{CrateId, Mode, Path, Pattern, VirErr};
 use vir::messages::{AstId, WarningAllow};
+
+/// A pending tracked/ghost argument from a `proof_with()` call, waiting to be
+/// appended to the next function call's argument list.
+pub(crate) struct PendingTrackedArg {
+    /// The VIR expression for the argument value
+    pub expr: vir::ast::Expr,
+}
+
+/// The extras a `proof_with`/`proof_with_ret` call site supplied, together with
+/// which of the two markers it used. The marker is recorded rather than inferred
+/// later from the destination's shape: a callee that genuinely returns a 2-tuple
+/// has the same shape as a `proof_with_ret` destination.
+pub(crate) struct PendingWith {
+    pub args: Vec<PendingTrackedArg>,
+    pub with_ret: bool,
+}
 
 pub struct ErasureInfo {
     pub(crate) hir_vir_ids: Vec<(HirId, AstId)>,
@@ -48,6 +64,17 @@ pub struct ContextX<'tcx> {
     pub(crate) crate_name: CrateId,
     pub(crate) name_def_id_map: Rc<RefCell<HashMap<Path, DefId>>>,
     pub(crate) next_read_kind_id: AtomicU64,
+    /// For functions with extra ghost/tracked params (from declare_with() stmts):
+    /// maps the function's DefId to a Vec of (is_tracked, expected_ty) pairs
+    pub(crate) declare_with_params:
+        Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
+    /// For functions with extra ghost/tracked return values (from declare_ret_with() stmts):
+    /// maps the function's DefId to a Vec of (is_tracked, expected_ty) pairs
+    pub(crate) declare_ret_with_params:
+        Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
+    /// Foreign callees whose shims have already been consulted for extras; their
+    /// entries in the two maps above are recovered on demand, not by a body scan.
+    pub(crate) extern_with_scanned: Rc<RefCell<std::collections::HashSet<DefId>>>,
 }
 
 /// The context in which a given header node might be interpretted
@@ -93,6 +120,11 @@ pub(crate) struct BodyCtxt<'tcx> {
     pub(crate) external_opaque_type_map: Option<HashMap<Path, Path>>,
     /// Mapping for HirId found in an HIR Destination to the corresponding VIR Label.
     pub(crate) label_map: Rc<RefCell<(HashMap<HirId, vir::ast::Label>, usize)>>,
+    /// Pending tracked/ghost args from proof_with() calls, to be consumed by the next function call.
+    /// Set to Some(...) by ProofWith handler, taken (consumed) by fn_call_to_vir.
+    pub(crate) pending_tracked_args: Rc<RefCell<Option<PendingWith>>>,
+    /// HirIds of declare_with() let-stmts to skip during body conversion
+    pub(crate) declare_with_hir_ids: Rc<HashSet<HirId>>,
 }
 
 pub(crate) struct AtomicallyCtxt {
@@ -123,6 +155,9 @@ impl<'tcx> ContextX<'tcx> {
             crate_name,
             name_def_id_map: Rc::new(RefCell::new(HashMap::new())),
             next_read_kind_id: AtomicU64::new(0),
+            declare_with_params: Rc::new(RefCell::new(HashMap::new())),
+            declare_ret_with_params: Rc::new(RefCell::new(HashMap::new())),
+            extern_with_scanned: Rc::new(RefCell::new(std::collections::HashSet::new())),
         }
     }
 
