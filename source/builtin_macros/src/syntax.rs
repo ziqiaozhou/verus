@@ -106,6 +106,9 @@ pub(crate) struct Visitor {
     inside_impl: Option<Box<(Generics, Box<Type>)>>,
     // A place to put items that are emitted while visiting
     additional_items: Vec<Item>,
+    // `with` shims emitted while visiting the members of an impl or a trait
+    additional_impl_items: Vec<ImplItem>,
+    additional_trait_items: Vec<TraitItem>,
 }
 
 // For exec "let pat = init" declarations, recursively find Tracked(x), Ghost(x), x in pat
@@ -467,20 +470,6 @@ fn proof_fn_tracks_to_type(span: Span, tracks: impl Iterator<Item = bool>) -> Ty
     }
     let paren_token = Paren { span: into_spans(span) };
     Type::Tuple(verus_syn::TypeTuple { paren_token, elems })
-}
-
-pub(crate) fn rewrite_exe_pat(pat: &mut Pat) -> (Vec<Stmt>, Vec<Stmt>) {
-    let mut visit_pat = ExecGhostPatVisitor {
-        inside_ghost: 0,
-        tracked: None,
-        ghost: None,
-        x_decls: Vec::new(),
-        x_assigns: Vec::new(),
-    };
-
-    visit_pat.visit_pat_mut(pat);
-    let ExecGhostPatVisitor { x_decls, x_assigns, .. } = visit_pat;
-    return (x_decls, x_assigns);
 }
 
 fn rewrite_args_unwrap_ghost_tracked(erase_ghost: &EraseGhost, arg: &mut FnArg) -> Vec<Stmt> {
@@ -4335,6 +4324,235 @@ enum ExtractQuantTriggersFound {
 // to preserve || precedence it would turn into
 //     if let E::A = E::A { true } else { false || false ==> true }
 
+/// Recognizes `declare_with()` / `declare_ret_with()`, in bare or
+/// `builtin::`-qualified form, with or without a turbofish.
+fn is_with_declaration(expr: &Expr, name: &str) -> bool {
+    let Expr::Call(call) = expr else { return false };
+    let Expr::Path(path_expr) = call.func.as_ref() else { return false };
+    let path = &path_expr.path;
+    match path.segments.len() {
+        1 => path.segments[0].ident == name,
+        2 => {
+            (path.segments[0].ident == "builtin" || path.segments[0].ident == "verus_builtin")
+                && path.segments[1].ident == name
+        }
+        _ => false,
+    }
+}
+
+/// The type a `declare_with()`/`declare_ret_with()` binding was given, from the
+/// `let` annotation or from the turbofish.
+fn with_declaration_type(local: &Local) -> Option<Box<Type>> {
+    if let Pat::Type(pat_type) = &local.pat {
+        return Some(pat_type.ty.clone());
+    }
+    let init = local.init.as_ref()?;
+    let Expr::Call(call) = init.expr.as_ref() else { return None };
+    let Expr::Path(path_expr) = call.func.as_ref() else { return None };
+    let seg = path_expr.path.segments.last()?;
+    let verus_syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    args.args.iter().find_map(|a| match a {
+        verus_syn::GenericArgument::Type(ty) => Some(Box::new(ty.clone())),
+        _ => None,
+    })
+}
+
+/// The extra ghost/tracked inputs and outputs a function declares in its body.
+#[derive(Default)]
+struct WithTypes {
+    inputs: Vec<Box<Type>>,
+    outputs: Vec<Box<Type>>,
+}
+
+impl WithTypes {
+    fn is_empty(&self) -> bool {
+        self.inputs.is_empty() && self.outputs.is_empty()
+    }
+}
+
+fn extract_with_types(block: &Block) -> WithTypes {
+    let mut types = WithTypes::default();
+    for stmt in &block.stmts {
+        let Stmt::Local(local) = stmt else { continue };
+        let Some(init) = &local.init else { continue };
+        let target = if is_with_declaration(&init.expr, "declare_with") {
+            &mut types.inputs
+        } else if is_with_declaration(&init.expr, "declare_ret_with") {
+            &mut types.outputs
+        } else {
+            continue;
+        };
+        if let Some(ty) = with_declaration_type(local) {
+            target.push(ty);
+        }
+    }
+    types
+}
+
+pub(crate) const WITH_SHIM_PREFIX: &str = "_VERUS_WITH_";
+pub(crate) const WITH_RET_SHIM_PREFIX: &str = "_VERUS_WITH_RET_";
+
+/// The pieces of a shim signature: the executable parameters followed by the
+/// extras, and the return type the corresponding marker produces.
+struct ShimSig {
+    generics: syn::Generics,
+    params: Vec<syn::FnArg>,
+    output: proc_macro2::TokenStream,
+}
+
+fn shim_sig(sig: &Signature, types: &WithTypes, with_outputs: bool) -> Option<ShimSig> {
+    let syn_sig: syn::Signature = syn::parse_quote!(#sig);
+    let ret: syn::Type = match &syn_sig.output {
+        syn::ReturnType::Default => syn::parse_quote!(()),
+        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+    };
+    let output = if with_outputs {
+        let outputs = &types.outputs;
+        quote!(-> (#ret, (#(#outputs,)*)))
+    } else {
+        quote!(-> #ret)
+    };
+    let extras: Vec<syn::FnArg> = types
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            let ident = quote::format_ident!("__verus_with_in_{}", i);
+            syn::parse_quote!(#ident: #ty)
+        })
+        .collect();
+    let params: Vec<syn::FnArg> = syn_sig.inputs.iter().cloned().chain(extras).collect();
+    Some(ShimSig { generics: syn_sig.generics.clone(), params, output })
+}
+
+fn shim_ident(name: &syn::Ident, with_outputs: bool) -> syn::Ident {
+    let prefix = if with_outputs { WITH_RET_SHIM_PREFIX } else { WITH_SHIM_PREFIX };
+    syn::Ident::new(&format!("{prefix}{name}"), name.span())
+}
+
+/// A function whose only purpose is to be a call target carrying the extras as
+/// real parameters, so that rustc type-checks, borrow-checks and region-checks
+/// them against the call site. It is never executed and never verified: the
+/// constraints that matter come from the parameter list, not the body.
+fn mk_with_shim_item(
+    vis: &Visibility,
+    sig: &Signature,
+    target: &syn::Ident,
+    types: &WithTypes,
+    with_outputs: bool,
+) -> Option<Item> {
+    let ShimSig { generics, params, output } = shim_sig(sig, types, with_outputs)?;
+    let where_clause = &generics.where_clause;
+    let name = shim_ident(target, with_outputs);
+    let syn_vis: syn::Visibility = syn::parse_quote!(#vis);
+    let attrs = with_shim_attrs();
+    let syn_item: syn::Item = syn::parse_quote_spanned!(sig.fn_token.span =>
+        #attrs
+        #syn_vis fn #name #generics (#(#params),*) #output #where_clause {
+            unimplemented!()
+        }
+    );
+    verus_syn::parse::Parser::parse2(Item::parse, syn_item.to_token_stream()).ok()
+}
+
+fn mk_with_shim_impl_item(
+    vis: &Visibility,
+    sig: &Signature,
+    types: &WithTypes,
+    with_outputs: bool,
+) -> Option<ImplItem> {
+    let ShimSig { generics, params, output } = shim_sig(sig, types, with_outputs)?;
+    let where_clause = &generics.where_clause;
+    let name = shim_ident(&sig.ident, with_outputs);
+    let syn_vis: syn::Visibility = syn::parse_quote!(#vis);
+    let attrs = with_shim_attrs();
+    let item: syn::ImplItem = syn::parse_quote_spanned!(sig.fn_token.span =>
+        #attrs
+        #syn_vis fn #name #generics (#(#params),*) #output #where_clause {
+            unimplemented!()
+        }
+    );
+    verus_syn::parse::Parser::parse2(ImplItem::parse, item.to_token_stream()).ok()
+}
+
+/// A trait method's shim is a defaulted method of the same trait: the trait is
+/// necessarily in scope wherever the call compiles, every impl inherits the
+/// default, and a default body on the original method stays legal.
+fn mk_with_shim_trait_item(
+    sig: &Signature,
+    types: &WithTypes,
+    with_outputs: bool,
+) -> Option<TraitItem> {
+    let ShimSig { generics, params, output } = shim_sig(sig, types, with_outputs)?;
+    let where_clause = &generics.where_clause;
+    let name = shim_ident(&sig.ident, with_outputs);
+    let attrs = with_shim_attrs();
+    let item: syn::TraitItem = syn::parse_quote_spanned!(sig.fn_token.span =>
+        #attrs
+        fn #name #generics (#(#params),*) #output #where_clause {
+            unimplemented!()
+        }
+    );
+    verus_syn::parse::Parser::parse2(TraitItem::parse, item.to_token_stream()).ok()
+}
+
+fn with_shim_attrs() -> proc_macro2::TokenStream {
+    quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case, unused)]
+        #[verus::internal(with_shim)]
+    }
+}
+
+/// The shims a function needs: one for `proof_with`, plus one for
+/// `proof_with_ret` when the function also declares extra outputs.
+fn with_shim_variants(types: &WithTypes) -> Vec<bool> {
+    if types.is_empty() {
+        return Vec::new();
+    }
+    if types.outputs.is_empty() { vec![false] } else { vec![false, true] }
+}
+
+fn is_external_fn_specification(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        if path.segments.len() == 2
+            && path.segments[0].ident == "verifier"
+            && path.segments[1].ident == "external_fn_specification"
+        {
+            return true;
+        }
+        path.segments.len() == 1
+            && path.segments[0].ident == "verifier"
+            && matches!(&attr.meta, verus_syn::Meta::List(list)
+                if list.tokens.to_string() == "external_fn_specification")
+    })
+}
+
+/// The call site resolves to the specified function, not to the one carrying the
+/// `with` clause, so the shim must be named after the trailing call's target.
+fn external_fn_spec_target(block: &Block) -> Option<syn::Ident> {
+    fn target_of(expr: &Expr) -> Option<syn::Ident> {
+        match expr {
+            Expr::Call(call) => match call.func.as_ref() {
+                Expr::Path(path_expr) => {
+                    path_expr.path.segments.last().map(|seg| seg.ident.clone())
+                }
+                _ => None,
+            },
+            Expr::Block(block_expr) => match block_expr.block.stmts.last()? {
+                Stmt::Expr(e, _) => target_of(e),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    match block.stmts.last()? {
+        Stmt::Expr(e, _) => target_of(e),
+        _ => None,
+    }
+}
+
 impl VisitMut for Visitor {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         self.handle_atomic_call(expr);
@@ -4656,6 +4874,15 @@ impl VisitMut for Visitor {
         if self.rustdoc {
             crate::rustdoc::process_item_fn(fun);
         }
+
+        // Extract the `with` types before visiting, which rewrites the body.
+        let with_types = extract_with_types(&fun.block);
+        let shim_target = if is_external_fn_specification(&fun.attrs) {
+            external_fn_spec_target(&fun.block)
+        } else {
+            Some(fun.sig.ident.clone())
+        };
+
         let stmts = self.visit_fn(
             &mut fun.attrs,
             Some(&fun.vis),
@@ -4674,12 +4901,26 @@ impl VisitMut for Visitor {
         if is_external_code {
             self.inside_external_code -= 1;
         }
+
+        if !self.erase_ghost.erase() {
+            if let Some(target) = &shim_target {
+                for with_outputs in with_shim_variants(&with_types) {
+                    if let Some(shim) =
+                        mk_with_shim_item(&fun.vis, &fun.sig, target, &with_types, with_outputs)
+                    {
+                        self.additional_items.push(shim);
+                    }
+                }
+            }
+        }
     }
 
     fn visit_impl_item_fn_mut(&mut self, method: &mut ImplItemFn) {
         if self.rustdoc {
             crate::rustdoc::process_impl_item_method(method);
         }
+
+        let with_types = extract_with_types(&method.block);
 
         let stmts = self.visit_fn(
             &mut method.attrs,
@@ -4699,10 +4940,21 @@ impl VisitMut for Visitor {
         if is_external_code {
             self.inside_external_code -= 1;
         }
+
+        if !self.erase_ghost.erase() {
+            for with_outputs in with_shim_variants(&with_types) {
+                if let Some(shim) =
+                    mk_with_shim_impl_item(&method.vis, &method.sig, &with_types, with_outputs)
+                {
+                    self.additional_impl_items.push(shim);
+                }
+            }
+        }
     }
 
     fn visit_trait_item_fn_mut(&mut self, method: &mut TraitItemFn) {
         let is_spec_method = method.sig.ident.to_string().starts_with(VERUS_SPEC);
+        let with_types = method.default.as_ref().map(extract_with_types).unwrap_or_default();
         let mut stmts =
             self.visit_fn(&mut method.attrs, None, &mut method.sig, method.semi_token, true, true);
         if let Some(block) = &mut method.default {
@@ -4728,6 +4980,15 @@ impl VisitMut for Visitor {
         visit_trait_item_fn_mut(self, method);
         if is_external_code {
             self.inside_external_code -= 1;
+        }
+
+        if !self.erase_ghost.erase() {
+            for with_outputs in with_shim_variants(&with_types) {
+                if let Some(shim) = mk_with_shim_trait_item(&method.sig, &with_types, with_outputs)
+                {
+                    self.additional_trait_items.push(shim);
+                }
+            }
         }
     }
 
@@ -5009,7 +5270,14 @@ impl VisitMut for Visitor {
         imp.attrs.push(mk_verus_attr(imp.span(), quote! { verus_macro }));
         self.visit_impl_items_prefilter(&mut imp.items, imp.trait_.is_some());
         self.filter_attrs(&mut imp.attrs);
+        let outer_shims = std::mem::take(&mut self.additional_impl_items);
         verus_syn::visit_mut::visit_item_impl_mut(self, imp);
+        // A trait impl inherits its shims from the trait's defaulted methods, and
+        // cannot declare a method the trait does not have.
+        let shims = std::mem::replace(&mut self.additional_impl_items, outer_shims);
+        if imp.trait_.is_none() {
+            imp.items.extend(shims);
+        }
         self.inside_impl = outer_impl;
     }
 
@@ -5017,7 +5285,10 @@ impl VisitMut for Visitor {
         tr.attrs.push(mk_verus_attr(tr.span(), quote! { verus_macro }));
         self.visit_trait_items_prefilter(&mut tr.items);
         self.filter_attrs(&mut tr.attrs);
+        let outer_shims = std::mem::take(&mut self.additional_trait_items);
         verus_syn::visit_mut::visit_item_trait_mut(self, tr);
+        let shims = std::mem::replace(&mut self.additional_trait_items, outer_shims);
+        tr.items.extend(shims);
     }
 
     fn visit_reveal_hide_mut(&mut self, _i: &mut verus_syn::RevealHide) {
@@ -5337,6 +5608,8 @@ pub(crate) fn rewrite_items_inner(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     visitor.visit_items_prefilter(items);
     let mut index = 0;
@@ -5378,6 +5651,8 @@ pub(crate) fn rewrite_impl_items(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     visitor.visit_impl_items_prefilter(&mut items.items, for_trait);
     for mut item in &mut items.items {
@@ -5413,6 +5688,8 @@ pub(crate) fn rewrite_expr(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     visitor.visit_expr_mut(&mut expr);
     expr.to_tokens(&mut new_stream);
@@ -5446,6 +5723,8 @@ pub(crate) fn rewrite_proof_decl(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     for mut ss in stmts {
         match ss {
@@ -5501,6 +5780,8 @@ pub(crate) fn rewrite_expr_node(erase_ghost: EraseGhost, inside_ghost: bool, exp
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     visitor.visit_expr_mut(expr);
 }
@@ -5508,55 +5789,114 @@ pub(crate) fn rewrite_expr_node(erase_ghost: EraseGhost, inside_ghost: bool, exp
 fn take_sig_with_spec(
     erase_ghost: EraseGhost,
     with: verus_syn::WithSpecOnFn,
-    sig: &mut syn::Signature,
-    ret_pat: &mut Option<Pat>,
+    _sig: &mut syn::Signature,
+    _ret_pat: &mut Option<Pat>,
 ) -> Vec<Stmt> {
-    let verus_syn::WithSpecOnFn { mut inputs, outputs, .. } = with;
+    let verus_syn::WithSpecOnFn { inputs, outputs, .. } = with;
     let mut spec_stmts = vec![];
-    if inputs.len() > 0 {
-        for arg in inputs.iter_mut() {
-            spec_stmts.extend(rewrite_args_unwrap_ghost_tracked(&erase_ghost, arg));
-            sig.inputs.push(syn::parse_quote_spanned! { arg.span() => #arg })
+    // Generate `let tmp: Type = declare_with(); let x = tmp.get()/tmp.view();`
+    // for each input with-param, instead of adding to signature.
+    for (i, arg) in inputs.iter().enumerate() {
+        if let verus_syn::FnArgKind::Typed(pat_type) = &arg.kind {
+            let ty = &pat_type.ty;
+            let span = arg.span();
+            let tmp_ident =
+                verus_syn::Ident::new(&format!("__verus_with_in_{i}"), Span::call_site());
+            // Emit: let __verus_with_in_N = declare_with::<Type>();
+            // Using turbofish to avoid lifetime elision issues in let bindings.
+            let declare_stmt = Stmt::Expr(
+                Expr::Verbatim(quote_spanned_builtin!(verus_builtin, span =>
+                    let #tmp_ident = #verus_builtin::declare_with::<#ty>()
+                )),
+                Some(Token![;](span)),
+            );
+            spec_stmts.push(declare_stmt);
+            // Now unwrap: check if pattern is Tracked(x) or Ghost(x)
+            if let Pat::TupleStruct(tup) = &*pat_type.pat {
+                let is_ghost = path_is_ident(&tup.path, "Ghost");
+                let is_tracked = path_is_ident(&tup.path, "Tracked");
+                if (is_ghost || is_tracked) && tup.elems.len() == 1 {
+                    if let Pat::Ident(id) = &tup.elems[0] {
+                        let x = &id.ident;
+                        if erase_ghost.keep() {
+                            spec_stmts.push(stmt_with_semi!(
+                                span => #[verus::internal(header_unwrap_parameter)] let #x));
+                            if is_tracked {
+                                spec_stmts.push(stmt_with_semi!(
+                                    span => #[verifier::proof_block] { #x = #tmp_ident.get() }));
+                            } else {
+                                spec_stmts.push(stmt_with_semi!(
+                                    span => #[verifier::proof_block] { #x = #tmp_ident.view() }));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    // ret.0 is executable returns.
-    // ret.1.. is the tracked/ghost returns.
-    if let Some((token, extra_ret)) = outputs {
-        if extra_ret.len() > 0 {
-            let span = extra_ret.span();
-            let extra_ret_typs: Vec<_> = extra_ret.iter().map(|pt| pt.ty.clone()).collect();
-            let mut elems = Punctuated::new();
-            if let Some(pat) = ret_pat {
-                elems.push(pat.clone());
-            } else {
-                elems.push(Pat::Wild(verus_syn::PatWild {
-                    attrs: vec![],
-                    underscore_token: Token![_](span),
-                }));
-            }
-            for pt in extra_ret {
-                elems.push(pt.pat.as_ref().clone());
-            }
-            *ret_pat = Some(Pat::Tuple(verus_syn::PatTuple {
-                attrs: vec![],
-                paren_token: Paren::default(),
-                elems,
-            }));
-            match &mut sig.output {
-                syn::ReturnType::Default => {
-                    let ty = syn::Type::Verbatim(quote_spanned!(
-                        sig.output.span() => (() #(,#extra_ret_typs)*)
-                    ));
-                    sig.output = syn::ReturnType::Type(syn::Token![->](token.span()), Box::new(ty));
+    // For outputs: generate declare_ret_with and optional unwrap.
+    // Two cases:
+    //   `-> Ghost(z): Ghost<u32>` — declare_ret_with var is `__verus_with_out_N`, unwrap into `z`
+    //   `-> g: Ghost<int>` — declare_ret_with var IS `g`, no unwrap needed
+    //     (Verus spec auto-coerces Ghost<int> to int in ensures)
+    //
+    // The output variable is always named directly (either the user-given ident
+    // or `__verus_with_out_N`) so users assign to it with `proof!{ name = ... }`
+    // rather than a separate `|=` mechanism.
+    if let Some((_token, extra_ret)) = outputs {
+        for (i, pt) in extra_ret.iter().enumerate() {
+            let ty = &pt.ty;
+            let span = pt.span();
+
+            // For `-> Ghost(z): Ghost<u32>`, unwrap into inner variable z
+            if let Pat::TupleStruct(tup) = &*pt.pat {
+                let is_ghost = path_is_ident(&tup.path, "Ghost");
+                let is_tracked = path_is_ident(&tup.path, "Tracked");
+                if (is_ghost || is_tracked) && tup.elems.len() == 1 {
+                    if let Pat::Ident(id) = &tup.elems[0] {
+                        let x = &id.ident;
+                        // Use a separate outer variable for declare_ret_with
+                        let out_ident = verus_syn::Ident::new(
+                            &format!("__verus_with_out_{i}"),
+                            Span::call_site(),
+                        );
+                        let declare_stmt = Stmt::Expr(
+                            Expr::Verbatim(quote_spanned_builtin!(verus_builtin, span =>
+                                let mut #out_ident = #verus_builtin::declare_ret_with::<#ty>()
+                            )),
+                            Some(Token![;](span)),
+                        );
+                        spec_stmts.push(declare_stmt);
+                        if erase_ghost.keep() {
+                            spec_stmts.push(stmt_with_semi!(
+                               span => #[verus::internal(header_unwrap_parameter)] let #x));
+                            if is_tracked {
+                                spec_stmts.push(stmt_with_semi!(
+                                   span => #[verifier::proof_block] { #x = #out_ident.get() }));
+                            } else {
+                                spec_stmts.push(stmt_with_semi!(
+                                   span => #[verifier::proof_block] { #x = #out_ident.view() }));
+                            }
+                        }
+                    }
                 }
-                syn::ReturnType::Type(_, ty) => {
-                    **ty = syn::Type::Verbatim(quote_spanned!(
-                        ty.span() => (#ty #(,#extra_ret_typs)*)
-                    ));
-                }
+            } else if let Pat::Ident(id) = &*pt.pat {
+                // Plain ident pattern like `g: Ghost<int>` — use `g` directly
+                // as the declare_ret_with variable. No unwrap needed since the
+                // ensures clause refers to `g` as the wrapper type directly
+                // (Verus spec auto-coerces Ghost<T> to T).
+                let x = &id.ident;
+                let declare_stmt = Stmt::Expr(
+                    Expr::Verbatim(quote_spanned_builtin!(verus_builtin, span =>
+                        let mut #x = #verus_builtin::declare_ret_with::<#ty>()
+                    )),
+                    Some(Token![;](span)),
+                );
+                spec_stmts.push(declare_stmt);
             }
         }
     };
+    // Don't modify sig.output or ret_pat — outputs are handled via declare_ret_with
     spec_stmts
 }
 
@@ -5692,6 +6032,8 @@ pub(crate) fn sig_specs_attr(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
 
     if let Some(pat) = &ret_pat {
@@ -5733,6 +6075,8 @@ pub(crate) fn while_loop_spec_attr(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     let mut spec_attr = spec_attr;
     visitor.visit_loop_spec(&mut spec_attr);
@@ -5767,6 +6111,8 @@ pub(crate) fn for_loop_spec_attr(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     let mut spec_attr = spec_attr;
     visitor.visit_loop_spec(&mut spec_attr);
@@ -5827,6 +6173,8 @@ pub(crate) fn proof_block(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     visitor.visit_block_mut(&mut invoke);
     invoke.to_tokens(&mut new_stream);
@@ -5853,6 +6201,8 @@ pub(crate) fn proof_macro_exprs(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     for element in &mut invoke.elements.elements {
         match element {
@@ -5885,6 +6235,8 @@ pub(crate) fn inv_au_macro_exprs(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
 
     invoke
@@ -5928,6 +6280,8 @@ pub(crate) fn proof_macro_explicit_exprs(
         rustdoc: env_rustdoc(),
         inside_impl: None,
         additional_items: Vec::new(),
+        additional_impl_items: Vec::new(),
+        additional_trait_items: Vec::new(),
     };
     for element in &mut invoke.elements.elements {
         match element {

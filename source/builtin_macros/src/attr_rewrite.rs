@@ -48,11 +48,13 @@ use crate::{
     unerased_proxies::VERUS_UNERASED_PROXY,
 };
 
-pub const VERIFIED: &str = "_VERUS_VERIFIED";
-
 pub const DUAL_SPEC_PREFIX: &str = "__VERUS_SPEC";
 
 const VERUS_SPEC: &str = "verus_spec";
+
+// No cross-function type registry. When Rust cannot infer types for
+// proof_with/proof_with_ret (e.g., cross-crate calls or when callee is processed
+// after caller), the user must provide explicit type annotations on their variables.
 
 enum VerusIOTarget {
     Local(syn::Local),
@@ -111,8 +113,16 @@ pub(crate) fn rewrite_verus_attribute(
     attr_args: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    if !erase.keep() {
+    if erase.erase_all() {
         return input;
+    }
+    if !erase.keep() {
+        // Verification attributes are not needed in stub-erase mode, but the
+        // trait/impl markers are: they tell `#[verus_spec]` that a method is a
+        // trait item, which decides whether its `with` shims are emitted.
+        let mut item = syn::parse_macro_input!(input as Item);
+        prepare_items_for_verus_spec(proc_macro2::Span::call_site(), &mut item, false);
+        return item.to_token_stream().into();
     }
 
     let mut item = syn::parse_macro_input!(input as Item);
@@ -188,7 +198,7 @@ pub(crate) fn rewrite_verus_attribute(
     }
 
     // Inject #[verus_spec] where missing and stamp impl methods with the sentinel marker.
-    prepare_items_for_verus_spec(args.span(), &mut item);
+    prepare_items_for_verus_spec(args.span(), &mut item, true);
     let mut new_stream = quote_spanned! {item.span()=>
         #(#attributes)*
         #item
@@ -425,28 +435,76 @@ fn add_verus_spec_if_needed(attrs: &mut Vec<syn::Attribute>, span: proc_macro2::
 ///
 /// Recursion into nested items is intentionally skipped here; `#[verus_spec]`
 /// handles that during its own expansion pass.
-fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item) {
+/// The internal sentinel `#[allow(unused, <marker>)]` is not a well-formed
+/// `allow`, so every path that sees one must strip it before it reaches rustc.
+fn is_verus_marker_attr(attr: &syn::Attribute, marker: &str) -> bool {
+    attr.path().get_ident().map_or(false, |ident| {
+        ident == "allow"
+            && matches!(&attr.meta, syn::Meta::List(meta_list)
+            if meta_list.tokens.to_string().contains(marker))
+    })
+}
+
+fn prepare_items_for_verus_spec(span: proc_macro2::Span, i: &mut syn::Item, inject_spec: bool) {
+    // Without `#[verus_spec]` to consume it, the marker sentinel is a malformed
+    // `allow` that would reach rustc, so in stub-erase mode (where no spec is
+    // injected) only already-annotated items may be stamped.
+    let has_verus_spec = |attrs: &[syn::Attribute]| {
+        attrs.iter().any(|attr| attr.path().get_ident().map_or(false, |i| i == VERUS_SPEC))
+    };
+    macro_rules! stamp {
+        ($attrs:expr, $marker:expr) => {
+            if inject_spec {
+                add_verus_spec_if_needed($attrs, span);
+            }
+            if inject_spec || has_verus_spec($attrs) {
+                $attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", $marker));
+            }
+        };
+    }
     match i {
         syn::Item::Const(syn::ItemConst { attrs, .. })
         | syn::Item::Static(syn::ItemStatic { attrs, .. })
         | syn::Item::Fn(syn::ItemFn { attrs, .. }) => {
-            add_verus_spec_if_needed(attrs, span);
+            if inject_spec {
+                add_verus_spec_if_needed(attrs, span);
+            }
         }
         syn::Item::Impl(i) => {
+            let is_trait_impl = i.trait_.is_some();
             for item in &mut i.items {
                 match item {
                     syn::ImplItem::Const(syn::ImplItemConst { attrs, .. }) => {
-                        add_verus_spec_if_needed(attrs, span);
+                        if inject_spec {
+                            add_verus_spec_if_needed(attrs, span);
+                        }
                     }
                     syn::ImplItem::Fn(syn::ImplItemFn { attrs, .. }) => {
-                        add_verus_spec_if_needed(attrs, span);
-                        attrs.push(crate::syntax::mk_rust_attr_syn(
-                            span,
-                            "allow",
-                            quote_spanned! { span => (unused, verus_impl_method_marker)},
-                        ));
+                        let marker = if is_trait_impl {
+                            quote_spanned! { span => (unused, verus_trait_impl_method_marker)}
+                        } else {
+                            quote_spanned! { span => (unused, verus_impl_method_marker)}
+                        };
+                        stamp!(attrs, marker);
                     }
                     _ => {}
+                }
+            }
+        }
+        syn::Item::Trait(t) => {
+            // A proxy for a foreign trait: its impls name the foreign trait, so
+            // they never see items declared here. Methods are marked so a `with`
+            // clause on them can be rejected with a diagnostic that names the
+            // real limitation.
+            let is_external_trait_spec = t.attrs.iter().any(is_external_trait_specification_attr);
+            for item in &mut t.items {
+                if let syn::TraitItem::Fn(syn::TraitItemFn { attrs, .. }) = item {
+                    let marker = if is_external_trait_spec {
+                        quote_spanned! { span => (unused, verus_external_trait_spec_marker)}
+                    } else {
+                        quote_spanned! { span => (unused, verus_trait_method_marker)}
+                    };
+                    stamp!(attrs, marker);
                 }
             }
         }
@@ -664,16 +722,23 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
 
             fun.attrs.push(mk_verus_attr_syn(fun.span(), quote! { verus_macro }));
 
+            let has_marker = is_verus_marker_attr;
             let is_hidden_impl_marker = |attr: &syn::Attribute| {
-                attr.path().get_ident().map_or(false, |ident| {
-                    ident == "allow"
-                        && matches!(&attr.meta, syn::Meta::List(meta_list)
-                        if meta_list.tokens.to_string().contains("verus_impl_method_marker"))
-                })
+                has_marker(attr, "verus_impl_method_marker")
+                    || has_marker(attr, "verus_trait_impl_method_marker")
+                    || has_marker(attr, "verus_trait_method_marker")
+                    || has_marker(attr, "verus_external_trait_spec_marker")
             };
 
             // Check if the function has the impl method marker
             let is_impl_fn = fun.attrs.iter().any(&is_hidden_impl_marker);
+            let is_trait_impl_fn =
+                fun.attrs.iter().any(|a| has_marker(a, "verus_trait_impl_method_marker"));
+            // A trait method with a default body is syntactically an `ItemFn`, so
+            // only this marker tells it apart from a free function.
+            let is_trait_fn = fun.attrs.iter().any(|a| has_marker(a, "verus_trait_method_marker"));
+            let is_external_trait_spec_fn =
+                fun.attrs.iter().any(|a| has_marker(a, "verus_external_trait_spec_marker"));
 
             // Remove the marker attribute (internal use only)
             fun.attrs.retain(|attr| !is_hidden_impl_marker(attr));
@@ -712,24 +777,13 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
                 }
             }
 
-            // Create a copy of unverified function.
-            // To avoid misuse of the unverified function,
-            // we add `requires false` and thus prevent verified function to use it.
-            // Allow unverified code to use the function without changing in/output.
-            if let Some(with) = &spec_attr.spec.with {
-                let mut extra_funs = rewrite_unverified_func(&mut fun, with.with.span(), erase);
-
+            // With declare_with/declare_ret_with approach, no need to create
+            // a VERIFIED_ copy. The function keeps its original name and uses
+            // declare_with() in its body for extra ghost/tracked params.
+            if let Some(_with) = &spec_attr.spec.with {
                 if crate::rustdoc::env_rustdoc() {
-                    if let Some(unverified_fun) = extra_funs.last_mut() {
-                        unverified_fun.attrs.extend(rustdoc_attrs.clone());
-                    }
-                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(
-                        with.with.span(),
-                        "doc",
-                        quote! {hidden},
-                    ));
+                    fun.attrs.extend(rustdoc_attrs.clone());
                 }
-                extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
             } else if crate::rustdoc::env_rustdoc() {
                 fun.attrs.extend(rustdoc_attrs);
             }
@@ -768,15 +822,44 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             }
 
             // Update function signature based on verus_spec.
+            let with_clause = spec_attr.spec.with.clone();
             let spec_stmts =
-                syntax::sig_specs_attr(erase, spec_attr, &mut fun.sig, is_impl_fn, false);
+                syntax::sig_specs_attr(erase.clone(), spec_attr, &mut fun.sig, is_impl_fn, false);
+
+            if let (true, Some(with)) = (is_external_trait_spec_fn, with_clause.as_ref()) {
+                return proc_macro::TokenStream::from(mk_external_trait_with_error(
+                    with.with.span(),
+                ));
+            }
+
+            // The shim is a signature-level artifact, not ghost code with a body:
+            // it exists to carry the extras as parameters for rustc to check. It
+            // therefore belongs with the ghost stubs, so that a downstream crate
+            // compiling against this one in stub-erase mode can still see it.
+            let with_shims = if erase.erase_all() {
+                proc_macro2::TokenStream::new()
+            } else {
+                mk_with_shim_fns_for(
+                    &fun.vis,
+                    &fun.sig,
+                    &fun.attrs,
+                    &fun.block,
+                    with_clause.as_ref(),
+                    is_trait_impl_fn,
+                    is_trait_fn,
+                )
+            };
 
             if erase.erase() {
                 // In erase mode, just return the stub functions.
                 // No need to add proof statements.
+                with_shims.to_tokens(&mut new_stream);
                 fun.to_tokens(&mut new_stream);
                 return proc_macro::TokenStream::from(new_stream);
             }
+
+            with_shims.to_tokens(&mut new_stream);
+
             // Create const proxy function if it is a const function.
             // Skip it if it is already inside verus!
             if fun.sig.constness.is_some() && !verus_applied {
@@ -789,11 +872,44 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let _ = fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
 
+            // A trait impl's extras are not part of the Rust signature, so rustc
+            // does not relate them to the trait method's; this check makes it.
+            if is_trait_impl_fn {
+                if let Some(stmt) =
+                    with_clause.as_ref().and_then(|w| mk_with_conform_stmt(&fun.sig, w))
+                {
+                    let stmt: syn::Stmt = parse2(stmt).unwrap();
+                    fun.block_mut().unwrap().stmts.insert(0, stmt);
+                }
+            }
+
             // Parse and replace proof_xxx!() inside function and replace panic.
             let inside_external_code = has_external_code_syn(&fun.attrs);
             replace_block(erase, fun.block_mut().unwrap(), inside_external_code);
             fun.to_tokens(&mut new_stream);
             proc_macro::TokenStream::from(new_stream)
+        }
+        AnyFnOrLoop::TraitMethod(ref method) if erase.erase() && !erase.erase_all() => {
+            // A bodyless trait method needs no rewriting in stub-erase mode, but
+            // its `with` shims are signature-level artifacts that a downstream
+            // crate must still find in this crate's metadata.
+            let spec_attr =
+                verus_syn::parse_macro_input!(outer_attr_tokens as verus_syn::SignatureSpecAttr);
+            let mut method = method.clone();
+            method.attrs.retain(|attr| {
+                !is_verus_marker_attr(attr, "verus_trait_method_marker")
+                    && !is_verus_marker_attr(attr, "verus_external_trait_spec_marker")
+            });
+            let mut new_stream = TokenStream::new();
+            if let Some(with) = spec_attr.spec.with.as_ref() {
+                let ident = method.sig.ident.clone();
+                mk_with_shim_fns(&syn::Visibility::Inherited, &method.sig, with, &ident)
+                    .to_tokens(&mut new_stream);
+                mk_with_arg_shim_fn(&syn::Visibility::Inherited, &method.sig, with, &ident)
+                    .to_tokens(&mut new_stream);
+            }
+            method.to_tokens(&mut new_stream);
+            new_stream.into()
         }
         // erase non-function cases if in erase mode
         _ if erase.erase() => return f.to_token_stream().into(),
@@ -831,21 +947,40 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             if let Err(error_tokens) = check_misuse_verus_spec(&method.attrs, true) {
                 return error_tokens;
             }
+            let is_external_trait_spec_fn = method
+                .attrs
+                .iter()
+                .any(|a| is_verus_marker_attr(a, "verus_external_trait_spec_marker"));
+            method.attrs.retain(|attr| {
+                !is_verus_marker_attr(attr, "verus_trait_method_marker")
+                    && !is_verus_marker_attr(attr, "verus_external_trait_spec_marker")
+            });
             let spec_attr =
                 verus_syn::parse_macro_input!(outer_attr_tokens as verus_syn::SignatureSpecAttr);
             let mut new_stream = TokenStream::new();
 
-            if let Some(with) = &spec_attr.spec.with {
-                // Trait method requires can only be inherited from the trait declaration
-                // However, we cannot distinguish trait function impl vs other function impl.
-                // let unverified_method = rewrite_unverified_func(&mut method, with.with.span());
-                // unverified_method.to_tokens(&mut new_stream);
-                return proc_macro::TokenStream::from(
-                    quote_spanned!(with.with.span() => compile_error!("`with` does not support trait");),
-                );
+            let with_clause = spec_attr.spec.with.clone();
+            if let (true, Some(with)) = (is_external_trait_spec_fn, with_clause.as_ref()) {
+                return proc_macro::TokenStream::from(mk_external_trait_with_error(
+                    with.with.span(),
+                ));
+            }
+            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig, true, false);
+
+            // The shim is a defaulted method of the same trait, so it is in scope
+            // wherever a call to the original compiles and every impl inherits it.
+            // Like the ghost stubs, it must survive stub-erase mode so that a
+            // downstream crate can see it.
+            if !erase.erase_all() {
+                if let Some(ref with) = with_clause {
+                    let ident = method.sig.ident.clone();
+                    mk_with_shim_fns(&syn::Visibility::Inherited, &method.sig, with, &ident)
+                        .to_tokens(&mut new_stream);
+                    mk_with_arg_shim_fn(&syn::Visibility::Inherited, &method.sig, with, &ident)
+                        .to_tokens(&mut new_stream);
+                }
             }
 
-            let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig, true, false);
             let new_stmts = spec_stmts.into_iter().map(|s| parse2(quote! { #s }).unwrap());
             let mut spec_fun_opt = syntax_trait::split_trait_method_syn(&method, erase.erase());
             let spec_fun = spec_fun_opt.as_mut().unwrap_or(&mut method);
@@ -973,15 +1108,27 @@ fn rewrite_verus_spec_on_expr_local(
     tokens.into()
 }
 
-/// Wrap an expression with a `|=` follow clause, producing a flat tuple
-/// `(expr, follow_0, .., follow_n)`, which is the shape of the return type the
-/// extra outputs of a `with` clause give the function.
-fn apply_follows(erase: &EraseGhost, expr: &mut Expr, follow_tokens: Vec<TokenStream>) {
-    let follows: Vec<TokenStream> = follow_tokens
-        .into_iter()
-        .map(|tokens| syntax::rewrite_expr(erase.clone(), false, tokens.into()).into())
-        .collect();
-    *expr = Expr::Verbatim(quote_spanned!(expr.span() => (#expr #(,#follows)*)));
+/// The `|= Ghost(...)` follow-expression syntax is no longer supported.
+/// Users should assign directly to the named output variable instead, e.g.:
+///
+/// ```ignore
+/// #[verus_spec(with -> z: Ghost<u32>)]
+/// fn f() -> u32 {
+///     proof! { z = Ghost(0); }
+///     0
+/// }
+/// ```
+fn apply_follows(expr: &mut Expr, follow_tokens: TokenStream) {
+    let span = if follow_tokens.is_empty() { expr.span() } else { follow_tokens.span() };
+    let expr_tokens = expr.to_token_stream();
+    *expr = Expr::Verbatim(quote_spanned!(span => {
+        compile_error!(
+            "the `|= ...` follow-expression is no longer supported; \
+             assign to the extra named output directly with `proof! { name = value; }` \
+             (the output name is the ident from `-> name: Type` in the function's `with` clause)"
+        );
+        #expr_tokens
+    }));
 }
 
 fn is_tracked_ghost_expr(expr: &verus_syn::Expr) -> bool {
@@ -1041,27 +1188,321 @@ fn apply_erased_fields<'a>(
     return Ok(());
 }
 
+/// The prefix of the checking shim generated for a function with a `with` clause.
+pub(crate) const WITH_SHIM: &str = "_VERUS_WITH_";
+/// The prefix of the shim used when the `with` clause also declares extra outputs.
+pub(crate) const WITH_RET_SHIM: &str = "_VERUS_WITH_RET_";
+/// The prefix of the companion carrying a trait method's declared extras as its
+/// return type, against which an impl's own extras are checked.
+pub(crate) const WITH_ARG_SHIM: &str = "_VERUS_WITH_ARG_";
+
+/// The extra parameters of a `with` clause, as they appear in a shim signature.
+/// The patterns the user wrote (`Tracked(b)`) are not usable as parameter
+/// patterns, so the shim names them positionally; only the types matter.
+fn with_shim_extra_params(with: &verus_syn::WithSpecOnFn) -> Vec<proc_macro2::TokenStream> {
+    with.inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, arg)| {
+            let verus_syn::FnArgKind::Typed(pat_type) = &arg.kind else {
+                return None;
+            };
+            let ident = quote::format_ident!("__verus_with_in_{}", i);
+            let ty = &pat_type.ty;
+            Some(quote_spanned!(arg.span() => #ident: #ty))
+        })
+        .collect()
+}
+
+/// The shims belonging to a free function, inherent method or trait method with
+/// a `with` clause. A trait impl inherits its shim from the trait's defaulted
+/// method and cannot declare a method the trait does not have.
+fn mk_with_shim_fns_for(
+    vis: &syn::Visibility,
+    sig: &syn::Signature,
+    attrs: &[syn::Attribute],
+    block: &syn::Block,
+    with: Option<&verus_syn::WithSpecOnFn>,
+    is_trait_impl_fn: bool,
+    is_trait_fn: bool,
+) -> proc_macro2::TokenStream {
+    let mut stream = proc_macro2::TokenStream::new();
+    let Some(with) = with.filter(|_| !is_trait_impl_fn) else {
+        return stream;
+    };
+    let is_external_fn_spec = attrs.iter().any(is_external_fn_specification_attr);
+    let target_ident =
+        if is_external_fn_spec { external_fn_target_name(block) } else { Some(sig.ident.clone()) };
+    let Some(target_ident) = target_ident else {
+        return stream;
+    };
+    mk_with_shim_fns(vis, sig, with, &target_ident).to_tokens(&mut stream);
+    // Only a trait method has impls that must be held to its clause; elsewhere
+    // the shim and the bindings come from the same macro text and agree by
+    // construction.
+    if is_trait_fn {
+        mk_with_arg_shim_fn(vis, sig, with, &target_ident).to_tokens(&mut stream);
+    }
+    stream
+}
+
+/// A function whose only purpose is to be a call target carrying the `with`
+/// clause's extras as real parameters, so that rustc type-checks, borrow-checks
+/// and region-checks them against the call site. It is never executed and never
+/// verified: the constraints that matter come from the parameter list, not the
+/// body.
+///
+/// A clause with extra outputs needs a second shim, whose return type is the
+/// pair `proof_with_ret` produces, because a caller may also ignore the outputs
+/// and use plain `proof_with`.
+fn mk_with_shim_fns(
+    vis: &syn::Visibility,
+    sig: &syn::Signature,
+    with: &verus_syn::WithSpecOnFn,
+    target: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let extras = with_shim_extra_params(with);
+    let output_types: Vec<&Box<verus_syn::Type>> = match &with.outputs {
+        Some((_, outputs)) => outputs.iter().map(|pat_type| &pat_type.ty).collect(),
+        None => Vec::new(),
+    };
+    if extras.is_empty() && output_types.is_empty() {
+        return proc_macro2::TokenStream::new();
+    }
+    let span = with.with.span();
+    let generics = &sig.generics;
+    let where_clause = &sig.generics.where_clause;
+    let ret: syn::Type = match &sig.output {
+        syn::ReturnType::Default => syn::parse_quote!(()),
+        syn::ReturnType::Type(_, ty) => (**ty).clone(),
+    };
+
+    let mut variants = vec![(
+        syn::Ident::new(&format!("{WITH_SHIM}{target}"), target.span()),
+        quote_spanned!(span => -> #ret),
+    )];
+    if !output_types.is_empty() {
+        variants.push((
+            syn::Ident::new(&format!("{WITH_RET_SHIM}{target}"), target.span()),
+            quote_spanned!(span => -> (#ret, (#(#output_types,)*))),
+        ));
+    }
+
+    let mut stream = proc_macro2::TokenStream::new();
+    for (shim_name, output) in variants {
+        let params = sig.inputs.iter().map(|p| p.to_token_stream()).chain(extras.iter().cloned());
+        stream.extend(quote_spanned!(span =>
+            #[doc(hidden)]
+            #[allow(non_snake_case, unused)]
+            #[verus::internal(with_shim)]
+            #vis fn #shim_name #generics (#(#params),*) #output #where_clause {
+                unimplemented!()
+            }
+        ));
+    }
+    stream
+}
+
+/// The declared types of a `with` clause's extra inputs.
+fn with_extra_input_types(with: &verus_syn::WithSpecOnFn) -> Vec<&verus_syn::Type> {
+    with.inputs
+        .iter()
+        .filter_map(|arg| match &arg.kind {
+            verus_syn::FnArgKind::Typed(pat_type) => Some(&*pat_type.ty),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The declared types of a `with` clause's extra outputs.
+fn with_extra_output_types(with: &verus_syn::WithSpecOnFn) -> Vec<&verus_syn::Type> {
+    match &with.outputs {
+        Some((_, outputs)) => outputs.iter().map(|pat_type| &*pat_type.ty).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The trait method's own generic parameters, as a turbofish argument list.
+fn method_turbofish_args(generics: &syn::Generics) -> Vec<proc_macro2::TokenStream> {
+    generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Lifetime(l) => l.lifetime.to_token_stream(),
+            syn::GenericParam::Type(t) => t.ident.to_token_stream(),
+            syn::GenericParam::Const(c) => c.ident.to_token_stream(),
+        })
+        .collect()
+}
+
+/// A companion carrying a trait method's declared extras, against which an impl
+/// method's own extras are checked. Extra *inputs* are its return type and extra
+/// *outputs* are its parameters, which is the direction dispatch needs in each
+/// case: an input flows caller -> impl, so the impl must not assume more than the
+/// trait granted, while an output flows impl -> caller, so the impl must not
+/// promise less.
+///
+/// Every lifetime parameter is given a vacuous bound to make it early-bound, so
+/// that the call site can name the impl's own lifetimes with a turbofish. Without
+/// that, the companion's regions are inference variables, and covariance lets
+/// rustc shrink them to whatever makes the call succeed -- the check compiles
+/// clean whatever the impl declares.
+fn mk_with_arg_shim_fn(
+    vis: &syn::Visibility,
+    sig: &syn::Signature,
+    with: &verus_syn::WithSpecOnFn,
+    target: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let input_types = with_extra_input_types(with);
+    let output_types = with_extra_output_types(with);
+    if input_types.is_empty() && output_types.is_empty() {
+        return proc_macro2::TokenStream::new();
+    }
+    let span = with.with.span();
+    let generics = &sig.generics;
+    let name = syn::Ident::new(&format!("{WITH_ARG_SHIM}{target}"), target.span());
+    let lifetimes: Vec<&syn::Lifetime> = sig.generics.lifetimes().map(|l| &l.lifetime).collect();
+    let predicates = sig.generics.where_clause.as_ref().map(|w| &w.predicates);
+    let params = output_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            let ident = quote::format_ident!("__verus_with_chk_out_{}", i, span = span);
+            quote_spanned!(span => #ident: #ty)
+        })
+        .collect::<Vec<_>>();
+    quote_spanned!(span =>
+        #[doc(hidden)]
+        #[allow(non_snake_case, unused)]
+        #[verus::internal(with_arg_shim)]
+        #[verifier::external_body]
+        #vis fn #name #generics (#(#params),*) -> (#(#input_types,)*)
+            where #(#lifetimes: #lifetimes,)* Self: Sized, #predicates
+        {
+            unimplemented!()
+        }
+    )
+}
+
+/// The trait/impl `with` conformance check planted in an impl method's body.
+///
+/// It is a closure whose *parameters* carry the impl's declared extras, so it
+/// captures nothing: `Tracked`/`Ghost` and the method's own arguments are not
+/// `Copy`, and a capturing closure would move them at construction and break the
+/// real body. The ascribed parameter and binding types are what create the
+/// obligation; the closure is never called.
+fn mk_with_conform_stmt(
+    sig: &syn::Signature,
+    with: &verus_syn::WithSpecOnFn,
+) -> Option<proc_macro2::TokenStream> {
+    let input_types = with_extra_input_types(with);
+    let output_types = with_extra_output_types(with);
+    if input_types.is_empty() && output_types.is_empty() {
+        return None;
+    }
+    let span = with.with.span();
+    let name = syn::Ident::new(&format!("{WITH_ARG_SHIM}{}", sig.ident), sig.ident.span());
+    let turbofish = method_turbofish_args(&sig.generics);
+    let out_params = output_types.iter().enumerate().map(|(i, ty)| {
+        let ident = quote::format_ident!("__verus_with_chk_out_{}", i, span = span);
+        quote_spanned!(span => #ident: #ty)
+    });
+    let out_args = (0..output_types.len())
+        .map(|i| quote::format_ident!("__verus_with_chk_out_{}", i, span = span));
+    let in_bindings = (0..input_types.len())
+        .map(|i| quote::format_ident!("__verus_with_chk_in_{}", i, span = span));
+    Some(quote_spanned!(span =>
+        #[verus::internal(with_conform)]
+        #[allow(non_snake_case, unused)]
+        let _verus_with_conform_check = |#(#out_params),*| {
+            let (#(#in_bindings,)*): (#(#input_types,)*) =
+                Self::#name::<#(#turbofish),*>(#(#out_args),*);
+        };
+    ))
+}
+
+fn is_external_trait_specification_attr(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    (path.segments.len() == 2
+        && path.segments[0].ident == "verifier"
+        && path.segments[1].ident == "external_trait_specification")
+        || (path.segments.len() == 1
+            && path.segments[0].ident == "verifier"
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "external_trait_specification"))
+}
+
+/// `with` on a proxy for a foreign trait is not supported.
+///
+/// Both the call-site shim and the conformance companion are emitted as
+/// defaulted methods of the trait that declares the clause, which is what makes
+/// them reachable: naming the trait is a precondition for both calling the
+/// method and implementing it. A proxy breaks that, because callers and impls
+/// name the *foreign* trait and never the proxy. Without this check the user
+/// sees `no method named _VERUS_WITH_f`, naming a symbol they never wrote.
+fn mk_external_trait_with_error(span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    quote_spanned!(span =>
+        compile_error!(
+            "`with` is not supported on an `external_trait_specification` trait: \
+             the generated shim would be a member of this proxy trait, but callers \
+             and implementors name the foreign trait instead, so it could never be \
+             found. Declare the `with` clause on a trait that Verus owns, or wrap \
+             the foreign method in a function carrying the clause."
+        );
+    )
+}
+
+fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    (path.segments.len() == 2
+        && path.segments[0].ident == "verifier"
+        && path.segments[1].ident == "external_fn_specification")
+        || (path.segments.len() == 1
+            && path.segments[0].ident == "verifier"
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "external_fn_specification"))
+}
+
+/// Extract the target function name from the trailing call in an
+/// `external_fn_specification` function body.
+fn external_fn_target_name(block: &syn::Block) -> Option<syn::Ident> {
+    let stmt = block.stmts.last()?;
+    let expr = match stmt {
+        syn::Stmt::Expr(e, _) => e,
+        _ => return None,
+    };
+    extract_call_target_ident(expr)
+}
+
+fn extract_call_target_ident(expr: &syn::Expr) -> Option<syn::Ident> {
+    match expr {
+        syn::Expr::Call(call) => {
+            if let syn::Expr::Path(path_expr) = &*call.func {
+                path_expr.path.segments.last().map(|seg| seg.ident.clone())
+            } else {
+                None
+            }
+        }
+        syn::Expr::Block(block_expr) => {
+            let last = block_expr.block.stmts.last()?;
+            if let syn::Stmt::Expr(e, _) = last { extract_call_target_ident(e) } else { None }
+        }
+        _ => None,
+    }
+}
+
 // Expand `with extra_in => extra_out` on a method call expr.
 // Return some pre-statements that needs to be declared before the expr.
 fn rewrite_with_expr(
     erase: EraseGhost,
     expr: &mut Expr,
     call_with_spec: verus_syn::WithSpecOnExpr,
-) -> Vec<verus_syn::Stmt> {
+) -> Vec<proc_macro2::TokenStream> {
     let verus_syn::WithSpecOnExpr { inputs, outputs, follows, erased_fields, .. } = call_with_spec;
 
+    // Handle Try expressions by recursing into inner
     if outputs.is_some() || inputs.len() > 0 {
         match expr {
-            syn::Expr::Call(syn::ExprCall { func, .. }) => {
-                if let Expr::Path(path) = func.as_mut() {
-                    let x = &path.path.segments.last().unwrap().ident;
-                    path.path.segments.last_mut().unwrap().ident =
-                        syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
-                }
-            }
-            syn::Expr::MethodCall(syn::ExprMethodCall { method, .. }) => {
-                let x = &method;
-                *method = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
+            syn::Expr::Call(_) | syn::Expr::MethodCall(_) => {
+                // OK — these are valid call expressions
             }
             syn::Expr::Try(syn::ExprTry { expr, .. }) => {
                 let call_with_spec = verus_syn::WithSpecOnExpr {
@@ -1085,61 +1526,193 @@ fn rewrite_with_expr(
     if apply_erased_fields(erase.clone(), expr, erased_fields.iter()).is_err() {
         return vec![];
     }
-    match expr {
-        syn::Expr::Call(syn::ExprCall { args, .. })
-        | syn::Expr::MethodCall(syn::ExprMethodCall { args, .. }) => {
-            for arg in inputs {
-                let arg =
-                    syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into());
-                args.push(syn::Expr::Verbatim(arg.into()));
-            }
-        }
-        _ => {}
-    };
-    let x_declares = if let Some((_, extra_pat)) = outputs {
-        // The expected pat.
-        let tmp_pat =
-            verus_syn::Pat::Verbatim(quote_spanned! {expr.span() => __verus_tmp_expr_var__});
-        let mut elems =
-            verus_syn::punctuated::Punctuated::<verus_syn::Pat, verus_syn::Token![,]>::new();
-        elems.push(tmp_pat.clone());
-        // Several extra outputs are returned as one flat tuple, so a tuple
-        // pattern `=> (a, b)` has to be flattened to match it.
-        match extra_pat {
-            verus_syn::Pat::Tuple(tuple) => elems.extend(tuple.elems),
-            pat => elems.push(pat),
-        }
-        // The actual pat.
-        let mut pat = verus_syn::Pat::Tuple(verus_syn::PatTuple {
-            attrs: vec![],
-            paren_token: verus_syn::token::Paren::default(),
-            elems,
-        });
-        let (x_declares, x_assigns) = syntax::rewrite_exe_pat(&mut pat);
-        *expr = syn::Expr::Verbatim(quote_spanned! {expr.span() => {
-            let #pat = #expr;
-            proof!{
-                #(#x_assigns)*
-            }
-            #tmp_pat
-        }
-        });
-        x_declares
-    } else {
-        vec![]
-    };
-    if let Some((_, follow)) = follows {
-        // A tuple pattern `|= (a, b)` supplies several extra outputs, which the
-        // function returns as the flat tuple `(ret, a, b)`.
-        let follow_tokens = match follow {
-            verus_syn::Pat::Tuple(tuple) => {
-                tuple.elems.iter().map(|p| p.to_token_stream()).collect()
-            }
-            pat => vec![pat.to_token_stream()],
+
+    // Build proof_with input args
+    let input_args: Vec<proc_macro2::TokenStream> = inputs
+        .into_iter()
+        .map(|arg| {
+            let rewritten: proc_macro2::TokenStream =
+                syntax::rewrite_expr(erase.clone(), false, arg.into_token_stream().into()).into();
+            rewritten
+        })
+        .collect();
+
+    let has_inputs = !input_args.is_empty();
+    let has_outputs = outputs.is_some();
+
+    if has_inputs || has_outputs {
+        let inputs_expr = if input_args.len() == 1 {
+            let arg = &input_args[0];
+            quote! { #arg }
+        } else if input_args.is_empty() {
+            quote! { () }
+        } else {
+            quote! { (#(#input_args),*) }
         };
-        apply_follows(&erase, expr, follow_tokens);
+
+        let call_expr = expr.to_token_stream();
+
+        if has_outputs {
+            let (_, extra_pat) = outputs.unwrap();
+            let mut out_pats = Vec::new();
+            flatten_output_pat(extra_pat, &mut out_pats);
+
+            // If all outputs are wildcard, just use proof_with (no ret needed)
+            let all_wild = out_pats.iter().all(|p| matches!(p, OutputPat::Wild));
+            let pre_decls: Vec<proc_macro2::TokenStream> = Vec::new();
+            if all_wild {
+                *expr = syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
+                    #verus_builtin::proof_with(#inputs_expr, #call_expr)
+                ));
+            } else {
+                // Use proof_with_ret to capture extra outputs.
+                // Type annotation uses `_` — user must ensure Rust can infer types
+                // (e.g., by annotating their variables explicitly).
+                let mut tmp_idents = Vec::new();
+                let mut unwrap_stmts = Vec::new();
+
+                let mut tmp_type_annotations: Vec<proc_macro2::TokenStream> = Vec::new();
+
+                for (i, pat) in out_pats.iter().enumerate() {
+                    let tmp_ident = syn::Ident::new(
+                        &format!("__verus_out_tmp_{i}"),
+                        proc_macro2::Span::call_site(),
+                    );
+                    match pat {
+                        OutputPat::Ghost(ident, explicit_ty) => {
+                            unwrap_stmts.push(quote! {
+                                #[verifier::proof_block]
+                                { #ident = #tmp_ident.view(); }
+                            });
+                            if let Some(ty) = explicit_ty {
+                                tmp_type_annotations.push(ty.clone());
+                            } else {
+                                tmp_type_annotations.push(quote! { Ghost<_> });
+                            }
+                        }
+                        OutputPat::Tracked(ident, explicit_ty) => {
+                            unwrap_stmts.push(quote! {
+                                #[verifier::proof_block]
+                                { #ident = #tmp_ident.get(); }
+                            });
+                            if let Some(ty) = explicit_ty {
+                                tmp_type_annotations.push(ty.clone());
+                            } else {
+                                tmp_type_annotations.push(quote! { Tracked<_> });
+                            }
+                        }
+                        OutputPat::Wild => {
+                            tmp_type_annotations.push(quote! { _ });
+                        }
+                    }
+                    tmp_idents.push(tmp_ident);
+                }
+
+                let tmp_pat_tokens = if tmp_idents.len() == 1 {
+                    let t = &tmp_idents[0];
+                    quote! { (#t,) }
+                } else {
+                    quote! { (#(#tmp_idents),*) }
+                };
+
+                let tmp_type_tokens = if tmp_type_annotations.len() == 1 {
+                    let t = &tmp_type_annotations[0];
+                    quote! { (#t,) }
+                } else {
+                    quote! { (#(#tmp_type_annotations),*) }
+                };
+
+                *expr = syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
+                    {
+                        let (__verus_tmp_expr_var__, #tmp_pat_tokens): (_, #tmp_type_tokens) = #verus_builtin::proof_with_ret(#inputs_expr, #call_expr);
+                        #(#unwrap_stmts)*
+                        __verus_tmp_expr_var__
+                    }
+                ));
+            }
+            return pre_decls;
+        } else {
+            // Inputs only — use proof_with
+            *expr = syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
+                #verus_builtin::proof_with(#inputs_expr, #call_expr)
+            ));
+        }
     }
-    x_declares
+
+    if let Some((_, follow)) = follows {
+        apply_follows(expr, follow.into_token_stream());
+    }
+    vec![]
+}
+
+enum OutputPat {
+    Ghost(syn::Ident, Option<proc_macro2::TokenStream>),
+    Tracked(syn::Ident, Option<proc_macro2::TokenStream>),
+    Wild,
+}
+
+fn flatten_output_pat(pat: verus_syn::Pat, out: &mut Vec<OutputPat>) {
+    match pat {
+        verus_syn::Pat::Tuple(tuple) => {
+            for elem in tuple.elems {
+                flatten_output_pat(elem, out);
+            }
+        }
+        verus_syn::Pat::Type(pat_type) => {
+            // Handle `Ghost(z): Ghost<u32>` — extract the explicit type annotation
+            let explicit_ty: proc_macro2::TokenStream = pat_type.ty.to_token_stream();
+            let inner = *pat_type.pat;
+            flatten_output_pat_with_type(inner, Some(explicit_ty), out);
+        }
+        _ => flatten_output_pat_with_type(pat, None, out),
+    }
+}
+
+fn flatten_output_pat_with_type(
+    pat: verus_syn::Pat,
+    explicit_ty: Option<proc_macro2::TokenStream>,
+    out: &mut Vec<OutputPat>,
+) {
+    match pat {
+        verus_syn::Pat::Tuple(tuple) => {
+            for elem in tuple.elems {
+                flatten_output_pat(elem, out);
+            }
+        }
+        verus_syn::Pat::TupleStruct(ts) => {
+            let is_ghost = ts.path.is_ident("Ghost");
+            let is_tracked = ts.path.is_ident("Tracked");
+            if (is_ghost || is_tracked) && ts.elems.len() == 1 {
+                if let verus_syn::Pat::Ident(id) = &ts.elems[0] {
+                    if is_ghost {
+                        out.push(OutputPat::Ghost(
+                            syn::Ident::new(&id.ident.to_string(), id.ident.span()),
+                            explicit_ty,
+                        ));
+                    } else {
+                        out.push(OutputPat::Tracked(
+                            syn::Ident::new(&id.ident.to_string(), id.ident.span()),
+                            explicit_ty,
+                        ));
+                    }
+                    return;
+                }
+            }
+            out.push(OutputPat::Wild);
+        }
+        verus_syn::Pat::Wild(_) => {
+            out.push(OutputPat::Wild);
+        }
+        verus_syn::Pat::Ident(id) => {
+            out.push(OutputPat::Ghost(
+                syn::Ident::new(&id.ident.to_string(), id.ident.span()),
+                explicit_ty,
+            ));
+        }
+        _ => {
+            out.push(OutputPat::Wild);
+        }
+    }
 }
 
 /// Rewrite the const function and return a proxy function.
@@ -1162,69 +1735,4 @@ fn rewrite_const_ret_proxy(const_fun: &mut syn::ItemFn) -> syn::ItemFn {
     );
     proxy_fun.attrs.push(mk_verus_attr_syn(span, quote! { unerased_proxy }));
     proxy_fun
-}
-
-// Create a copy of function with unverified function signature without a
-// function body, to enable seamless use of unverified call to the function in
-// verification.
-// If the function is const, it will be rewritten to a proxy function and a verified function.
-fn rewrite_unverified_func(
-    fun: &mut syn::ItemFn,
-    span: proc_macro2::Span,
-    erase: EraseGhost,
-) -> Vec<syn::ItemFn> {
-    let mut ret = vec![];
-    let mut unverified_fun = fun.clone();
-    if fun.sig.constness.is_some() {
-        // Create a proxy function to include requires/ensures.
-        let proxy = rewrite_const_ret_proxy(&mut unverified_fun);
-        ret.push(unverified_fun);
-        unverified_fun = proxy;
-    }
-    let unimplemented = syn::Stmt::Expr(
-        syn::Expr::Verbatim(quote_spanned! {span => unimplemented!()}),
-        Some(syn::token::Semi { spans: [span] }),
-    );
-    let precondition_false = syn::Stmt::Expr(
-        syn::Expr::Verbatim(
-            quote_spanned_builtin!(verus_builtin, span => #verus_builtin::requires([false])),
-        ),
-        Some(syn::token::Semi { spans: [span] }),
-    );
-    unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
-    if !crate::rustdoc::env_rustdoc() {
-        unverified_fun.attrs_mut().push(crate::syntax::mk_rust_attr_syn(
-            span,
-            "doc",
-            quote! {hidden},
-        ));
-    }
-    if let Some(block) = unverified_fun.block_mut() {
-        // For an unverified function, if it is in keep mode,
-        // we erase the function body to avoid using
-        // proof code, since we do not need to verify anything in unverified
-        // function and we never pass ghost/tracked to unverified function
-        // and so it may cause errors due to undefined vars.
-        // Since the body is erased only in keep mode, we still
-        // see correct body in generated executable in erase mode.
-        if erase.keep() {
-            block.stmts.clear();
-            block.stmts.push(precondition_false);
-            block.stmts.push(unimplemented.clone());
-        }
-    }
-    // change name to verified_{fname}
-    let x = &fun.sig.ident;
-    fun.sig.ident = syn::Ident::new(&format!("{VERIFIED}_{x}"), x.span());
-    fun.attrs.push(crate::syntax::mk_rust_attr_syn(span, "allow", quote! {non_snake_case}));
-
-    // In erase mode, we just keep the verified function with unimplemented!()
-    // since we do not need to verifying the function body and only unverified
-    // function is called in erase mode.
-    if erase.erase() {
-        fun.block.stmts.clear();
-        fun.block.stmts.push(unimplemented);
-    }
-    ret.push(unverified_fun);
-    ret
 }
