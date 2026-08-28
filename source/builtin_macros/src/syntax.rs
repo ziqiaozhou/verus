@@ -895,6 +895,13 @@ impl Visitor {
         inputs: (Option<impl ToTokens>, impl ToTokens), // optional self and args
         is_async_fn: bool,                              // is the function an async function
         atomic_perm_clause: Option<(verus_syn::Ident, verus_syn::PermClause)>,
+        // Extra outputs of a `with` clause. They travel to the caller inside the
+        // return value, so the `ensures` closure takes the folded value and
+        // destructures it rather than closing over the body's locals.
+        extra_outs: &[verus_syn::PatType],
+        // The declared return type. Unlike `ret_ty` this does not depend on the
+        // user having named the return value.
+        sig_output_ty: Option<TokenStream>,
     ) -> Vec<Stmt> {
         let requires = self.take_ghost(&mut spec.requires);
         let recommends = self.take_ghost(&mut spec.recommends);
@@ -1059,7 +1066,66 @@ impl Visitor {
                             }))
                         }
                     }
-                    if let Some(ty) = ret_ty {
+                    if !extra_outs.is_empty() {
+                        // The extras reach the caller inside the return value, so
+                        // the clause is stated about what was returned rather than
+                        // about the body's locals.
+                        let folded_ident =
+                            verus_syn::Ident::new("__verus_ret_with_extra", token.span);
+                        let mut pats: Vec<TokenStream> = vec![];
+                        let mut tys: Vec<TokenStream> = vec![];
+                        let mut unwraps: Vec<TokenStream> = vec![];
+                        for (i, pt) in extra_outs.iter().enumerate() {
+                            let ty = &pt.ty;
+                            tys.push(quote_spanned!(token.span => #ty));
+                            let mut bound = false;
+                            if let Pat::TupleStruct(tup) = &*pt.pat {
+                                let is_ghost = path_is_ident(&tup.path, "Ghost");
+                                let is_tracked = path_is_ident(&tup.path, "Tracked");
+                                if (is_ghost || is_tracked) && tup.elems.len() == 1 {
+                                    if let Pat::Ident(id) = &tup.elems[0] {
+                                        let x = &id.ident;
+                                        let tmp = verus_syn::Ident::new(
+                                            &format!("__verus_ens_out_{i}"),
+                                            token.span,
+                                        );
+                                        pats.push(quote_spanned!(token.span => #tmp));
+                                        unwraps.push(if is_tracked {
+                                            quote_spanned!(token.span => let #x = #tmp.get();)
+                                        } else {
+                                            quote_spanned!(token.span => let #x = #tmp.view();)
+                                        });
+                                        bound = true;
+                                    }
+                                }
+                            }
+                            if !bound {
+                                let p = &pt.pat;
+                                pats.push(quote_spanned!(token.span => #p));
+                            }
+                        }
+                        // Each clause is wrapped individually: the header parser
+                        // expects the closure body to be the list of clauses.
+                        for expr in exprs.exprs.iter_mut() {
+                            let e = expr.clone();
+                            *expr = Expr::Verbatim(quote_spanned!(token.span => {
+                                let (#ret_val_ident, (#(#pats,)*)) = #folded_ident;
+                                #(#unwraps)*
+                                #e
+                            }));
+                        }
+                        let ret_ty_tokens = match &sig_output_ty {
+                            Some(ty) => quote_spanned!(token.span => #ty),
+                            None => quote_spanned!(token.span => ()),
+                        };
+                        spec_stmts.push(Stmt::Expr(
+                            Expr::Verbatim(quote_spanned_builtin!(verus_builtin, token.span =>
+                                #verus_builtin::ensures(
+                                    |#folded_ident: (#ret_ty_tokens, (#(#tys,)*))| [#exprs])
+                            )),
+                            Some(Semi { spans: [token.span] }),
+                        ));
+                    } else if let Some(ty) = ret_ty {
                         if is_closure {
                             // closures cannot return impl xxx so it's safe to
                             spec_stmts.push(Stmt::Expr(
@@ -1409,6 +1475,8 @@ impl Visitor {
             verus_inputs_to_tokens(&sig.inputs),
             sig.asyncness.is_some(),
             atomic_perm_clause,
+            &[],
+            None,
         );
         if !self.erase_ghost.erase() {
             if !(self.rustdoc && sig.constness.is_some()) {
@@ -6012,7 +6080,11 @@ pub(crate) fn sig_specs_attr(
     let SignatureSpecAttr { ret_pat, mut spec } = spec_attr;
     let mut spec_stmts = vec![];
     let mut ret_pat = ret_pat.map(|v| v.0);
+    let mut extra_outs: Vec<verus_syn::PatType> = vec![];
     if let Some(with) = spec.with {
+        if let Some((_, outputs)) = &with.outputs {
+            extra_outs = outputs.iter().cloned().collect();
+        }
         spec_stmts.extend(take_sig_with_spec(erase_ghost, with, sig, &mut ret_pat));
     }
     spec.with = None;
@@ -6043,6 +6115,10 @@ pub(crate) fn sig_specs_attr(
     }
 
     let sig_span = sig.span().clone();
+    let sig_output_ty = match &sig.output {
+        syn::ReturnType::Type(_, ty) => Some(quote_spanned!(sig_span => #ty)),
+        syn::ReturnType::Default => None,
+    };
     spec_stmts.extend(visitor.take_sig_specs(
         &mut spec,
         ret_pat.as_ref(),
@@ -6055,6 +6131,8 @@ pub(crate) fn sig_specs_attr(
         inputs_to_tokens(&sig.inputs),
         sig.asyncness.is_some(),
         None,
+        &extra_outs,
+        sig_output_ty,
     ));
     spec_stmts
 }

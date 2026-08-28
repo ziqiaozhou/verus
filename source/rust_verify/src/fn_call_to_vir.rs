@@ -547,14 +547,46 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
         autospec: autospec_usage,
         assume_external_allowed,
         const_var,
-        extra_ret_dest: call_site_with_ret,
     };
     let target = CallTarget::Fun(target_kind, name, typ_args, impl_paths, call_target_attrs);
-    Ok(bctx.spanned_typed_new(
-        expr.span,
-        &expr_typ()?,
-        ExprX::Call { target, args: Arc::new(vir_args), post_args: None, body: call_body },
-    ))
+    let call_typ = expr_typ()?;
+    let ret_extras = bctx.ctxt.declare_ret_with_params.borrow().get(&f).cloned();
+    let callx = ExprX::Call { target, args: Arc::new(vir_args), post_args: None, body: call_body };
+    match ret_extras {
+        // A callee with extra outputs returns them folded into its return value.
+        // A call site that does not bind them still has to receive the folded
+        // value and project the ordinary one back out of it.
+        Some(extras) if !call_site_with_ret && !extras.is_empty() => {
+            use vir::ast::{PlaceX, ReadKind, UnfinalizedReadKind};
+            let mut extra_typs: Vec<vir::ast::Typ> = Vec::new();
+            for (_, ty) in extras.iter() {
+                extra_typs.push(bctx.ctxt.mid_ty_to_vir(bctx.fun_id, expr.span, ty, None)?);
+            }
+            let folded_typ = vir::ast_util::mk_tuple_typ(&Arc::new(vec![
+                call_typ.clone(),
+                vir::ast_util::mk_tuple_typ(&Arc::new(extra_typs)),
+            ]));
+            let call = bctx.spanned_typed_new(expr.span, &folded_typ, callx);
+            let temporary = bctx.spanned_typed_new(expr.span, &folded_typ, PlaceX::Temporary(call));
+            let field = bctx.spanned_typed_new(
+                expr.span,
+                &call_typ,
+                PlaceX::Field(vir::ast_util::mk_tuple_field_opr(2, 0), temporary),
+            );
+            Ok(bctx.spanned_typed_new(
+                expr.span,
+                &call_typ,
+                ExprX::ReadPlace(
+                    field,
+                    UnfinalizedReadKind {
+                        preliminary_kind: ReadKind::Move,
+                        id: bctx.ctxt.unique_read_kind_id(),
+                    },
+                ),
+            ))
+        }
+        _ => Ok(bctx.spanned_typed_new(expr.span, &call_typ, callx)),
+    }
 }
 
 pub(crate) fn const_var_to_vir<'tcx>(
@@ -682,7 +714,6 @@ pub(crate) fn call_overloaded_method<'tcx>(
         autospec: autospec_usage,
         assume_external_allowed: false,
         const_var: false,
-        extra_ret_dest: false,
     };
     let call_target =
         CallTarget::Fun(target_kind, trait_fun, typ_args, impl_paths, call_target_attrs);

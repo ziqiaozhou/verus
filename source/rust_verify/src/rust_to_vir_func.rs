@@ -38,6 +38,202 @@ use vir::ast_util::{air_unique_var, unit_typ};
 use vir::def::{RETURN_VALUE, Spanned, VERUS_SPEC};
 use vir::sst_util::subst_typ;
 
+/// An extra output of a `with` clause, as the callee's body declares it.
+///
+/// Extra outputs are folded into the ordinary return value as
+/// `(ret, (extra_0, ..., extra_n))`, so that VIR sees one return value and needs
+/// no notion of a second, parallel one.
+#[derive(Debug, Clone)]
+pub(crate) struct ExtraRetVar {
+    pub(crate) name: VarIdent,
+    /// The wrapper type as written, e.g. `Ghost<u32>`.
+    pub(crate) typ: Typ,
+    /// Spec for a `Ghost<T>` output, Proof for a `Tracked<T>` one.
+    pub(crate) mode: Mode,
+    pub(crate) span: vir::messages::Span,
+}
+
+/// `(extra_0, ..., extra_n)`, each read at exec mode, ready to be paired with the
+/// ordinary return value.
+pub(crate) fn extra_ret_values<'tcx>(
+    ctxt: &Context<'tcx>,
+    span: &vir::messages::Span,
+    vars: &[ExtraRetVar],
+) -> vir::ast::Expr {
+    use vir::ast::{ExprX, PlaceX, ReadKind, UnfinalizedReadKind};
+    let exprs: Vec<vir::ast::Expr> = vars
+        .iter()
+        .map(|v| {
+            let place = vir::ast::SpannedTyped::new(
+                &v.span,
+                &v.typ,
+                PlaceX::Local(v.name.clone()),
+            );
+            let read_kind = UnfinalizedReadKind {
+                preliminary_kind: if v.mode == Mode::Proof {
+                    ReadKind::Move
+                } else {
+                    ReadKind::Copy
+                },
+                id: ctxt.unique_read_kind_id(),
+            };
+            let read = vir::ast::SpannedTyped::new(
+                &v.span,
+                &v.typ,
+                ExprX::ReadPlace(place, read_kind),
+            );
+            // The local is ghost so that the body can assign it from proof code,
+            // but the tuple it joins is the exec return value. This is the same
+            // node `Ghost(..)`/`Tracked(..)` produce in exec code: it checks the
+            // read in a ghost block and yields the wrapper at exec mode.
+            vir::ast::SpannedTyped::new(
+                &v.span,
+                &v.typ,
+                ExprX::Ghost {
+                    alloc_wrapper: true,
+                    tracked: v.mode == Mode::Proof,
+                    expr: read,
+                },
+            )
+        })
+        .collect();
+    vir::ast_util::mk_tuple(span, &Arc::new(exprs))
+}
+
+/// The return type a callee with extra outputs has at the VIR level.
+pub(crate) fn extra_ret_folded_typ(ret_typ: &Typ, vars: &[ExtraRetVar]) -> Typ {
+    let extras = vir::ast_util::mk_tuple_typ(&Arc::new(
+        vars.iter().map(|v| v.typ.clone()).collect::<Vec<_>>(),
+    ));
+    vir::ast_util::mk_tuple_typ(&Arc::new(vec![ret_typ.clone(), extras]))
+}
+
+/// Lower `let mut z = declare_ret_with::<T>();` to a declaration with no
+/// initializer. The variable is ghost so proof code can assign it, and it joins
+/// the exec return value only through a `Ghost(..)`/`Tracked(..)` wrapper.
+pub(crate) fn extra_ret_decl_to_vir<'tcx>(
+    bctx: &crate::context::BodyCtxt<'tcx>,
+    pat: &rustc_hir::Pat<'tcx>,
+) -> Result<Vec<vir::ast::Stmt>, VirErr> {
+    use vir::ast::{DeclProph, PatternBinding, PatternX, StmtX};
+    let (_, name) = pat_to_mut_var(pat)?;
+    let vars = bctx.extra_ret_fold.as_ref().expect("with outputs");
+    let var = vars.iter().find(|v| v.name == name).expect("declared with output");
+    let binding = PatternBinding {
+        name: var.name.clone(),
+        by_ref: vir::ast::ByRef::No,
+        typ: var.typ.clone(),
+        user_mut: Some(true),
+        copy: var.mode == Mode::Spec,
+    };
+    let pattern = bctx.spanned_typed_new(pat.span, &var.typ, PatternX::Var(binding));
+    {
+        let mut erasure_info = bctx.ctxt.erasure_info.borrow_mut();
+        erasure_info.hir_vir_ids.push((pat.hir_id, pattern.span.id));
+        // Reads of this output are synthesized at the span the pre-scan gave it,
+        // so mode checking records it under that span too.
+        erasure_info.hir_vir_ids.push((pat.hir_id, var.span.id));
+    }
+    Ok(vec![vir::def::Spanned::new(
+        pattern.span.clone(),
+        StmtX::Decl {
+            pattern,
+            mode: Some((var.mode, DeclProph::Default)),
+            init: None,
+            els: None,
+        },
+    )])
+}
+
+/// Make the body's value the folded
+/// `(ret, (extras...))` tuple. Every `return` inside the body was already folded
+/// while it was lowered; this handles the fall-off-the-end exit.
+/// Part 1 of the body: pull out the declarations of the extra outputs. They are
+/// removed before the header is read, so they cannot come between the start of
+/// the body and a `no_method_body()`, and are put back around the whole body by
+/// `fold_extra_ret_into_body`.
+fn split_extra_ret_decls<'tcx>(
+    ctxt: &Context<'tcx>,
+    body: &vir::ast::Expr,
+    vars: &[ExtraRetVar],
+) -> (Vec<vir::ast::Stmt>, vir::ast::Expr) {
+    use vir::ast::{ExprX, PatternX, StmtX};
+    let is_extra_decl = |stmt: &vir::ast::Stmt| match &stmt.x {
+        StmtX::Decl { pattern, .. } => match &pattern.x {
+            PatternX::Var(binding) => vars.iter().any(|v| v.name == binding.name),
+            _ => false,
+        },
+        _ => false,
+    };
+    match &body.x {
+        ExprX::Block(stmts, tail) => {
+            let (decls, rest): (Vec<_>, Vec<_>) =
+                stmts.iter().cloned().partition(|s| is_extra_decl(s));
+            let rest = ctxt.spanned_typed_new_vir(
+                &body.span,
+                &body.typ,
+                ExprX::Block(Arc::new(rest), tail.clone()),
+            );
+            (decls, rest)
+        }
+        // A body that always leaves through a `return` is wrapped in this
+        // coercion; the declarations are inside it.
+        ExprX::NeverToAny(inner) => {
+            let (decls, rest) = split_extra_ret_decls(ctxt, inner, vars);
+            let rest =
+                ctxt.spanned_typed_new_vir(&body.span, &body.typ, ExprX::NeverToAny(rest));
+            (decls, rest)
+        }
+        _ => (vec![], body.clone()),
+    }
+}
+
+/// Part 2 of the body: its value becomes `(value, (extras...))`, wrapped in the
+/// declarations so the outputs are in scope.
+fn fold_extra_ret_into_body<'tcx>(
+    ctxt: &Context<'tcx>,
+    decls: Vec<vir::ast::Stmt>,
+    body: &vir::ast::Expr,
+    vars: &[ExtraRetVar],
+) -> vir::ast::Expr {
+    use vir::ast::{ExprX, StmtX};
+    // Every node built here is new, so it needs a span of its own: the
+    // resolution pass indexes by span id and rejects duplicates.
+    let fresh = || {
+        let mut span = body.span.clone();
+        span.id = ctxt.spans.get_next_span_id();
+        span
+    };
+    let extras = extra_ret_values(ctxt, &fresh(), vars);
+    let mut stmts = decls;
+    // Control never reaches the end of a diverging body, so there is nothing to
+    // pair: every exit folded its own value already.
+    if let ExprX::NeverToAny(_) = &body.x {
+        let typ = extra_ret_folded_typ(&body.typ, vars);
+        let never = vir::ast::SpannedTyped::new(&fresh(), &typ, body.x.clone());
+        return vir::ast::SpannedTyped::new(
+            &fresh(),
+            &typ,
+            ExprX::Block(Arc::new(stmts), Some(never)),
+        );
+    }
+    // A body that produces no value may still be ghost, as `proof { .. }` is.
+    // Sequence it and pair a fresh unit, so the returned tuple stays exec.
+    let value = if vir::ast_util::is_unit(&body.typ) {
+        stmts.push(vir::def::Spanned::new(fresh(), StmtX::Expr(body.clone())));
+        vir::ast_util::mk_tuple(&fresh(), &Arc::new(vec![]))
+    } else {
+        body.clone()
+    };
+    let folded = vir::ast_util::mk_tuple(&fresh(), &Arc::new(vec![value, extras]));
+    let typ = folded.typ.clone();
+    vir::ast::SpannedTyped::new(&fresh(), &typ, ExprX::Block(Arc::new(stmts), Some(folded)))
+}
+
+/// Rewrite an `ensures` clause so that the user's names for the extra outputs
+
+/// Rebind the user's own name for the return value to its position in the
+
 #[derive(Debug)]
 enum FnOrConstSigEnum<'tcx> {
     Fn(&'tcx FnSig<'tcx>),
@@ -221,7 +417,6 @@ fn handle_autospec<'tcx>(
                 typ_bounds: functionx.typ_bounds.clone(),
                 params: Arc::new(spec_params),
                 ret: spec_ret_param,
-                extra_ret_params: Arc::new(vec![]),
                 ens_has_return: true,
                 require: functionx.require.clone(), // requires becomes recommends
                 ensure: (Arc::new(vec![]), Arc::new(vec![])),
@@ -295,6 +490,8 @@ fn mk_bctx<'tcx>(
     param_names: Vec<VarIdent>,
     external_opaque_type_map: Option<HashMap<Path, Path>>,
     declare_with_hir_ids: HashSet<HirId>,
+    declare_ret_with_hir_ids: HashSet<HirId>,
+    extra_ret_fold: Option<std::rc::Rc<Vec<ExtraRetVar>>>,
 ) -> BodyCtxt<'tcx> {
     BodyCtxt {
         ctxt: ctxt.clone(),
@@ -317,6 +514,8 @@ fn mk_bctx<'tcx>(
         label_map: std::rc::Rc::new(std::cell::RefCell::new((HashMap::new(), 0))),
         pending_tracked_args: std::rc::Rc::new(std::cell::RefCell::new(None)),
         declare_with_hir_ids: std::rc::Rc::new(declare_with_hir_ids),
+        declare_ret_with_hir_ids: std::rc::Rc::new(declare_ret_with_hir_ids),
+        extra_ret_fold,
     }
 }
 
@@ -832,6 +1031,8 @@ fn body_to_vir<'tcx>(
     external_opaque_type_map: Option<HashMap<Path, Path>>,
     is_async: bool,
     declare_with_hir_ids: HashSet<HirId>,
+    declare_ret_with_hir_ids: HashSet<HirId>,
+    extra_ret_fold: Option<std::rc::Rc<Vec<ExtraRetVar>>>,
 ) -> Result<vir::ast::Expr, VirErr> {
     let bctx = mk_bctx(
         ctxt,
@@ -844,6 +1045,8 @@ fn body_to_vir<'tcx>(
         param_names,
         external_opaque_type_map,
         declare_with_hir_ids,
+        declare_ret_with_hir_ids,
+        extra_ret_fold,
     );
     let body_expr =
         if is_async { extract_desugared_async_body(&bctx.ctxt, body)? } else { &body.value };
@@ -2362,9 +2565,25 @@ pub(crate) fn check_item_fn<'tcx>(
                 }
             }
 
-            // Merge hir_ids to skip from both declare_with and declare_ret_with
-            let mut all_declare_hir_ids = declare_with_hir_ids;
-            all_declare_hir_ids.extend(declare_ret_with_hir_ids);
+            let all_declare_hir_ids = declare_with_hir_ids;
+            let ret_with_hir_ids = declare_ret_with_hir_ids;
+
+            let extra_ret_fold: Option<std::rc::Rc<Vec<ExtraRetVar>>> =
+                if extra_ret_params_for_func.is_empty() {
+                    None
+                } else {
+                    Some(std::rc::Rc::new(
+                        extra_ret_params_for_func
+                            .iter()
+                            .map(|p| ExtraRetVar {
+                                name: p.x.name.clone(),
+                                typ: p.x.typ.clone(),
+                                mode: p.x.unwrapped_info.as_ref().expect("with output mode").0,
+                                span: p.span.clone(),
+                            })
+                            .collect(),
+                    ))
+                };
 
             let external_body = vattrs.external_body || vattrs.external_fn_specification;
             let mut param_names = vir_params.iter().map(|p| p.x.name.clone()).collect::<Vec<_>>();
@@ -2384,9 +2603,20 @@ pub(crate) fn check_item_fn<'tcx>(
                 assume_specification_opaque_type_map.clone(),
                 is_async,
                 all_declare_hir_ids,
+                ret_with_hir_ids,
+                extra_ret_fold.clone(),
             )?;
+            let mut extra_ret_decls: Vec<vir::ast::Stmt> = vec![];
+            if let Some(vars) = &extra_ret_fold {
+                let (decls, rest) = split_extra_ret_decls(ctxt, &vir_body, vars);
+                extra_ret_decls = decls;
+                vir_body = rest;
+            }
             let header =
                 vir::headers::read_header(&mut vir_body, &vir::headers::HeaderAllows::All)?;
+            if let Some(vars) = &extra_ret_fold {
+                vir_body = fold_extra_ret_into_body(ctxt, extra_ret_decls, &vir_body, vars);
+            }
             (Some(vir_body), header, Some(body.value.hir_id))
         }
         CheckItemFnEither::ParamNames(_params) => {
@@ -2453,17 +2683,35 @@ pub(crate) fn check_item_fn<'tcx>(
     if mode != Mode::Exec && vattrs.external_fn_specification {
         return err_span(sig.span, "assume_specification should be 'exec'");
     }
+    let extra_ret_vars: Vec<ExtraRetVar> = extra_ret_params_for_func
+        .iter()
+        .map(|p| ExtraRetVar {
+            name: p.x.name.clone(),
+            typ: p.x.typ.clone(),
+            mode: p.x.unwrapped_info.as_ref().map(|(m, _)| *m).unwrap_or(Mode::Spec),
+            span: p.span.clone(),
+        })
+        .collect();
     if header.ensure.0.len() + header.ensure.1.len() > 0 {
         match (is_async, &header.ensure_id_typ, ret_typ_mode.as_ref()) {
             (_, None, None) => {}
             (_, None, Some(_)) => {}
-            (_, Some(_), None) => {
+            // A function returning nothing still returns `((), (extras...))`
+            // once its `with` outputs are folded in, so the ensures clause does
+            // name a return value.
+            (_, Some(_), None) if extra_ret_vars.is_empty() => {
                 return err_span(
                     sig.span,
                     "unexpected named return value for function with default return",
                 );
             }
+            (_, Some(_), None) => {}
             (false, Some((_, Some(typ))), Some((ret_typ, _))) => {
+                let ret_typ = &if extra_ret_vars.is_empty() {
+                    ret_typ.clone()
+                } else {
+                    extra_ret_folded_typ(ret_typ, &extra_ret_vars)
+                };
                 if !vir::ast_util::types_equal(&typ, &ret_typ) {
                     return err_span(
                         sig.span,
@@ -2523,7 +2771,13 @@ pub(crate) fn check_item_fn<'tcx>(
     let (ret_name, ret_typ, ret_mode) = match (header.ensure_id_typ, ret_typ_mode.clone()) {
         (None, None) => (air_unique_var(RETURN_VALUE), unit_typ(), mode),
         (None, Some((typ, mode))) => (air_unique_var(RETURN_VALUE), typ, mode),
-        (Some((x, Some(typ))), Some((_, mode))) => (x, typ, mode),
+        // With extras, the ensures clause is written against the folded return
+        // value, so its annotation is already `(ret, (extras...))`. Take the
+        // unfolded type from the signature and let the fold below apply once.
+        (Some((x, Some(typ))), Some((sig_typ, mode))) => {
+            if extra_ret_vars.is_empty() { (x, typ, mode) } else { (x, sig_typ, mode) }
+        }
+        (Some((x, Some(_))), None) if !extra_ret_vars.is_empty() => (x, unit_typ(), mode),
         _ => panic!("internal error: ret_typ"),
     };
     let ret_span = sig.output_span();
@@ -2664,8 +2918,37 @@ pub(crate) fn check_item_fn<'tcx>(
     // Note: ens_has_return isn't final; it may need to be changed later to make
     // sure it's in sync for trait method impls and trait method decls.
     // See `fixup_ens_has_return_for_trait_method_impls`.
-    let (ensure0, ens_has_return) = clean_ensures_for_unit_return(ctxt, &ret, &header.ensure.0);
-    let (ensure1, _ns_has_return) = clean_ensures_for_unit_return(ctxt, &ret, &header.ensure.1);
+    // With extras the return is `((), (extras...))` rather than unit, and the
+    // ensures clause names it, so there is no unit return value to elide.
+    let (ensure0, ens_has_return) = if extra_ret_vars.is_empty() {
+        clean_ensures_for_unit_return(ctxt, &ret, &header.ensure.0)
+    } else {
+        (header.ensure.0.clone(), true)
+    };
+    let (ensure1, _ns_has_return) = if extra_ret_vars.is_empty() {
+        clean_ensures_for_unit_return(ctxt, &ret, &header.ensure.1)
+    } else {
+        (header.ensure.1.clone(), true)
+    };
+
+    // Fold the extra `with` outputs into the return value, so that from here on
+    // this is an ordinary function returning `(ret, (extras...))`.
+    let (ret, ensure0, ensure1, ens_has_return) = if extra_ret_vars.is_empty() {
+        (ret, ensure0, ensure1, ens_has_return)
+    } else {
+        let folded_typ = extra_ret_folded_typ(&ret.x.typ, &extra_ret_vars);
+        let folded_ret = ctxt.spanned_new(
+            ret_span,
+            ParamX {
+                name: ret.x.name.clone(),
+                typ: folded_typ,
+                mode: ret.x.mode,
+                user_mut: false,
+                unwrapped_info: None,
+            },
+        );
+        (folded_ret, ensure0, ensure1, true)
+    };
 
     let (publish, mode, ensure, returns, item_kind, body) =
         match (is_external_const, header.returns) {
@@ -2727,7 +3010,6 @@ pub(crate) fn check_item_fn<'tcx>(
         typ_bounds,
         params,
         ret,
-        extra_ret_params: Arc::new(extra_ret_params_for_func),
         // async function always refer to return value in ensures
         ens_has_return: is_async || ens_has_return,
         require: if mode == Mode::Spec { Arc::new(recommend) } else { header.require },
@@ -2819,7 +3101,6 @@ fn fix_external_fn_specification_trait_method_decl_typs(
             mut typ_bounds,
             mut params,
             mut ret,
-            mut extra_ret_params,
             ens_has_return,
             require,
             ensure,
@@ -2859,10 +3140,6 @@ fn fix_external_fn_specification_trait_method_decl_typs(
 
         ret = ret.new_x(ParamX { typ: subst_typ(&typ_substs, &ret.x.typ), ..ret.x.clone() });
 
-        extra_ret_params = Arc::new(crate::util::vec_map(&extra_ret_params, |p| {
-            p.new_x(ParamX { typ: subst_typ(&typ_substs, &p.x.typ), ..p.x.clone() })
-        }));
-
         unsupported_err_unless!(require.len() == 0, span, "requires clauses");
         unsupported_err_unless!(ensure.0.len() + ensure.1.len() == 0, span, "ensures clauses");
         unsupported_err_unless!(returns.is_some(), span, "returns clauses");
@@ -2887,7 +3164,6 @@ fn fix_external_fn_specification_trait_method_decl_typs(
             typ_bounds,
             params,
             ret,
-            extra_ret_params,
             ens_has_return,
             require,
             ensure,
@@ -3525,6 +3801,8 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         None,
         false,
         HashSet::new(),
+        HashSet::new(),
+        None,
     )?;
     let header = vir::headers::read_header(
         &mut vir_body,
@@ -3615,7 +3893,6 @@ pub(crate) fn check_item_const_or_static<'tcx>(
         typ_bounds,
         params: Arc::new(vec![]),
         ret,
-        extra_ret_params: Arc::new(vec![]),
         ens_has_return,
         require: Arc::new(vec![]),
         ensure: (ensure, Arc::new(vec![])),
@@ -3733,7 +4010,6 @@ pub(crate) fn check_foreign_item_fn<'tcx>(
         typ_bounds,
         params,
         ret,
-        extra_ret_params: Arc::new(vec![]),
         ens_has_return,
         require: Arc::new(vec![]),
         ensure: (Arc::new(vec![]), Arc::new(vec![])),

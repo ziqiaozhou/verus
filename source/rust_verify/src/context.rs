@@ -125,6 +125,14 @@ pub(crate) struct BodyCtxt<'tcx> {
     pub(crate) pending_tracked_args: Rc<RefCell<Option<PendingWith>>>,
     /// HirIds of declare_with() let-stmts to skip during body conversion
     pub(crate) declare_with_hir_ids: Rc<HashSet<HirId>>,
+    /// HirIds of declare_ret_with() let-stmts. These are not skipped: they lower
+    /// to an uninitialized declaration of the extra output, which the body must
+    /// assign before it can be returned.
+    pub(crate) declare_ret_with_hir_ids: Rc<HashSet<HirId>>,
+    /// The extra outputs of a `with` clause, when lowering the body that declares
+    /// them. Every exit of that body has to produce them alongside the ordinary
+    /// return value; a nested closure has its own exits, so this is cleared there.
+    pub(crate) extra_ret_fold: Option<Rc<Vec<crate::rust_to_vir_func::ExtraRetVar>>>,
 }
 
 pub(crate) struct AtomicallyCtxt {

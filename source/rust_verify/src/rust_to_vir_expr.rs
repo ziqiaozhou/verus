@@ -1754,7 +1754,6 @@ pub(crate) fn expr_to_vir_with_adjustments<'tcx>(
                     autospec: autospec_usage,
                     const_var: false,
                     assume_external_allowed: false,
-                    extra_ret_dest: false,
                 };
                 let call_target = CallTarget::Fun(
                     vir::ast::CallTargetKind::Static,
@@ -2378,7 +2377,6 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                             autospec: AutospecUsage::Final,
                             const_var: false,
                             assume_external_allowed: false,
-                            extra_ret_dest: false,
                         };
                         (
                             CallTarget::Fun(
@@ -2452,7 +2450,6 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                     autospec: autospec_usage,
                     const_var: false,
                     assume_external_allowed: false,
-                    extra_ret_dest: false,
                 };
                 let call_target = CallTarget::Fun(
                     vir::ast::CallTargetKind::Static,
@@ -2554,7 +2551,6 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                         autospec: autospec_usage,
                         const_var: false,
                         assume_external_allowed: false,
-                        extra_ret_dest: false,
                     };
                     let call_target = CallTarget::Fun(
                         vir::ast::CallTargetKind::Static,
@@ -3215,12 +3211,27 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                 },
             )))
         }
-        ExprKind::Ret(expr) => {
-            let expr = match expr {
+        ExprKind::Ret(ret_val) => {
+            let ret_span = bctx.ctxt.spans.to_air_span(expr.span);
+            let value = match ret_val {
                 None => None,
-                Some(expr) => Some(expr_to_vir_consume(bctx, expr)?),
+                Some(ret_val) => Some(expr_to_vir_consume(bctx, ret_val)?),
             };
-            mk_expr(ExprX::Return(expr))
+            let value = match &bctx.extra_ret_fold {
+                None => value,
+                Some(vars) => {
+                    let ret_value = value.unwrap_or_else(|| {
+                        vir::ast_util::mk_tuple(&ret_span, &Arc::new(vec![]))
+                    });
+                    let extras =
+                        crate::rust_to_vir_func::extra_ret_values(&bctx.ctxt, &ret_span, vars);
+                    Some(vir::ast_util::mk_tuple(
+                        &ret_span,
+                        &Arc::new(vec![ret_value, extras]),
+                    ))
+                }
+            };
+            mk_expr(ExprX::Return(value))
         }
         ExprKind::Break(dest, None) => {
             let label = bctx.label_from_dest(expr.span, dest)?;
@@ -3378,7 +3389,6 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                         autospec: AutospecUsage::Final,
                         const_var: false,
                         assume_external_allowed: false,
-                        extra_ret_dest: false,
                     };
                     // special fast path
                     let call_target = CallTarget::Fun(
@@ -4012,6 +4022,11 @@ pub(crate) fn stmt_to_vir<'tcx>(
             if bctx.declare_with_hir_ids.contains(&stmt.hir_id) {
                 return Ok(vec![]);
             }
+            // An extra output declares the variable but supplies no value: the
+            // body has to assign it before any exit can return it.
+            if bctx.declare_ret_with_hir_ids.contains(&stmt.hir_id) {
+                return crate::rust_to_vir_func::extra_ret_decl_to_vir(bctx, pat);
+            }
             // The trait/impl `with` conformance check is a call the compiler
             // region-checks and VIR never sees.
             if crate::attributes::is_with_conform(bctx.ctxt.tcx.hir_attrs(stmt.hir_id)) {
@@ -4107,13 +4122,15 @@ pub(crate) fn closure_to_vir<'tcx>(
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // A `return` in a closure exits the closure, not the enclosing function,
+        // so it must not produce the enclosing function's extra `with` outputs.
         let body_bctx = if is_spec_fn {
-            bctx
+            &BodyCtxt { extra_ret_fold: None, ..bctx.clone() }
         } else {
             let mut all_params = (*bctx.params).clone();
             all_params.push(params.iter().map(|p| p.name.clone()).collect());
             let bctx = bctx.set_header_setting(HeaderSetting::Fn);
-            &BodyCtxt { params: std::rc::Rc::new(all_params), ..bctx }
+            &BodyCtxt { params: std::rc::Rc::new(all_params), extra_ret_fold: None, ..bctx }
         };
 
         let mut body = expr_to_vir_consume(body_bctx, &body.value)?;
@@ -4299,7 +4316,6 @@ pub(crate) fn maybe_do_ptr_cast<'tcx>(
                 autospec: autospec_usage,
                 const_var: false,
                 assume_external_allowed: false,
-                extra_ret_dest: false,
             };
             let call_target = CallTarget::Fun(
                 vir::ast::CallTargetKind::Static,

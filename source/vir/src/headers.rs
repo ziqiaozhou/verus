@@ -511,7 +511,12 @@ fn make_trait_decl(method: &Function, spec_method: &Function) -> Result<Function
             ));
         }
     }
-    if methodx.params.len() != params.len() {
+    // A `with` clause on a bodyless trait method is lowered into the spec
+    // method's body, so the spec method carries the extra inputs as trailing
+    // parameters that the method itself cannot have.
+    let extras_are_with_params = params.len() > methodx.params.len()
+        && params[methodx.params.len()..].iter().all(|p| p.x.unwrapped_info.is_some());
+    if methodx.params.len() != params.len() && !extras_are_with_params {
         return Err(error(
             &spec_method.span,
             "method specification has different number of parameters from method",
@@ -525,7 +530,18 @@ fn make_trait_decl(method: &Function, spec_method: &Function) -> Result<Function
             ));
         }
     }
-    if !params_equal_opt(&methodx.ret, &ret, false, false) {
+    // Extra outputs of a `with` clause are folded into the spec method's return
+    // value as `(ret, (extras...))`, which the method itself cannot declare.
+    let ret_is_folded = match (&*ret.x.typ, extras_are_with_params) {
+        (crate::ast::TypX::Datatype(crate::ast::Dt::Tuple(2), typs, _), _)
+            if crate::ast_util::types_equal(&typs[0], &methodx.ret.x.typ)
+                && matches!(&*typs[1], crate::ast::TypX::Datatype(crate::ast::Dt::Tuple(_), ..)) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    if !ret_is_folded && !params_equal_opt(&methodx.ret, &ret, false, false) {
         return Err(error(
             &spec_method.span,
             "method specification has a different return from method",
