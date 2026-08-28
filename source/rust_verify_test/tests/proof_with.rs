@@ -3365,3 +3365,100 @@ test_verify_one_file! {
         }
     } => Err(e) => assert_rust_error_msg(e, "mismatched types")
 }
+
+// The shim trait is put in scope for the rewritten call only: a neighbouring
+// call, including one to a same-named method of another trait, resolves as it
+// did before.
+test_verify_one_file! {
+    #[test] test_trait_shim_scope_is_per_call code!{
+        use vstd::prelude::*;
+
+        #[verus_verify]
+        pub trait X {
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verus_verify]
+        pub trait Y {
+            #[verus_spec(ret => ensures ret == 8)]
+            fn f(&self, a: u64) -> u64;
+
+            #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == 9)]
+            fn h(&self, a: u64) -> u64;
+        }
+
+        #[verus_verify]
+        pub struct S;
+
+        #[verus_verify]
+        pub struct T;
+
+        #[verus_verify]
+        impl X for S {
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn f(&self, a: u64) -> u64 { a }
+        }
+
+        #[verus_verify]
+        impl Y for T {
+            #[verus_spec(ret => ensures ret == 8)]
+            fn f(&self, a: u64) -> u64 { 8 }
+
+            #[verus_spec(with Ghost(g): Ghost<u64>)]
+            fn h(&self, a: u64) -> u64 { 9 }
+        }
+
+        #[verus_spec]
+        fn caller(s: &S, t: &T) {
+            proof_with!{Ghost(3u64)}
+            let r = s.f(7);
+            let plain = t.f(7);
+            proof_with!{Ghost(3u64)}
+            let r2 = t.h(7);
+            proof!{
+                assert(r == 7);
+                assert(plain == 8);
+                assert(r2 == 9);
+            }
+        }
+    } => Ok(())
+}
+
+// The shim trait is put in scope for the rewritten call only, so elsewhere in
+// the same body it stays as invisible as any other unimported trait.
+test_verify_one_file! {
+    #[test] test_trait_shim_not_in_scope_for_neighbouring_call code!{
+        use vstd::prelude::*;
+
+        mod defs {
+            use vstd::prelude::*;
+
+            #[verus_verify]
+            pub trait X {
+                #[verus_spec(ret => with Ghost(g): Ghost<u64> ensures ret == a)]
+                fn f(&self, a: u64) -> u64;
+            }
+
+            #[verus_verify]
+            pub struct S;
+
+            #[verus_verify]
+            impl X for S {
+                #[verus_spec(with Ghost(g): Ghost<u64>)]
+                fn f(&self, a: u64) -> u64 { a }
+            }
+        }
+
+        use defs::{S, X};
+
+        #[verus_spec]
+        fn caller(s: &S) {
+            proof_with!{Ghost(3u64)}
+            let r = s.f(7);
+            let bad = s._VERUS_WITH_f(8, Ghost::assume_new());
+        }
+    } => Err(e) => assert!(
+        e.errors.iter().any(|d| d.message.contains("no method named `_VERUS_WITH_f`"))
+    )
+}

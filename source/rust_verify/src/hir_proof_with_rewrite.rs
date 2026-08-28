@@ -155,6 +155,23 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
         self.is_with_shim(shim).then_some(shim)
     }
 
+    /// The shim trait generated beside `trait_def_id`, but only when it holds a
+    /// shim named `shim`: a trait whose shim trait cannot supply the method being
+    /// called has no business being in scope at that call.
+    fn shim_trait_declaring(&self, trait_def_id: DefId, shim: Symbol) -> Option<DefId> {
+        let shim_trait = self.find_shim_trait(trait_def_id)?;
+        let shim_fn = match shim_trait.as_local() {
+            Some(local) => local_child_fn(self.owners, local, shim)?.to_def_id(),
+            None => self
+                .tcx
+                .associated_items(shim_trait)
+                .filter_by_name_unhygienic(shim)
+                .find(|assoc| matches!(assoc.kind, rustc_middle::ty::AssocKind::Fn { .. }))
+                .map(|assoc| assoc.def_id)?,
+        };
+        self.is_with_shim(shim_fn).then_some(shim_trait)
+    }
+
     /// The shim trait generated beside `trait_def_id`, holding the shims of its
     /// methods. Absent when the trait declares no `with` clause at all.
     fn find_shim_trait(&self, trait_def_id: DefId) -> Option<DefId> {
@@ -723,7 +740,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             ExprKind::MethodCall(seg, receiver, args, span) => {
                 let mut new_args = args.to_vec();
                 new_args.extend(extras);
-                self.bring_shim_traits_into_scope(call.hir_id.local_id);
+                self.bring_shim_traits_into_scope(
+                    call.hir_id.local_id,
+                    shim_name(seg.ident.name, with_outputs),
+                );
                 let new_seg = self.rename_segment(seg, with_outputs);
                 ExprKind::MethodCall(new_seg, receiver, self.alloc_exprs(new_args), *span)
             }
@@ -760,7 +780,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // The qualifying type resolves later, so only the name can be changed
             // here; an absent shim then surfaces as an unresolved method.
             QPath::TypeRelative(ty, seg) => {
-                self.bring_shim_traits_into_scope(callee.hir_id.local_id);
+                self.bring_shim_traits_into_scope(
+                    callee.hir_id.local_id,
+                    shim_name(seg.ident.name, with_outputs),
+                );
                 QPath::TypeRelative(ty, self.rename_segment(seg, with_outputs))
             }
             QPath::Resolved(self_ty, path) => {
@@ -801,17 +824,18 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// A trait method's shim lives on a shim trait the user never names, so
-    /// method resolution would not consider it. Every trait that was in scope for
-    /// the original call contributes its shim trait, if it has one; the receiver's
-    /// type is not known before type checking, so the choice among them is left to
-    /// method resolution, exactly as it is for the original call.
-    fn bring_shim_traits_into_scope(&mut self, id: ItemLocalId) {
+    /// method resolution would not consider it. Only the traits that were already
+    /// candidates at this very call contribute, and only if their shim trait
+    /// declares `shim`; the receiver's type is not known before type checking, so
+    /// the choice among those is left to method resolution, exactly as it is for
+    /// the original call.
+    fn bring_shim_traits_into_scope(&mut self, id: ItemLocalId, shim: Symbol) {
         let Some(candidates) = self.owner.trait_map.get(&id) else {
             return;
         };
         let shim_traits: Vec<DefId> = candidates
             .iter()
-            .filter_map(|candidate| self.ctxt.find_shim_trait(candidate.def_id))
+            .filter_map(|candidate| self.ctxt.shim_trait_declaring(candidate.def_id, shim))
             .collect();
         self.extra_traits.extend(shim_traits.into_iter().map(|def_id| (id, def_id)));
     }
