@@ -3462,3 +3462,244 @@ test_verify_one_file! {
         e.errors.iter().any(|d| d.message.contains("no method named `_VERUS_WITH_f`"))
     )
 }
+
+fn assert_postcondition_fails(err: TestErr) {
+    assert_eq!(err.errors.len(), 1);
+    assert!(err.errors[0].message.contains("postcondition not satisfied"));
+}
+
+// ---------------------------------------------------------------------------
+// Control flow in a callee that has extra outputs.
+//
+// These pin behaviour that is otherwise untested: no other test in this file
+// puts a `return` in a callee with a `with` output, so folding the extras into
+// the return value could silently change what happens at an early exit.
+// ---------------------------------------------------------------------------
+
+test_verify_one_file! {
+    #[test] test_extra_out_early_return_after_assign code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn f(x: u64) -> u64 {
+            proof!{ z = Ghost(1u32); }
+            if x > 0 {
+                return 5;
+            }
+            x
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_decl!{ let ghost zz: u32; }
+            proof_with!{ => Ghost(zz): Ghost<u32>}
+            let r = f(7);
+            proof!{ assert(zz == 1); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_early_return_before_assign code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                return 5;
+            }
+            proof!{ z = Ghost(1u32); }
+            x
+        }
+    } => Err(err) => assert_postcondition_fails(err)
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_assigned_in_one_branch_only code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                proof!{ z = Ghost(1u32); }
+            }
+            x
+        }
+    } => Err(err) => assert_postcondition_fails(err)
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_multiple_returns_all_assign code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                proof!{ z = Ghost(1u32); }
+                return 5;
+            }
+            proof!{ z = Ghost(1u32); }
+            return 7;
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_decl!{ let ghost zz: u32; }
+            proof_with!{ => Ghost(zz): Ghost<u32>}
+            let r = f(7);
+            proof!{ assert(zz == 1); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_two_outputs_multiple_returns code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> y: Ghost<u32>, z: Tracked<u64>,
+                     ensures y@ == 1, z@ == 2)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                proof!{ y = Ghost(1u32); z = Tracked(2u64); }
+                return 5;
+            }
+            proof!{ y = Ghost(1u32); z = Tracked(2u64); }
+            x
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_decl!{ let ghost yy: u32; let tracked zz: u64; }
+            proof_with!{ => (Ghost(yy), Tracked(zz)): (Ghost<u32>, Tracked<u64>)}
+            let r = f(7);
+            proof!{ assert(yy == 1); assert(zz == 2); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_early_return_unit_callee code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn f(x: u64) {
+            proof!{ z = Ghost(1u32); }
+            if x > 0 {
+                return;
+            }
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_decl!{ let ghost zz: u32; }
+            proof_with!{ => Ghost(zz): Ghost<u32>}
+            f(7);
+            proof!{ assert(zz == 1); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_out_early_return_discarded_at_call code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(ret => with -> z: Ghost<u32>, ensures z@ == 1, ret == 5)]
+        fn f(x: u64) -> u64 {
+            proof!{ z = Ghost(1u32); }
+            if x > 0 {
+                return 5;
+            }
+            5
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_with!{ => _}
+            let r = f(7);
+            proof!{ assert(r == 5); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_in_only_early_return code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(ret => with Ghost(g): Ghost<u32>, requires g == 3, ensures ret == 5)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                return 5;
+            }
+            5
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_with!{Ghost(3u32)}
+            let r = f(7);
+            proof!{ assert(r == 5); }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_extra_in_only_conditional_early_return code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(ret => with Tracked(t): Tracked<u64>, requires t == 3, ensures ret == t)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                return 3;
+            }
+            proof!{ assert(t == 3); }
+            3
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_with!{Tracked(3u64)}
+            let r = f(7);
+            proof!{ assert(r == 3); }
+        }
+    } => Ok(())
+}
+
+// TODO(soundness): an extra output that an early-return path never assigns is
+// still handed to the caller as a well-typed value, so the caller may invoke
+// `use_type_invariant` on it and learn a property of a value the callee never
+// produced. Ignored rather than pinned, because the current behaviour is wrong
+// and a fix is in progress; when the callee is required to assign every extra
+// output on every exit, this should become `Err`.
+test_verify_one_file! {
+    #[test] #[ignore] test_extra_out_unassigned_on_return_path_is_unsound code!{
+        use vstd::prelude::*;
+
+        verus!{
+            struct Pos { v: u64 }
+
+            impl Pos {
+                #[verifier::type_invariant]
+                spec fn inv(&self) -> bool { self.v > 0 }
+            }
+
+            proof fn mk() -> (tracked r: Pos) ensures r.v == 1 { Pos { v: 1 } }
+        }
+
+        #[verus_spec(with -> z: Tracked<Pos>)]
+        fn f(x: u64) -> u64 {
+            if x > 0 {
+                return 5;
+            }
+            proof!{ z = Tracked(mk()); }
+            x
+        }
+
+        #[verus_spec]
+        fn caller() {
+            proof_decl!{ let tracked zz: Pos; }
+            proof_with!{ => Tracked(zz): Tracked<Pos>}
+            let r = f(7);
+            proof!{ use_type_invariant(&zz); assert(zz.v > 0); }
+        }
+    } => Err(err) => assert_postcondition_fails(err)
+}
