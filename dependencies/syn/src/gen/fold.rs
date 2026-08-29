@@ -1473,6 +1473,7 @@ where
         inputs: (node.inputs)
             .map(|it| ((it).0, crate::punctuated::fold((it).1, f, F::fold_fn_arg))),
         output: f.fold_return_type(node.output),
+        with: (node.with).map(|it| f.fold_with_spec_on_fn(it)),
         requires: (node.requires).map(|it| f.fold_requires(it)),
         ensures: (node.ensures).map(|it| f.fold_ensures(it)),
         default_ensures: (node.default_ensures).map(|it| f.fold_default_ensures(it)),

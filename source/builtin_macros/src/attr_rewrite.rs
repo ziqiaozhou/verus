@@ -52,6 +52,9 @@ pub const DUAL_SPEC_PREFIX: &str = "__VERUS_SPEC";
 
 const VERUS_SPEC: &str = "verus_spec";
 
+/// `verus_spec` under the name the `verus!` macro applies it by.
+const VERUS_SPEC_INTERNAL: &str = "verus_spec_internal";
+
 // No cross-function type registry. When Rust cannot infer types for
 // proof_with/proof_with_ret (e.g., cross-crate calls or when callee is processed
 // after caller), the user must provide explicit type annotations on their variables.
@@ -459,8 +462,15 @@ fn prepare_items_for_verus_spec(
     // Without `#[verus_spec]` to consume it, the marker sentinel is a malformed
     // `allow` that would reach rustc, so in stub-erase mode (where no spec is
     // injected) only already-annotated items may be stamped.
+    // `verus!` writes the attribute as a path and under its internal name, so the
+    // last segment is what is compared.
     let has_verus_spec = |attrs: &[syn::Attribute]| {
-        attrs.iter().any(|attr| attr.path().get_ident().map_or(false, |i| i == VERUS_SPEC))
+        attrs.iter().any(|attr| {
+            attr.path()
+                .segments
+                .last()
+                .map_or(false, |s| s.ident == VERUS_SPEC || s.ident == VERUS_SPEC_INTERNAL)
+        })
     };
     macro_rules! stamp {
         ($attrs:expr, $marker:expr) => {
@@ -1562,12 +1572,18 @@ fn mk_external_trait_with_error(span: proc_macro2::Span) -> proc_macro2::TokenSt
 
 fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
     let path = attr.path();
+    let names_it = |list: &syn::MetaList| list.tokens.to_string() == "external_fn_specification";
     (path.segments.len() == 2
         && path.segments[0].ident == "verifier"
         && path.segments[1].ident == "external_fn_specification")
         || (path.segments.len() == 1
             && path.segments[0].ident == "verifier"
-            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "external_fn_specification"))
+            && matches!(&attr.meta, syn::Meta::List(list) if names_it(list)))
+        // `assume_specification` inside `verus!` is lowered to this spelling.
+        || (path.segments.len() == 2
+            && path.segments[0].ident == "verus"
+            && path.segments[1].ident == "internal"
+            && matches!(&attr.meta, syn::Meta::List(list) if names_it(list)))
 }
 
 /// Extract the target function name from the trailing call in an
@@ -1592,6 +1608,11 @@ fn extract_call_target_ident(expr: &syn::Expr) -> Option<syn::Ident> {
         }
         syn::Expr::Block(block_expr) => {
             let last = block_expr.block.stmts.last()?;
+            if let syn::Stmt::Expr(e, _) = last { extract_call_target_ident(e) } else { None }
+        }
+        // `assume_specification` wraps the call, since the target may be unsafe.
+        syn::Expr::Unsafe(unsafe_expr) => {
+            let last = unsafe_expr.block.stmts.last()?;
             if let syn::Stmt::Expr(e, _) = last { extract_call_target_ident(e) } else { None }
         }
         _ => None,

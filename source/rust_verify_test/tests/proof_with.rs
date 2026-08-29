@@ -3821,19 +3821,39 @@ test_verify_one_file! {
                 assert(r == 0);
             }
 
-            // an extra output produced with `proof_with!{|= ..}`
+            // an extra output, assigned by name in the callee
             fn out_fn(a: u64) -> (r: u64)
                 with Ghost(c): Ghost<u32> -> d: Ghost<u32>
                 requires c == 2,
                 ensures r == a, d@ == c,
             {
-                proof_with!{|= Ghost(c)}
+                proof!{ d = Ghost(c); }
                 a
             }
 
             fn call_out() {
-                proof_with!{Ghost(2u32) => Ghost(d)}
+                proof_decl!{ let ghost d: u32; }
+                proof_with!{Ghost(2u32) => Ghost(d): Ghost<u32>}
                 let r = out_fn(7);
+                assert(r == 7 && d == 2);
+            }
+
+            // `with` on an `assume_specification` with an extra output
+            #[verifier::external]
+            fn ext_id(x: u64) -> u64 {
+                x
+            }
+
+            assume_specification[ext_id](x: u64) -> (ret: u64)
+                with Ghost(c): Ghost<u32> -> d: Ghost<u32>
+                requires c == 2,
+                ensures ret == x, d@ == c,
+            ;
+
+            fn call_ext_id() {
+                proof_decl!{ let ghost d: u32; }
+                proof_with!{Ghost(2u32) => Ghost(d): Ghost<u32>}
+                let r = ext_id(7);
                 assert(r == 7 && d == 2);
             }
 
@@ -3857,12 +3877,19 @@ test_verify_one_file! {
             }
         }.to_string()
         // `with` on an `assume_specification` with an extra `Tracked` input
+        + ASSUME_SPEC_NEGATE_BOOL
+        + verus_code_str!{
+            fn call_negate() {
+                proof_with!{Tracked(3u8)}
+                let r = negate_bool(true, 3);
+                assert(r == false);
+            }
+        }
     => Ok(())
 }
 
 test_verify_one_file! {
-    // The extra argument is needed: a wrong one fails the precondition, and
-    // omitting `proof_with!` reaches the stub with `requires(false)`.
+    // The extra argument is needed, and a wrong one fails the callee's precondition.
     #[test] test_with_inside_verus_macro_fails verus_code!{
         use vstd::prelude::*;
 
@@ -3876,9 +3903,77 @@ test_verify_one_file! {
             proof_with!{Tracked(2u64)}
             test(0); // FAILS
         }
+    } => Err(e) => assert_one_fails(e)
+}
+
+test_verify_one_file! {
+    // Omitting `proof_with!` is rejected before verification, as it is in attribute form.
+    #[test] test_with_inside_verus_macro_missing_marker verus_code!{
+        use vstd::prelude::*;
+
+        fn test(a: u64)
+            with Tracked(b): Tracked<u64>
+            requires b == 1,
+        {
+        }
 
         fn call_missing() {
-            test(0); // FAILS
+            test(0);
         }
-    } => Err(e) => assert_fails(e, 2)
+    } => Err(e) => assert_vir_error_msg(e, "this function requires 1 extra tracked/ghost argument(s) via proof_with()")
+}
+
+// `assume_specification` accepts a `with` clause, so that giving an external function
+// extra ghost or tracked arguments does not require the attribute form.
+
+const ASSUME_SPEC_NEGATE_BOOL: &str = verus_code_str! {
+    use vstd::prelude::*;
+
+    #[verifier::external]
+    fn negate_bool(b: bool, _x: u8) -> bool {
+        !b
+    }
+
+    assume_specification[negate_bool](b: bool, x: u8) -> (ret: bool)
+        with Tracked(extra): Tracked<u8>
+        requires x == extra,
+        ensures ret == !b,
+    ;
+};
+
+test_verify_one_file! {
+    #[test] test_with_on_assume_specification_fails_precondition
+        ASSUME_SPEC_NEGATE_BOOL.to_string() + verus_code_str!{
+        fn call_negate() {
+            proof_with!{Tracked(4u8)}
+            let r = negate_bool(true, 3); // FAILS
+            assert(r == false);
+        }
+    } => Err(e) => assert_one_fails(e)
+}
+
+// An `assume_specification` body is synthesized, so the macro emits the assumption of
+// each extra output that the author would otherwise have had to write. Where the author
+// does write the body, the assumption stays their responsibility: `assume_new()` is what
+// makes it visible, so it must not become implicit.
+test_verify_one_file! {
+    #[test] test_external_fn_spec_extra_out_still_needs_assume code!{
+        use vstd::prelude::*;
+
+        #[verifier::external]
+        fn negate_bool(b: bool, x: u8) -> bool {
+            !b
+        }
+
+        #[verifier::external_fn_specification]
+        #[verus_spec(ret =>
+            with Tracked(extra): Tracked<u8> -> z: Tracked<u8>
+            requires x == extra,
+            ensures ret == !b, z@ == extra,
+        )]
+        fn negate_bool_spec(b: bool, x: u8) -> bool {
+            negate_bool(b, x)
+        }
+    } => Err(e) => assert_vir_error_msg(
+        e, "declare_ret_with() variable must be assigned to in the function body")
 }

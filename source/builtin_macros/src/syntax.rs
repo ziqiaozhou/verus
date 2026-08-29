@@ -2168,6 +2168,7 @@ impl Visitor {
             path,
             inputs,
             output,
+            with,
             requires,
             ensures,
             default_ensures,
@@ -2177,6 +2178,25 @@ impl Visitor {
             semi,
         } = assume_specification.clone();
         let ex_ident = get_ex_ident_mangle_path(&qself, &path);
+
+        // An extra output has to be assigned somewhere, and this body is synthesized,
+        // so there is nowhere for the author to write the assignment. Emit the one they
+        // would have written: the body of an `assume_specification` is not verified, so
+        // the output is assumed, exactly as the `ensures` describing it is.
+        let assumed_outputs: Vec<Stmt> = with
+            .iter()
+            .flat_map(|with| with.outputs.iter())
+            .flat_map(|(_, outputs)| outputs.iter())
+            .map(|output| {
+                let (pat, ty) = (&output.pat, &output.ty);
+                Stmt::Expr(
+                    Expr::Verbatim(quote_spanned! { span =>
+                        #[verifier::proof_block] { #pat = <#ty>::assume_new() }
+                    }),
+                    Some(token::Semi { spans: [span] }),
+                )
+            })
+            .collect();
 
         let (is_const, paren_token, inputs) = match inputs {
             None => (true, token::Paren { span: into_spans(span) }, Punctuated::new()),
@@ -2209,7 +2229,7 @@ impl Visitor {
                 decreases: None,
                 invariants: invariants,
                 unwind: unwind,
-                with: None,
+                with: with,
             },
         };
 
@@ -2251,6 +2271,9 @@ impl Visitor {
             false,
             false,
         );
+        if self.erase_ghost.keep() {
+            stmts.extend(assumed_outputs);
+        }
 
         if self.rustdoc && matches!(vstd_kind(), VstdKind::IsVstd) {
             let mut block = (*item_fn.block).clone();
@@ -2300,7 +2323,6 @@ impl Visitor {
         stmts.push(Stmt::Expr(e, None));
 
         item_fn.block.stmts = stmts;
-
         Item::Fn(item_fn)
     }
 
