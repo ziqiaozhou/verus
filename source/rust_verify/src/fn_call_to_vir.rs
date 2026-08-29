@@ -538,7 +538,7 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
     let mut call_site_with_ret = false;
     let vir_args = {
         let mut args = vir_args;
-        crate::rust_to_vir_func::register_extern_with_params(&bctx.ctxt, f);
+        crate::rust_to_vir_func::register_with_params(&bctx.ctxt, f);
         let extra_params = bctx.ctxt.declare_with_params.borrow().get(&f).cloned();
         let has_ret_params = bctx.ctxt.declare_ret_with_params.borrow().contains_key(&f);
 

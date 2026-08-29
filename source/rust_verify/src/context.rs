@@ -72,9 +72,9 @@ pub struct ContextX<'tcx> {
     /// maps the function's DefId to a Vec of (is_tracked, expected_ty) pairs
     pub(crate) declare_ret_with_params:
         Rc<RefCell<std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>>>,
-    /// Foreign callees whose shims have already been consulted for extras; their
-    /// entries in the two maps above are recovered on demand, not by a body scan.
-    pub(crate) extern_with_scanned: Rc<RefCell<std::collections::HashSet<DefId>>>,
+    /// Callees whose shims have already been consulted for extras; their entries
+    /// in the two maps above are recovered on demand, not by a body scan.
+    pub(crate) with_scanned: Rc<RefCell<std::collections::HashSet<DefId>>>,
 }
 
 /// The context in which a given header node might be interpretted
@@ -165,7 +165,7 @@ impl<'tcx> ContextX<'tcx> {
             next_read_kind_id: AtomicU64::new(0),
             declare_with_params: Rc::new(RefCell::new(HashMap::new())),
             declare_ret_with_params: Rc::new(RefCell::new(HashMap::new())),
-            extern_with_scanned: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            with_scanned: Rc::new(RefCell::new(std::collections::HashSet::new())),
         }
     }
 

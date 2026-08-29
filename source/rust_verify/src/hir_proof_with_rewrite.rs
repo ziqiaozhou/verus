@@ -39,8 +39,15 @@ fn shim_trait_name(trait_name: Symbol) -> Symbol {
 }
 
 fn is_with_shim_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    debug_assert!(!def_id.is_local());
-    crate::attributes::is_with_shim_trait(tcx.attrs_for_def(def_id))
+    crate::attributes::is_with_shim_trait(def_attrs(tcx, def_id))
+}
+
+/// `attrs_for_def` serves only other crates, so a def of this one needs its HIR.
+fn def_attrs<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> &'tcx [rustc_hir::Attribute] {
+    match def_id.as_local() {
+        Some(local) => tcx.hir_attrs(tcx.local_def_id_to_hir_id(local)),
+        None => tcx.attrs_for_def(def_id),
+    }
 }
 
 pub(crate) fn hir_proof_with_rewrite<'tcx>(
@@ -235,24 +242,21 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
     }
 }
 
-/// The shim standing in for a function in another crate. Unlike `Ctxt::find_shim`
-/// this runs after the HIR pass, so it may use `tcx` freely; it is how a caller
-/// recovers a foreign callee's extras, which are not in this crate's HIR.
-pub(crate) fn find_extern_with_shim<'tcx>(
+/// The shim standing in for a callee, in this crate or another. Unlike
+/// `Ctxt::find_shim` this runs after the HIR pass, so it may use `tcx` freely;
+/// it is how a caller recovers a callee's extras.
+pub(crate) fn find_with_shim<'tcx>(
     tcx: TyCtxt<'tcx>,
     callee_def_id: DefId,
     with_outputs: bool,
 ) -> Option<DefId> {
-    if callee_def_id.is_local() {
-        return None;
-    }
     if !matches!(tcx.def_kind(callee_def_id), DefKind::Fn | DefKind::AssocFn) {
         return None;
     }
     let name = shim_name(tcx.item_name(callee_def_id), with_outputs);
     let parent = tcx.opt_parent(callee_def_id)?;
     let parent = match tcx.def_kind(parent) {
-        DefKind::Trait => find_extern_shim_trait(tcx, parent)?,
+        DefKind::Trait => find_shim_trait_of(tcx, parent)?,
         _ => parent,
     };
     let shim = match tcx.def_kind(parent) {
@@ -261,27 +265,58 @@ pub(crate) fn find_extern_with_shim<'tcx>(
             .filter_by_name_unhygienic(name)
             .find(|assoc| matches!(assoc.kind, rustc_middle::ty::AssocKind::Fn { .. }))
             .map(|assoc| assoc.def_id)?,
-        _ => tcx
-            .module_children(parent)
-            .iter()
-            .find(|child| child.ident.name == name)
-            .and_then(|child| child.res.opt_def_id())?,
+        _ => module_child(tcx, parent, name)?,
     };
     let is_shim =
-        parse_attrs_opt(tcx.attrs_for_def(shim), None).iter().any(|a| matches!(a, Attr::WithShim));
+        parse_attrs_opt(def_attrs(tcx, shim), None).iter().any(|a| matches!(a, Attr::WithShim));
     is_shim.then_some(shim)
 }
 
-/// The shim trait generated beside a foreign trait.
-fn find_extern_shim_trait<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId) -> Option<DefId> {
+/// The shim trait generated beside a trait. As in `Ctxt::find_shim_trait`, a
+/// trait proxied by an `external_trait_specification` has neither the name nor
+/// the module of its shim trait, which belong to the proxy, so it is found
+/// instead by the supertrait bound the blanket impl needs anyway.
+fn find_shim_trait_of<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId) -> Option<DefId> {
     let name = shim_trait_name(tcx.item_name(trait_def_id));
-    let module = tcx.opt_parent(trait_def_id)?;
-    let shim_trait = tcx
-        .module_children(module)
-        .iter()
-        .find(|child| child.ident.name == name)
-        .and_then(|child| child.res.opt_def_id())?;
-    is_with_shim_trait(tcx, shim_trait).then_some(shim_trait)
+    if let Some(shim_trait) = tcx
+        .opt_parent(trait_def_id)
+        .and_then(|module| module_child(tcx, module, name))
+        .filter(|shim_trait| is_with_shim_trait(tcx, *shim_trait))
+    {
+        return Some(shim_trait);
+    }
+    tcx.hir_crate_items(()).free_items().find_map(|item_id| {
+        let def_id = item_id.owner_id.to_def_id();
+        if !tcx
+            .opt_item_name(def_id)
+            .is_some_and(|name| name.as_str().starts_with(WITH_SHIM_TRAIT_PREFIX))
+        {
+            return None;
+        }
+        let rustc_hir::ItemKind::Trait { bounds, .. } = tcx.hir_item(item_id).kind else {
+            return None;
+        };
+        if !is_with_shim_trait(tcx, def_id) {
+            return None;
+        }
+        let supertrait_matches = bounds.iter().any(|bound| match bound {
+            rustc_hir::GenericBound::Trait(poly) => {
+                poly.trait_ref.path.res.opt_def_id() == Some(trait_def_id)
+            }
+            _ => false,
+        });
+        supertrait_matches.then_some(def_id)
+    })
+}
+
+/// The child of a module named `name`. `module_children` serves only other
+/// crates, so a module of this one needs its local counterpart.
+fn module_child<'tcx>(tcx: TyCtxt<'tcx>, module: DefId, name: Symbol) -> Option<DefId> {
+    let children = match module.as_local() {
+        Some(local) => tcx.module_children_local(local),
+        None => tcx.module_children(module),
+    };
+    children.iter().find(|child| child.ident.name == name).and_then(|child| child.res.opt_def_id())
 }
 
 /// Local children must bypass `module_children` and `associated_items`, which

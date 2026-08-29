@@ -532,134 +532,11 @@ fn elided_lifetime_in_ty<'tcx>(ty: &'tcx rustc_hir::Ty<'tcx>) -> Option<Span> {
     finder.found.map(|span| if span.is_dummy() { ty.span } else { span })
 }
 
-/// A trait method without a body carries its `with` clause on the `VERUS_SPEC__`
-/// companion the macro generates, but call sites resolve to the method itself,
-/// so the extras must be registered under both.
-fn declare_with_registration_ids<'tcx>(ctxt: &Context<'tcx>, id: DefId) -> Vec<DefId> {
-    let mut ids = vec![id];
-    let name = ctxt.tcx.item_name(id).as_str().to_string();
-    if let Some(original) = name.strip_prefix(VERUS_SPEC) {
-        let parent = ctxt.tcx.parent(id);
-        if matches!(ctxt.tcx.def_kind(parent), rustc_hir::def::DefKind::Trait) {
-            for assoc in ctxt.tcx.associated_items(parent).in_definition_order() {
-                if assoc.name().as_str() == original {
-                    ids.push(assoc.def_id);
-                }
-            }
-            // A proxy declares extras on behalf of the foreign trait's method,
-            // which is what impls and call sites resolve to.
-            if let Some(target) = external_trait_target_method(ctxt, parent, original) {
-                ids.push(target);
-            }
-        }
-    }
-    ids
-}
-
-/// The foreign trait's method that an `external_trait_specification` proxy
-/// stands in for.
-fn external_trait_target_method<'tcx>(
-    ctxt: &Context<'tcx>,
-    proxy: DefId,
-    name: &str,
-) -> Option<DefId> {
-    let local = proxy.as_local()?;
-    let node = ctxt.tcx.hir_node_by_def_id(local);
-    let rustc_hir::Node::Item(item) = node else {
-        return None;
-    };
-    let rustc_hir::ItemKind::Trait { items, .. } = &item.kind else {
-        return None;
-    };
-    let attrs = ctxt.tcx.hir_attrs(item.hir_id());
-    let vattrs = ctxt.get_verifier_attrs(attrs).ok()?;
-    vattrs.external_trait_specification.as_ref()?;
-    let trait_ref =
-        crate::rust_to_vir_trait::external_trait_specification_of(ctxt.tcx, items, &vattrs)
-            .ok()
-            .flatten()?;
-    ctxt.tcx
-        .associated_items(trait_ref.def_id)
-        .in_definition_order()
-        .find(|assoc| assoc.name().as_str() == name)
-        .map(|assoc| assoc.def_id)
-}
-
-/// Register every local function's `with` extras before any body is lowered.
-///
-/// Extras are discovered by scanning a function's own body, and bodies are
-/// lowered in item order, so a caller lowered before its callee would otherwise
-/// see a callee with no extras — making a correct program's acceptance depend on
-/// definition order.
-pub(crate) fn pre_register_local_with_params<'tcx>(ctxt: &Context<'tcx>) {
-    let tcx = ctxt.tcx;
-    for local in tcx.hir_body_owners() {
-        let def_id = local.to_def_id();
-        if !matches!(
-            tcx.def_kind(def_id),
-            rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn
-        ) {
-            continue;
-        }
-        let body = tcx.hir_body_owned_by(local);
-        let mut targets = declare_with_registration_ids(ctxt, def_id);
-
-        // An `assume_specification` proxy declares extras on behalf of the
-        // function it proxies, which is what call sites resolve to.
-        let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(local));
-        let is_proxy =
-            ctxt.get_verifier_attrs(attrs).map_or(false, |vattrs| vattrs.external_fn_specification);
-        if is_proxy {
-            if let Some(sig) = tcx.hir_node_by_def_id(local).fn_sig() {
-                if let Ok((external_id, _, _)) =
-                    get_external_def_id(ctxt, def_id, &body.id(), body, &FnOrConstSig::sig(sig))
-                {
-                    targets.push(external_id);
-                }
-            }
-        }
-
-        // Errors here are reported when the body is lowered; this pass only
-        // registers what it can read.
-        if let Ok((extras, _)) = pre_scan_with_params(ctxt, def_id, body, WithParamKind::Input) {
-            register_with_modes(&ctxt.declare_with_params, &targets, &extras);
-        }
-        if let Ok((extras, _)) = pre_scan_with_params(ctxt, def_id, body, WithParamKind::Output) {
-            register_with_modes(&ctxt.declare_ret_with_params, &targets, &extras);
-        }
-    }
-}
-
-fn register_with_modes<'tcx>(
-    map: &std::cell::RefCell<
-        std::collections::HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>,
-    >,
-    targets: &[DefId],
-    extras: &[(vir::ast::Param, Option<Mode>, rustc_middle::ty::Ty<'tcx>)],
-) {
-    if extras.is_empty() {
-        return;
-    }
-    let modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> = extras
-        .iter()
-        .map(|(p, _, ty)| (matches!(p.x.unwrapped_info, Some((Mode::Proof, _))), *ty))
-        .collect();
-    for target in targets {
-        map.borrow_mut().insert(*target, modes.clone());
-    }
-}
-
 /// `Ghost<T>`/`Tracked<T>` seen as a `rustc_middle` type: `Some(is_tracked)`.
 ///
-/// This is the cross-crate view of "what is an extra", and it is narrower than
-/// the local one: `is_mut_ty` also looks through a `&mut`, while this matches
-/// only a wrapper at the top. The two therefore disagree in principle, and
-/// because `extras_of` is all-or-nothing a single unmatched extra drops the
-/// whole list, leaving the callee looking as if it takes none. That fails
-/// closed — the call site is rejected rather than mis-lowered — and no surface
-/// is known that reaches it, since a `with` extra must be written as a
-/// `Ghost`/`Tracked` binding. Recorded here so the divergence is a known
-/// limitation rather than a later mystery.
+/// `extras_of` is all-or-nothing, so a single unmatched extra drops the whole
+/// list and the callee looks as if it takes none. That fails closed: the call
+/// site is rejected rather than mis-lowered.
 fn with_wrapper_is_tracked<'tcx>(
     ctxt: &Context<'tcx>,
     ty: rustc_middle::ty::Ty<'tcx>,
@@ -674,15 +551,43 @@ fn with_wrapper_is_tracked<'tcx>(
     }
 }
 
-/// Recover a foreign callee's extras from its shim.
+/// The extras a function's own body declares.
 ///
-/// A local function's extras come from scanning its body for `declare_with()`,
-/// which is impossible for another crate. The shim carries the same information
-/// in its signature — the extras follow the executable parameters — and is the
-/// very item rustc checked the call site against, so reading it here keeps the
-/// caller's two views of the callee consistent by construction.
-pub(crate) fn register_extern_with_params<'tcx>(ctxt: &Context<'tcx>, f: DefId) {
-    if f.is_local() || !ctxt.extern_with_scanned.borrow_mut().insert(f) {
+/// A trait impl method has no shim of its own — it inherits the trait's — so a
+/// clause written on it can only be read from its body. Errors are reported when
+/// the body is lowered; here an unreadable body simply declares nothing.
+pub(crate) fn body_declared_with_extras<'tcx>(
+    ctxt: &Context<'tcx>,
+    id: DefId,
+    kind: WithParamKind,
+) -> Vec<(bool, rustc_middle::ty::Ty<'tcx>)> {
+    let Some(local) = id.as_local() else {
+        return vec![];
+    };
+    let Some(body_id) = ctxt.tcx.hir_node_by_def_id(local).body_id() else {
+        return vec![];
+    };
+    let body = find_body(ctxt, &body_id);
+    let Ok((extras, _)) = pre_scan_with_params(ctxt, id, body, kind) else {
+        return vec![];
+    };
+    extras
+        .iter()
+        .map(|(p, _, ty)| (matches!(p.x.unwrapped_info, Some((Mode::Proof, _))), *ty))
+        .collect()
+}
+
+/// Recover a callee's extras from its shim.
+///
+/// The shim carries them in its signature — the extra inputs follow the
+/// executable parameters, and the extra outputs are the second component of its
+/// return type — and it is the very item rustc checked the call site against, so
+/// reading it here keeps the caller's two views of the callee consistent by
+/// construction. It is a signature-level item, so a callee defined after its
+/// caller reads the same as one defined before, and one in another crate reads
+/// the same as one in this crate.
+pub(crate) fn register_with_params<'tcx>(ctxt: &Context<'tcx>, f: DefId) {
+    if !ctxt.with_scanned.borrow_mut().insert(f) {
         return;
     }
     let tcx = ctxt.tcx;
@@ -691,7 +596,7 @@ pub(crate) fn register_extern_with_params<'tcx>(ctxt: &Context<'tcx>, f: DefId) 
             tys.iter().map(|ty| Some((with_wrapper_is_tracked(ctxt, *ty)?, *ty))).collect()
         };
 
-    if let Some(shim) = crate::hir_proof_with_rewrite::find_extern_with_shim(tcx, f, false) {
+    if let Some(shim) = crate::hir_proof_with_rewrite::find_with_shim(tcx, f, false) {
         let n_exec = tcx.fn_sig(f).skip_binder().inputs().skip_binder().len();
         let inputs = tcx.fn_sig(shim).skip_binder().inputs().skip_binder();
         if let Some(extras) = inputs.get(n_exec..).and_then(extras_of) {
@@ -703,7 +608,7 @@ pub(crate) fn register_extern_with_params<'tcx>(ctxt: &Context<'tcx>, f: DefId) 
 
     // The extra outputs live in the second component of the `_VERUS_WITH_RET_`
     // shim's `(ret, (extras...))` return type.
-    if let Some(shim) = crate::hir_proof_with_rewrite::find_extern_with_shim(tcx, f, true) {
+    if let Some(shim) = crate::hir_proof_with_rewrite::find_with_shim(tcx, f, true) {
         let output = tcx.fn_sig(shim).skip_binder().output().skip_binder();
         if let rustc_middle::ty::TyKind::Tuple(parts) = output.kind() {
             if let Some(rustc_middle::ty::TyKind::Tuple(outs)) = parts.get(1).map(|t| t.kind()) {
@@ -750,7 +655,7 @@ fn lower_written_with_ty<'tcx>(
 /// Which form of extra parameter a pre-scan is looking for: an extra input the
 /// function takes, or an extra output it produces.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum WithParamKind {
+pub(crate) enum WithParamKind {
     Input,
     Output,
 }
@@ -878,7 +783,8 @@ fn pre_scan_with_params<'tcx>(
     // which is unsound and a clear authoring mistake. A `VERUS_SPEC__` companion
     // is exempt: it stands for a trait method that has no body, and the impls
     // are what assign the extra output.
-    let is_trait_decl_spec = declare_with_registration_ids(ctxt, id).len() > 1;
+    let is_trait_decl_spec = ctxt.tcx.item_name(id).as_str().starts_with(VERUS_SPEC)
+        && matches!(ctxt.tcx.def_kind(ctxt.tcx.parent(id)), rustc_hir::def::DefKind::Trait);
     if !ret_with_locals.is_empty() && !is_trait_decl_spec {
         let mut assigned: HashSet<HirId> = HashSet::new();
         let mut visitor = AssignedLocalsVisitor { assigned: &mut assigned };
@@ -2373,55 +2279,8 @@ pub(crate) fn check_item_fn<'tcx>(
             // Pre-scan for declare_with() calls
             let (declare_with_extra_params, declare_with_hir_ids) =
                 pre_scan_with_params(ctxt, id, body, WithParamKind::Input)?;
-            let declare_with_modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> =
-                declare_with_extra_params
-                    .iter()
-                    .map(|(p, _, ty)| {
-                        // unwrapped_info mode: Proof = Tracked, Spec = Ghost
-                        match p.x.unwrapped_info {
-                            Some((Mode::Proof, _)) => (true, *ty),
-                            Some((Mode::Spec, _)) => (false, *ty),
-                            _ => unreachable!(),
-                        }
-                    })
-                    .collect();
             for (p, _mode, _) in declare_with_extra_params {
                 vir_params.push(p);
-            }
-
-            // Register declare_with extra param modes early so callers can find them
-            // even if body_to_vir fails for this function.
-            if !declare_with_modes.is_empty() {
-                let target_id = proxy_id.unwrap_or(id);
-                for target_id in declare_with_registration_ids(ctxt, target_id) {
-                    ctxt.declare_with_params
-                        .borrow_mut()
-                        .insert(target_id, declare_with_modes.clone());
-                }
-
-                // For unerased_proxy functions (const fn proxies), also register under
-                // the original function's DefId, since call sites resolve to the original.
-                if vattrs.unerased_proxy {
-                    let proxy_name = ctxt.tcx.item_name(id).as_str().to_string();
-                    let prefix = "VERUS_UNERASED_PROXY__";
-                    if let Some(original_name) = proxy_name.strip_prefix(prefix) {
-                        let parent = ctxt.tcx.parent(id);
-                        // Find sibling with matching name by iterating HIR items in the parent
-                        for item_id in ctxt.tcx.hir_free_items() {
-                            let child_def_id = item_id.owner_id.to_def_id();
-                            if let Some(name) = ctxt.tcx.opt_item_name(child_def_id) {
-                                if name.as_str() == original_name
-                                    && child_def_id != id
-                                    && ctxt.tcx.parent(child_def_id) == parent
-                                {
-                                    ctxt.declare_with_params
-                                        .borrow_mut()
-                                        .insert(child_def_id, declare_with_modes.clone());
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             // Pre-scan for declare_ret_with() calls
@@ -2429,46 +2288,6 @@ pub(crate) fn check_item_fn<'tcx>(
                 pre_scan_with_params(ctxt, id, body, WithParamKind::Output)?;
             extra_ret_params_for_func =
                 declare_ret_with_extra_params.iter().map(|(p, _, _)| p.clone()).collect();
-            let declare_ret_with_modes: Vec<(bool, rustc_middle::ty::Ty<'tcx>)> =
-                declare_ret_with_extra_params
-                    .iter()
-                    .map(|(p, _, ty)| match p.x.unwrapped_info {
-                        Some((Mode::Proof, _)) => (true, *ty),
-                        Some((Mode::Spec, _)) => (false, *ty),
-                        _ => unreachable!(),
-                    })
-                    .collect();
-
-            // Register declare_ret_with extra return modes early so callers can find them
-            if !declare_ret_with_modes.is_empty() {
-                let target_id = proxy_id.unwrap_or(id);
-                for target_id in declare_with_registration_ids(ctxt, target_id) {
-                    ctxt.declare_ret_with_params
-                        .borrow_mut()
-                        .insert(target_id, declare_ret_with_modes.clone());
-                }
-
-                if vattrs.unerased_proxy {
-                    let proxy_name = ctxt.tcx.item_name(id).as_str().to_string();
-                    let prefix = "VERUS_UNERASED_PROXY__";
-                    if let Some(original_name) = proxy_name.strip_prefix(prefix) {
-                        let parent = ctxt.tcx.parent(id);
-                        for item_id in ctxt.tcx.hir_free_items() {
-                            let child_def_id = item_id.owner_id.to_def_id();
-                            if let Some(name) = ctxt.tcx.opt_item_name(child_def_id) {
-                                if name.as_str() == original_name
-                                    && child_def_id != id
-                                    && ctxt.tcx.parent(child_def_id) == parent
-                                {
-                                    ctxt.declare_ret_with_params
-                                        .borrow_mut()
-                                        .insert(child_def_id, declare_ret_with_modes.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             let all_declare_hir_ids = declare_with_hir_ids;
             let ret_with_hir_ids = declare_ret_with_hir_ids;

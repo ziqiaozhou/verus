@@ -465,10 +465,6 @@ pub fn crate_to_vir<'a, 'tcx>(
 
     // Find all modules that contain at least 1 item of interest
     let mut used_modules = HashSet::<Path>::new();
-    // Before any body is lowered, so that a call is not rejected for being
-    // lowered ahead of its callee's definition.
-    crate::rust_to_vir_func::pre_register_local_with_params(&ctxt);
-
     for crate_item in crate_items.items.iter() {
         match &crate_item.verif {
             VerifOrExternal::VerusAware {
@@ -651,10 +647,10 @@ pub fn crate_to_vir<'a, 'tcx>(
 /// (an impl written with a bare `declare_with()`, or extra outputs) would reach
 /// `vir::modes` and trip its assertion, so count them here.
 ///
-/// The comparison is driven from the impl methods rustc knows about, not from
-/// the keys of the registries: an impl method that declares *no* extras never
-/// registers, and it is exactly that absence — a missing `with` clause against a
-/// trait method that has one — we are looking for.
+/// The comparison is driven from the impl methods rustc knows about, because the
+/// absence of a clause is exactly what it is looking for. An impl method has no
+/// shim of its own, inheriting the trait's, so its own side is read from its
+/// body while the trait's comes from the shim like any other callee's.
 fn check_trait_impl_with_clauses<'tcx>(ctxt: &Context<'tcx>, errors: &mut Vec<VirErr>) {
     let tcx = ctxt.tcx;
     let declared = |map: &HashMap<DefId, Vec<(bool, rustc_middle::ty::Ty<'tcx>)>>, id: DefId| {
@@ -668,23 +664,22 @@ fn check_trait_impl_with_clauses<'tcx>(ctxt: &Context<'tcx>, errors: &mut Vec<Vi
         }
     }
     ids.sort_by_key(|id| (id.krate, id.index));
+    use crate::rust_to_vir_func::WithParamKind;
     let maps = [
-        (&ctxt.declare_with_params, "extra ghost/tracked argument"),
-        (&ctxt.declare_ret_with_params, "extra ghost/tracked return value"),
+        (&ctxt.declare_with_params, WithParamKind::Input, "extra ghost/tracked argument"),
+        (&ctxt.declare_ret_with_params, WithParamKind::Output, "extra ghost/tracked return value"),
     ];
-    for (map, what) in maps {
+    for (map, kind, what) in maps {
         for id in ids.iter().copied() {
             let Some(trait_method) = tcx.associated_item(id).trait_item_def_id() else {
                 continue;
             };
-            // The trait may be in another crate, where the extras are only
-            // visible through its shim.
-            crate::rust_to_vir_func::register_extern_with_params(ctxt, trait_method);
+            crate::rust_to_vir_func::register_with_params(ctxt, trait_method);
             let impl_id = tcx.parent(id);
             if !matches!(tcx.def_kind(impl_id), rustc_hir::def::DefKind::Impl { of_trait: true }) {
                 continue;
             }
-            let ours = declared(&map.borrow(), id);
+            let ours = crate::rust_to_vir_func::body_declared_with_extras(ctxt, id, kind);
             let theirs = declared(&map.borrow(), trait_method);
             let span = tcx.def_span(id);
             if ours.len() != theirs.len() {
