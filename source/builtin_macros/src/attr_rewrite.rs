@@ -517,9 +517,7 @@ fn prepare_items_for_verus_spec(
                     stamp!(attrs, marker);
                 }
             }
-            if !is_external_trait_spec {
-                mk_with_shim_trait(t).to_tokens(&mut siblings);
-            }
+            mk_with_shim_trait(t, is_external_trait_spec).to_tokens(&mut siblings);
         }
         _ => {}
     }
@@ -972,17 +970,14 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let mut new_stream = TokenStream::new();
 
             let with_clause = spec_attr.spec.with.clone();
-            if let (true, Some(with)) = (is_external_trait_spec_fn, with_clause.as_ref()) {
-                return proc_macro::TokenStream::from(mk_external_trait_with_error(
-                    with.with.span(),
-                ));
-            }
             let spec_stmts = syntax::sig_specs_attr(erase, spec_attr, &mut method.sig, true, false);
 
             // The call-site shims live on the trait's shim trait; only the
             // conformance companion belongs here. Like the ghost stubs, it must
             // survive stub-erase mode so that a downstream crate can see it.
-            if !erase.erase_all() {
+            // A proxy has no impl of its own to override the companion, so
+            // conformance of a foreign trait's impls is checked elsewhere.
+            if !erase.erase_all() && !is_external_trait_spec_fn {
                 if let Some(ref with) = with_clause {
                     let ident = method.sig.ident.clone();
                     mk_with_arg_shim_fn(&syn::Visibility::Inherited, &method.sig, with, &ident)
@@ -1233,7 +1228,25 @@ fn trait_method_with_clause(attrs: &[syn::Attribute]) -> Option<verus_syn::WithS
 /// mentions any trait Verus generates, still reach them. `?Sized` on the blanket
 /// impl keeps `dyn T` an implementor. The conformance companion stays on `t`,
 /// because each impl has to be able to override it.
-fn mk_with_shim_trait(t: &syn::ItemTrait) -> proc_macro2::TokenStream {
+/// The trait a proxy stands for, taken from `type ExternalTraitSpecificationFor: T`.
+fn external_trait_target(t: &syn::ItemTrait) -> Option<syn::Path> {
+    for item in &t.items {
+        let syn::TraitItem::Type(ty) = item else {
+            continue;
+        };
+        if ty.ident != "ExternalTraitSpecificationFor" {
+            continue;
+        }
+        for bound in &ty.bounds {
+            if let syn::TypeParamBound::Trait(b) = bound {
+                return Some(b.path.clone());
+            }
+        }
+    }
+    None
+}
+
+fn mk_with_shim_trait(t: &syn::ItemTrait, is_external_trait_spec: bool) -> proc_macro2::TokenStream {
     let mut methods = proc_macro2::TokenStream::new();
     for item in &t.items {
         let syn::TraitItem::Fn(f) = item else {
@@ -1252,18 +1265,29 @@ fn mk_with_shim_trait(t: &syn::ItemTrait) -> proc_macro2::TokenStream {
 
     let span = t.ident.span();
     let vis = &t.vis;
-    let orig = &t.ident;
-    let name = syn::Ident::new(&format!("{WITH_SHIM_TRAIT}{orig}"), span);
+    let name = syn::Ident::new(&format!("{WITH_SHIM_TRAIT}{}", t.ident), span);
     let (impl_generics, ty_generics, where_clause) = t.generics.split_for_impl();
     let ty_generics = ty_generics.to_token_stream();
+    // A proxy's implementors name the foreign trait and never the proxy, so the
+    // shim trait must sit above the foreign trait to reach them. It stays local,
+    // so the blanket impl is allowed over a foreign trait.
+    let (supertrait, self_bound) = if is_external_trait_spec {
+        match external_trait_target(t) {
+            Some(target) => (quote!(#target), quote!(#target)),
+            None => return proc_macro2::TokenStream::new(),
+        }
+    } else {
+        let orig = &t.ident;
+        (quote!(#orig #ty_generics), quote!(#orig #ty_generics))
+    };
     let mut blanket_generics = t.generics.clone();
-    blanket_generics.params.push(syn::parse_quote!(__VerusWithSelf: #orig #ty_generics + ?Sized));
+    blanket_generics.params.push(syn::parse_quote!(__VerusWithSelf: #self_bound + ?Sized));
     let (blanket_impl_generics, _, _) = blanket_generics.split_for_impl();
     quote_spanned!(span =>
         #[doc(hidden)]
         #[allow(non_camel_case_types, unused)]
         #[verus::internal(with_shim_trait)]
-        #vis trait #name #impl_generics : #orig #ty_generics #where_clause {
+        #vis trait #name #impl_generics : #supertrait #where_clause {
             #methods
         }
 

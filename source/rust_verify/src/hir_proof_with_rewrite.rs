@@ -175,6 +175,13 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
     /// The shim trait generated beside `trait_def_id`, holding the shims of its
     /// methods. Absent when the trait declares no `with` clause at all.
     fn find_shim_trait(&self, trait_def_id: DefId) -> Option<DefId> {
+        if let Some(shim_trait) = self.find_shim_trait_named(trait_def_id) {
+            return Some(shim_trait);
+        }
+        self.find_shim_trait_by_supertrait(trait_def_id)
+    }
+
+    fn find_shim_trait_named(&self, trait_def_id: DefId) -> Option<DefId> {
         let name = shim_trait_name(self.tcx.item_name(trait_def_id));
         let module = self.tcx.opt_parent(trait_def_id)?;
         let shim_trait = match module.as_local() {
@@ -190,6 +197,41 @@ impl<'a, 'tcx> Ctxt<'a, 'tcx> {
             .iter()
             .any(|a| matches!(a, Attr::WithShimTrait));
         is_shim_trait.then_some(shim_trait)
+    }
+
+    /// The shim trait of a trait proxied by an `external_trait_specification`.
+    /// Its name comes from the proxy and it lives in the proxy's module, so
+    /// neither is derivable from the trait itself; it is found instead by the
+    /// supertrait bound that the blanket impl needs anyway.
+    fn find_shim_trait_by_supertrait(&self, trait_def_id: DefId) -> Option<DefId> {
+        for owner in self.owners.iter() {
+            let MaybeOwner::Owner(owner) = owner else {
+                continue;
+            };
+            let OwnerNode::Item(item) = owner.node() else {
+                continue;
+            };
+            let rustc_hir::ItemKind::Trait { bounds, .. } = &item.kind else {
+                continue;
+            };
+            let def_id = item.owner_id.to_def_id();
+            let is_shim_trait = parse_attrs_opt(self.attrs(def_id), None)
+                .iter()
+                .any(|a| matches!(a, Attr::WithShimTrait));
+            if !is_shim_trait {
+                continue;
+            }
+            let supertrait_matches = bounds.iter().any(|bound| match bound {
+                rustc_hir::GenericBound::Trait(poly) => {
+                    poly.trait_ref.path.res.opt_def_id() == Some(trait_def_id)
+                }
+                _ => false,
+            });
+            if supertrait_matches {
+                return Some(def_id);
+            }
+        }
+        None
     }
 }
 

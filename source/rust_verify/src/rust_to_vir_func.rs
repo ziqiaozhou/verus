@@ -569,9 +569,43 @@ fn declare_with_registration_ids<'tcx>(ctxt: &Context<'tcx>, id: DefId) -> Vec<D
                     ids.push(assoc.def_id);
                 }
             }
+            // A proxy declares extras on behalf of the foreign trait's method,
+            // which is what impls and call sites resolve to.
+            if let Some(target) = external_trait_target_method(ctxt, parent, original) {
+                ids.push(target);
+            }
         }
     }
     ids
+}
+
+/// The foreign trait's method that an `external_trait_specification` proxy
+/// stands in for.
+fn external_trait_target_method<'tcx>(
+    ctxt: &Context<'tcx>,
+    proxy: DefId,
+    name: &str,
+) -> Option<DefId> {
+    let local = proxy.as_local()?;
+    let node = ctxt.tcx.hir_node_by_def_id(local);
+    let rustc_hir::Node::Item(item) = node else {
+        return None;
+    };
+    let rustc_hir::ItemKind::Trait { items, .. } = &item.kind else {
+        return None;
+    };
+    let attrs = ctxt.tcx.hir_attrs(item.hir_id());
+    let vattrs = ctxt.get_verifier_attrs(attrs).ok()?;
+    vattrs.external_trait_specification.as_ref()?;
+    let trait_ref =
+        crate::rust_to_vir_trait::external_trait_specification_of(ctxt.tcx, items, &vattrs)
+            .ok()
+            .flatten()?;
+    ctxt.tcx
+        .associated_items(trait_ref.def_id)
+        .in_definition_order()
+        .find(|assoc| assoc.name().as_str() == name)
+        .map(|assoc| assoc.def_id)
 }
 
 /// Register every local function's `with` extras before any body is lowered.

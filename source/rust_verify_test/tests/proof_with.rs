@@ -1351,20 +1351,19 @@ test_verify_one_file! {
     } => Ok(())
 }
 
-// ---- `with` on a proxy for a foreign trait (known gap) ----
+// ---- `with` on a proxy for a foreign trait ----
 //
-// Both the call-site shim and the conformance companion are defaulted methods
-// of the trait that declares the clause. That is what makes them reachable:
-// naming the trait is a precondition for calling the method and for writing an
-// impl. An `external_trait_specification` proxy breaks it --- callers and
-// impls name the foreign trait and never the proxy --- so the shim could never
-// be found. This is a regression against the `proof-with-builtin` branch, which
-// supported it; the shim design buys trait default bodies in exchange.
+// Callers and impls name the foreign trait and never the proxy, so the shim
+// trait sits above the *foreign* trait and the proxy's extras are registered
+// against the foreign method, exactly as an `assume_specification` proxy
+// registers against its target.
 //
-// TODO(external-trait with): these flip to Ok(()) when support lands.
+// Conformance of an impl to the proxy's clause is not checked yet: an
+// `impl T for S` cannot carry the companion. That is sound for now only because
+// such an impl has no way to declare extras of its own.
 
 test_verify_one_file! {
-    #[test] test_external_trait_with_rejected code!{
+    #[test] test_external_trait_with code!{
         use vstd::prelude::*;
         #[verifier::external]
         trait T {
@@ -1381,7 +1380,36 @@ test_verify_one_file! {
             )]
             fn f(&self, a: u64) -> u64;
         }
-    } => Err(e) => assert_vir_error_msg(e, "`with` is not supported on an `external_trait_specification` trait")
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_external_trait_with_call code!{
+        use vstd::prelude::*;
+        #[verifier::external]
+        trait T {
+            fn f(&self, a: u64) -> u64;
+        }
+        #[verus_verify]
+        #[verifier::external_trait_specification]
+        trait ExT {
+            type ExternalTraitSpecificationFor: T;
+
+            #[verus_spec(r =>
+                with Ghost(g): Ghost<u64>
+                requires g == 1,
+                ensures r == a,
+            )]
+            fn f(&self, a: u64) -> u64;
+        }
+
+        #[verus_spec]
+        fn caller<S: T>(s: &S) {
+            proof_with!{Ghost(1u64)}
+            let r = s.f(2);
+            proof!{ assert(r == 2); }
+        }
+    } => Ok(())
 }
 
 // A defaulted proxy method is syntactically an `ItemFn` and reaches a different
