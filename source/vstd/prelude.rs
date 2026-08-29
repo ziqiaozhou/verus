@@ -35,6 +35,8 @@ pub use verus_builtin_macros::verus_spec;
 pub use verus_builtin_macros::verus_spec_internal;
 pub use verus_builtin_macros::verus_trait_impl;
 pub use verus_builtin_macros::verus_verify;
+#[doc(hidden)]
+pub use verus_builtin_macros::verus_with_shims_internal;
 
 pub use super::imap::{IMap, imap};
 pub use super::iset::{ISet, iset};

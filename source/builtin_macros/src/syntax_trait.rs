@@ -293,6 +293,12 @@ pub(crate) fn split_trait_method(
     fun: &mut TraitItemFn,
     erase_ghost: bool,
 ) {
+    if fun.sig.spec.with.is_some() {
+        // A `with` clause is handed to the `verus_spec` attribute macro, which brings the
+        // extra parameters into scope and makes this same split. Making it here too would
+        // declare the companion twice.
+        return;
+    }
     if !erase_ghost && fun.default.is_none() {
         // Copy into separate spec method, then remove spec from original method
         use verus_syn::FnArgKind;

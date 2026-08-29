@@ -358,10 +358,10 @@ pub fn verus_spec(
 /// `#[verus_spec]` as emitted by the `verus!` macro itself.
 ///
 /// A `with` clause inside `verus!` is lowered by re-emitting the whole signature
-/// specification as this attribute, so that one implementation splits a function into
-/// an unverified stub and its verified counterpart. It differs from `verus_spec` only
-/// in that it does not warn about appearing inside `verus!`, which is where the
-/// `verus!` macro necessarily puts it.
+/// specification as this attribute, so that one implementation brings the extra ghost
+/// and tracked parameters into scope and emits the call-site shims. It differs from
+/// `verus_spec` only in that it does not warn about appearing inside `verus!`, which is
+/// where the `verus!` macro necessarily puts it.
 #[doc(hidden)]
 #[proc_macro_attribute]
 pub fn verus_spec_internal(
@@ -369,6 +369,20 @@ pub fn verus_spec_internal(
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     attr_rewrite::rewrite_verus_spec(cfg_erase(), attr.into(), input.into(), true).into()
+}
+
+/// The `with` shims of a trait or implementation written inside `verus!`.
+///
+/// A `with` clause on a trait method puts its call-site shims on a shim trait, which is
+/// a new sibling item and so cannot be produced while visiting the method that calls for
+/// it. `verus!` applies this to the enclosing item instead.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn verus_with_shims_internal(
+    _attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_rewrite::with_shims_for_verus_macro(cfg_erase(), input)
 }
 
 /// proof_with add ghost input/output to the next function call.

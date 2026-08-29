@@ -660,7 +660,10 @@ test_verify_one_file! {
     #[test] test_extra_out_assigned_in_one_branch_only code!{
         use vstd::prelude::*;
 
-        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)] // FAILS
+        #[verus_spec(
+            with -> z: Ghost<u32>,
+            ensures z@ == 1     // FAILS
+        )]
         fn f(x: u64) -> u64 {
             if x > 0 {
                 proof!{ z = Ghost(1u32); }
@@ -1679,6 +1682,31 @@ test_verify_one_file! {
                 proof_with!{Ghost(1int)}
                 let r = s.inherent(4);
                 assert(r == 4);
+            }
+
+            // `with` on a trait method, with an extra input and an extra output
+            trait X {
+                fn f(&self, a: u64) -> (r: u64)
+                    with Ghost(g): Ghost<u64> -> g2: Ghost<u64>
+                    requires g < 100,
+                    ensures r == a, g2@ == g,
+                ;
+            }
+
+            impl X for S {
+                fn f(&self, a: u64) -> (r: u64)
+                    with Ghost(g): Ghost<u64> -> g2: Ghost<u64>
+                {
+                    proof!{ g2 = Ghost(g); }
+                    a
+                }
+            }
+
+            fn call_trait<A: X>(x: &A) {
+                proof_decl!{ let ghost g2: u64; }
+                proof_with!{Ghost(3u64) => Ghost(g2): Ghost<u64>}
+                let r = x.f(7);
+                assert(r == 7 && g2 == 3);
             }
         }.to_string()
         // `with` on an `assume_specification` with an extra `Tracked` input

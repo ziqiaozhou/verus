@@ -4628,9 +4628,7 @@ fn mk_with_shim_trait(tr: &ItemTrait, shims: &[TraitItem]) -> Option<Vec<Item>> 
     );
 
     let mut blanket_generics = generics.clone();
-    blanket_generics
-        .params
-        .push(syn::parse_quote!(__VerusWithSelf: #orig #ty_generics + ?Sized));
+    blanket_generics.params.push(syn::parse_quote!(__VerusWithSelf: #orig #ty_generics + ?Sized));
     let (blanket_impl_generics, _, _) = blanket_generics.split_for_impl();
 
     let shim_trait: syn::Item = syn::parse_quote_spanned!(tr.trait_token.span =>
@@ -5427,6 +5425,15 @@ impl VisitMut for Visitor {
     fn visit_item_impl_mut(&mut self, imp: &mut ItemImpl) {
         let impl_info = (imp.generics.clone(), imp.self_ty.clone());
         let outer_impl = self.inside_impl.replace(Box::new(impl_info));
+        // A trait impl inherits its shims from the trait and cannot declare a method the
+        // trait does not have, so its methods have to be marked as belonging to a trait
+        // impl before the `verus_spec` attribute macro decides whether to emit any.
+        // Decided before the clause is moved to that attribute.
+        let is_trait_impl_with = imp.trait_.is_some()
+            && imp
+                .items
+                .iter()
+                .any(|item| matches!(item, ImplItem::Fn(m) if m.sig.spec.with.is_some()));
         imp.attrs.push(mk_verus_attr(imp.span(), quote! { verus_macro }));
         self.visit_impl_items_prefilter(&mut imp.items, imp.trait_.is_some());
         self.filter_attrs(&mut imp.attrs);
@@ -5438,16 +5445,32 @@ impl VisitMut for Visitor {
         if imp.trait_.is_none() {
             imp.items.extend(shims);
         }
+        if is_trait_impl_with {
+            let span = imp.impl_token.span;
+            let macros = BuiltinMacros(span);
+            imp.attrs.push(parse_quote_spanned! { span => #[#macros::verus_with_shims_internal] });
+        }
         self.inside_impl = outer_impl;
     }
 
     fn visit_item_trait_mut(&mut self, tr: &mut ItemTrait) {
+        // A method with no body of its own is lowered by the `verus_spec` attribute
+        // macro, so its shims are not among `additional_trait_items` and the shim trait
+        // has to be built there too. Decided before the clause is moved to the attribute.
+        let shims_via_attr = tr.items.iter().any(|item| {
+            matches!(item, TraitItem::Fn(m) if m.sig.spec.with.is_some() && m.default.is_none())
+        });
         tr.attrs.push(mk_verus_attr(tr.span(), quote! { verus_macro }));
         self.visit_trait_items_prefilter(&mut tr.items);
         self.filter_attrs(&mut tr.attrs);
         let outer_shims = std::mem::take(&mut self.additional_trait_items);
         verus_syn::visit_mut::visit_item_trait_mut(self, tr);
         let shims = std::mem::replace(&mut self.additional_trait_items, outer_shims);
+        if shims_via_attr {
+            let span = tr.trait_token.span;
+            let macros = BuiltinMacros(span);
+            tr.attrs.push(parse_quote_spanned! { span => #[#macros::verus_with_shims_internal] });
+        }
         if shims.is_empty() {
             return;
         }
