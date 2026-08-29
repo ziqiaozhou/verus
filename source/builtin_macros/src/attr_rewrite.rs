@@ -55,6 +55,17 @@ const VERUS_SPEC: &str = "verus_spec";
 /// `verus_spec` under the name the `verus!` macro applies it by.
 const VERUS_SPEC_INTERNAL: &str = "verus_spec_internal";
 
+/// Whether an attribute is `verus_spec` in either spelling.
+///
+/// `verus!` writes a path rather than a bare name, so the last segment is what is
+/// compared.
+fn is_verus_spec_attr(attr: &syn::Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == VERUS_SPEC || seg.ident == VERUS_SPEC_INTERNAL)
+}
+
 // No cross-function type registry. When Rust cannot infer types for
 // proof_with/proof_with_ret (e.g., cross-crate calls or when callee is processed
 // after caller), the user must provide explicit type annotations on their variables.
@@ -109,6 +120,30 @@ impl syn::parse::Parse for VerusSpecTarget {
         let expr: Expr = input.parse()?;
         return Ok(VerusSpecTarget::IOTarget(VerusIOTarget::Expr(expr)));
     }
+}
+
+/// The `with` shims of a trait or implementation written inside `verus!`.
+///
+/// A `with` clause on a trait method puts its call-site shims on a shim trait, which is
+/// a new sibling item and so cannot be produced while visiting the method that calls for
+/// it. Each method also has to be stamped with the marker saying whether it belongs to a
+/// trait, to a trait implementation, or to a proxy for a foreign trait, which is what
+/// decides where its shims go. `verus!` applies this to the enclosing item instead.
+///
+/// `verus_verify` does the same for a Rust item, but also decides whether the item is
+/// verified at all; an item inside `verus!` is verified already.
+pub(crate) fn with_shims_for_verus_macro(
+    erase: EraseGhost,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    if erase.erase_all() {
+        return input;
+    }
+    let Ok(mut item) = syn::parse::<Item>(input.clone()) else {
+        return input;
+    };
+    let siblings = prepare_items_for_verus_spec(item.span(), &mut item, false);
+    quote! { #siblings #item }.into()
 }
 
 pub(crate) fn rewrite_verus_attribute(
@@ -354,10 +389,10 @@ impl VisitMut for ExecReplacer {
 ///
 /// 3. Warn when `#[verus_spec]` is used inside a `verus!` block.
 ///    Using `#[verus_spec]` inside a `verus!` block may lead to problems since they are
-///    not designed to work together. If allow_verus_macro is false, we reject such usage.
+///    not designed to work together. `verus!` puts the attribute there itself to lower a
+///    `with` clause, which is what `from_verus_macro` distinguishes.
 fn check_misuse_verus_spec(
     attrs: &[syn::Attribute],
-    allow_verus_macro: bool,
     from_verus_macro: bool,
 ) -> Result<bool, proc_macro::TokenStream> {
     let attr_span = proc_macro::Span::call_site();
@@ -379,12 +414,6 @@ fn check_misuse_verus_spec(
         }
         if is_verus_macro_applied(&attr) {
             verus_macro_applied = true;
-            if !allow_verus_macro {
-                return Err(quote_spanned! { attr_span.into() => compile_error!(
-                    "verus! macro is already applied.");
-                }
-                .into());
-            }
         }
     }
     if verus_macro_applied && !from_verus_macro {
@@ -464,14 +493,7 @@ fn prepare_items_for_verus_spec(
     // injected) only already-annotated items may be stamped.
     // `verus!` writes the attribute as a path and under its internal name, so the
     // last segment is what is compared.
-    let has_verus_spec = |attrs: &[syn::Attribute]| {
-        attrs.iter().any(|attr| {
-            attr.path()
-                .segments
-                .last()
-                .map_or(false, |s| s.ident == VERUS_SPEC || s.ident == VERUS_SPEC_INTERNAL)
-        })
-    };
+    let has_verus_spec = |attrs: &[syn::Attribute]| attrs.iter().any(is_verus_spec_attr);
     macro_rules! stamp {
         ($attrs:expr, $marker:expr) => {
             if inject_spec {
@@ -601,19 +623,19 @@ pub(crate) fn rewrite_verus_spec(
             rewrite_verus_spec_on_fun_or_loop(erase, outer_attr_tokens, f, from_verus_macro)
         }
         VerusSpecTarget::ItemConst(i) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true, from_verus_macro) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, from_verus_macro) {
                 return error_tokens;
             }
             rewrite_verus_spec_on_item_const(erase, outer_attr_tokens, i)
         }
         VerusSpecTarget::ItemStatic(i) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, true, from_verus_macro) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&i.attrs, from_verus_macro) {
                 return error_tokens;
             }
             rewrite_verus_spec_on_item_static(erase, outer_attr_tokens, i)
         }
         VerusSpecTarget::IOTarget(i) => {
-            rewrite_verus_spec_on_expr_local(erase, outer_attr_tokens, i)
+            rewrite_verus_spec_on_expr_local(erase, outer_attr_tokens, i, from_verus_macro)
         }
     }
 }
@@ -735,7 +757,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
 ) -> proc_macro::TokenStream {
     match f {
         AnyFnOrLoop::Fn(mut fun) => {
-            let verus_applied = match check_misuse_verus_spec(&fun.attrs, true, from_verus_macro) {
+            let verus_applied = match check_misuse_verus_spec(&fun.attrs, from_verus_macro) {
                 Ok(verus_applied) => verus_applied,
                 Err(error_tokens) => return error_tokens,
             };
@@ -967,9 +989,7 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
         }
         AnyFnOrLoop::TraitMethod(mut method) => {
             // Note: default trait methods appear in the AnyFnOrLoop::Fn case, not here
-            if let Err(error_tokens) =
-                check_misuse_verus_spec(&method.attrs, true, from_verus_macro)
-            {
+            if let Err(error_tokens) = check_misuse_verus_spec(&method.attrs, from_verus_macro) {
                 return error_tokens;
             }
             let is_external_trait_spec_fn = method
@@ -1096,6 +1116,7 @@ fn rewrite_verus_spec_on_expr_local(
     erase: EraseGhost,
     attr_input: proc_macro::TokenStream,
     io_target: VerusIOTarget,
+    from_verus_macro: bool,
 ) -> proc_macro::TokenStream {
     if erase.erase() {
         return io_target.to_token_stream().into();
@@ -1103,16 +1124,13 @@ fn rewrite_verus_spec_on_expr_local(
     let call_with_spec = verus_syn::parse_macro_input!(attr_input as verus_syn::WithSpecOnExpr);
     let tokens = match io_target {
         VerusIOTarget::Local(mut local) => {
-            if let Err(error_tokens) = check_misuse_verus_spec(&local.attrs, true, false) {
+            if let Err(error_tokens) = check_misuse_verus_spec(&local.attrs, from_verus_macro) {
                 return error_tokens;
             }
             let syn::Local { init, .. } = &mut local;
             if let Some(syn::LocalInit { expr, .. }) = init {
-                let x_declares = rewrite_with_expr(erase, expr, call_with_spec);
-                quote! {
-                    #(#x_declares)*
-                    #local
-                }
+                rewrite_with_expr(erase, expr, call_with_spec);
+                quote! { #local }
             } else {
                 proc_macro2::TokenStream::from(quote_spanned!(local.span() =>
                     compile_error!("with attribute cannot be applied to a local without init");
@@ -1222,7 +1240,7 @@ pub(crate) const WITH_SHIM_TRAIT: &str = "_VERUS_WITH_TR_";
 /// one is reported there; here it simply contributes no shims.
 fn trait_method_with_clause(attrs: &[syn::Attribute]) -> Option<verus_syn::WithSpecOnFn> {
     for attr in attrs {
-        if !attr.path().is_ident(VERUS_SPEC) {
+        if !is_verus_spec_attr(attr) {
             continue;
         }
         let syn::Meta::List(list) = &attr.meta else {
@@ -1261,7 +1279,10 @@ fn external_trait_target(t: &syn::ItemTrait) -> Option<syn::Path> {
     None
 }
 
-fn mk_with_shim_trait(t: &syn::ItemTrait, is_external_trait_spec: bool) -> proc_macro2::TokenStream {
+fn mk_with_shim_trait(
+    t: &syn::ItemTrait,
+    is_external_trait_spec: bool,
+) -> proc_macro2::TokenStream {
     let mut methods = proc_macro2::TokenStream::new();
     for item in &t.items {
         let syn::TraitItem::Fn(f) = item else {
@@ -1570,20 +1591,18 @@ fn mk_external_trait_with_error(span: proc_macro2::Span) -> proc_macro2::TokenSt
     )
 }
 
+/// `external_fn_specification`, in any spelling the macros produce: named by the path,
+/// or carried as the argument of `#[verifier(..)]` or of the `#[verus::internal(..)]`
+/// that `assume_specification` inside `verus!` expands to.
 fn is_external_fn_specification_attr(attr: &syn::Attribute) -> bool {
-    let path = attr.path();
-    let names_it = |list: &syn::MetaList| list.tokens.to_string() == "external_fn_specification";
-    (path.segments.len() == 2
-        && path.segments[0].ident == "verifier"
-        && path.segments[1].ident == "external_fn_specification")
-        || (path.segments.len() == 1
-            && path.segments[0].ident == "verifier"
-            && matches!(&attr.meta, syn::Meta::List(list) if names_it(list)))
-        // `assume_specification` inside `verus!` is lowered to this spelling.
-        || (path.segments.len() == 2
-            && path.segments[0].ident == "verus"
-            && path.segments[1].ident == "internal"
-            && matches!(&attr.meta, syn::Meta::List(list) if names_it(list)))
+    let names_it = matches!(&attr.meta, syn::Meta::List(list)
+        if list.tokens.to_string() == "external_fn_specification");
+    let segments: Vec<String> = attr.path().segments.iter().map(|s| s.ident.to_string()).collect();
+    match segments.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["verifier", "external_fn_specification"] => true,
+        ["verifier"] | ["verus", "internal"] => names_it,
+        _ => false,
+    }
 }
 
 /// Extract the target function name from the trailing call in an
@@ -1625,7 +1644,7 @@ fn rewrite_with_expr(
     erase: EraseGhost,
     expr: &mut Expr,
     call_with_spec: verus_syn::WithSpecOnExpr,
-) -> Vec<proc_macro2::TokenStream> {
+) {
     let verus_syn::WithSpecOnExpr { inputs, outputs, follows, erased_fields, .. } = call_with_spec;
 
     // Handle Try expressions by recursing into inner
@@ -1642,19 +1661,20 @@ fn rewrite_with_expr(
                     erased_fields,
                     ..call_with_spec
                 };
-                return rewrite_with_expr(erase, expr, call_with_spec);
+                rewrite_with_expr(erase, expr, call_with_spec);
+                return;
             }
             _ => {
                 *expr = Expr::Verbatim(quote_spanned!(expr.span() =>
                     compile_error!("with ghost inputs/outputs cannot be applied to a non-call expression. You may want to use proof_with!(|= var) to append a ghost var to the expr.")
                 ));
-                return vec![];
+                return;
             }
         }
     }
 
     if apply_erased_fields(erase.clone(), expr, erased_fields.iter()).is_err() {
-        return vec![];
+        return;
     }
 
     // Build proof_with input args
@@ -1689,7 +1709,6 @@ fn rewrite_with_expr(
 
             // If all outputs are wildcard, just use proof_with (no ret needed)
             let all_wild = out_pats.iter().all(|p| matches!(p, OutputPat::Wild));
-            let pre_decls: Vec<proc_macro2::TokenStream> = Vec::new();
             if all_wild {
                 *expr = syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
                     #verus_builtin::proof_with(#inputs_expr, #call_expr)
@@ -1760,7 +1779,7 @@ fn rewrite_with_expr(
                     }
                 ));
             }
-            return pre_decls;
+            return;
         } else {
             // Inputs only — use proof_with
             *expr = syn::Expr::Verbatim(quote_spanned_builtin!(verus_builtin, expr.span() =>
@@ -1772,7 +1791,6 @@ fn rewrite_with_expr(
     if let Some((_, follow)) = follows {
         apply_follows(expr, follow.into_token_stream());
     }
-    vec![]
 }
 
 enum OutputPat {
