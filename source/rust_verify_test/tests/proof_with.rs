@@ -377,6 +377,71 @@ test_verify_one_file! {
 }
 
 test_verify_one_file! {
+    #[test] test_with_preserves_rust_signature code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with Ghost(g): Ghost<u32>)]
+        fn extra_in(a: u64) -> u64 {
+            a
+        }
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn extra_out(a: u64) -> u64 {
+            proof!{ z = Ghost(1u32); }
+            a
+        }
+
+        #[verus_spec(with Ghost(g): Ghost<u32> -> z: Ghost<u32>, ensures z@ == g)]
+        fn extra_both(a: u64) -> (u64, u32) {
+            proof!{ z = Ghost(g); }
+            (a, 3)
+        }
+
+        #[verus_spec(with -> z: Ghost<u32>, ensures z@ == 1)]
+        fn extra_out_unit(a: u64) {
+            proof!{ z = Ghost(1u32); }
+        }
+
+        // Coercing to a function pointer pins the whole Rust signature: it fails
+        // to compile if the macro adds a parameter or rewrites the return type.
+        #[verifier::external]
+        fn unverified_call_test() {
+            let f1: fn(u64) -> u64 = extra_in;
+            let f2: fn(u64) -> u64 = extra_out;
+            let f3: fn(u64) -> (u64, u32) = extra_both;
+            let f4: fn(u64) = extra_out_unit;
+            let r1: u64 = f1(1);
+            let r2: u64 = f2(2);
+            let r3: (u64, u32) = f3(3);
+            f4(4);
+            assert_eq!((r1, r2, r3), (1, 2, (3, 3)));
+        }
+    } => Ok(())
+}
+
+// A function pointer would reach the callee without a `proof_with!`, and so
+// without the extras it declares. Verus rejects the coercion for every
+// function, `with` clause or not, which is what closes that route; if the
+// coercion is ever supported, this test fires and the extras have to be
+// accounted for before it can be allowed.
+test_verify_one_file! {
+    #[test] test_with_fn_pointer_rejected_in_verified_code code!{
+        use vstd::prelude::*;
+
+        #[verus_spec(with Ghost(g): Ghost<u32>)]
+        fn extra_in(a: u64) -> u64 {
+            a
+        }
+
+        #[verus_spec]
+        fn verified_fp() {
+            let f: fn(u64) -> u64 = extra_in;
+            let r = f(1);
+        }
+    } => Err(e) => assert_vir_error_msg(e, "casting a pointer")
+}
+
+test_verify_one_file! {
     #[test] test_proof_with_generic_type2 code!{
         use vstd::prelude::*;
 
