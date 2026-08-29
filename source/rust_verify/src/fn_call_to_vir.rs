@@ -586,11 +586,8 @@ fn fn_call_or_assoc_const_to_vir<'tcx>(
 
     let typ_args = mk_typ_args(bctx, node_substs, f, expr.span)?;
     let impl_paths = get_impl_paths(bctx, f, node_substs, None, const_var, expr.span)?;
-    let call_target_attrs = vir::ast::CallTargetAttrs {
-        autospec: autospec_usage,
-        assume_external_allowed,
-        const_var,
-    };
+    let call_target_attrs =
+        vir::ast::CallTargetAttrs { autospec: autospec_usage, assume_external_allowed, const_var };
     let target = CallTarget::Fun(target_kind, name, typ_args, impl_paths, call_target_attrs);
     let call_typ = expr_typ()?;
     let ret_extras = bctx.ctxt.declare_ret_with_params.borrow().get(&f).cloned();

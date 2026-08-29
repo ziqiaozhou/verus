@@ -535,7 +535,10 @@ fn make_trait_decl(method: &Function, spec_method: &Function) -> Result<Function
     let ret_is_folded = match (&*ret.x.typ, extras_are_with_params) {
         (crate::ast::TypX::Datatype(crate::ast::Dt::Tuple(2), typs, _), _)
             if crate::ast_util::types_equal(&typs[0], &methodx.ret.x.typ)
-                && matches!(&*typs[1], crate::ast::TypX::Datatype(crate::ast::Dt::Tuple(_), ..)) =>
+                && matches!(
+                    &*typs[1],
+                    crate::ast::TypX::Datatype(crate::ast::Dt::Tuple(_), ..)
+                ) =>
         {
             true
         }

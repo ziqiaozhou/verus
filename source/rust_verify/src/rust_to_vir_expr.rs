@@ -3220,15 +3220,11 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
             let value = match &bctx.extra_ret_fold {
                 None => value,
                 Some(vars) => {
-                    let ret_value = value.unwrap_or_else(|| {
-                        vir::ast_util::mk_tuple(&ret_span, &Arc::new(vec![]))
-                    });
+                    let ret_value = value
+                        .unwrap_or_else(|| vir::ast_util::mk_tuple(&ret_span, &Arc::new(vec![])));
                     let extras =
                         crate::rust_to_vir_func::extra_ret_values(&bctx.ctxt, &ret_span, vars);
-                    Some(vir::ast_util::mk_tuple(
-                        &ret_span,
-                        &Arc::new(vec![ret_value, extras]),
-                    ))
+                    Some(vir::ast_util::mk_tuple(&ret_span, &Arc::new(vec![ret_value, extras])))
                 }
             };
             mk_expr(ExprX::Return(value))

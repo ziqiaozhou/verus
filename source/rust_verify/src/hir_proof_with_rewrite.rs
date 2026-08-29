@@ -436,15 +436,16 @@ fn rewrite_owner<'tcx>(
         nodes,
         bodies,
     };
-    let mut trait_map: rustc_hir::ItemLocalMap<&'tcx [rustc_hir::TraitCandidate<'tcx>]> = inner_owner
-        .trait_map
-        .items()
-        .map(|(&id, candidates)| {
-            let candidates: &'tcx [rustc_hir::TraitCandidate<'tcx>] =
-                tcx.hir_arena.alloc_slice(&candidates.to_vec());
-            (id, candidates)
-        })
-        .collect();
+    let mut trait_map: rustc_hir::ItemLocalMap<&'tcx [rustc_hir::TraitCandidate<'tcx>]> =
+        inner_owner
+            .trait_map
+            .items()
+            .map(|(&id, candidates)| {
+                let candidates: &'tcx [rustc_hir::TraitCandidate<'tcx>] =
+                    tcx.hir_arena.alloc_slice(&candidates.to_vec());
+                (id, candidates)
+            })
+            .collect();
     // A shim trait is not named by the user, so it is put in scope here rather
     // than by an import. Reusing the recorded imports keeps the import that
     // brought the original trait in from being reported as unused.
