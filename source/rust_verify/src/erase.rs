@@ -463,7 +463,8 @@ pub(crate) fn setup_verus_aware_ids(crate_items: &crate::external::CrateItems) {
     //    to run mir_borrowck on it before Verus mode-checking, then it MUST NOT be in the set.
     // For anything else: it doesn't matter.
     //
-    // Since most consts are marked external, we can just use the VerusAware set for this.
+    // Since consts, statics, and const fns are marked external whenever they hold ghost code
+    // (it moves to their unerased_proxy), we can just use the VerusAware set for this.
     // We carve out exceptions for some special directives.
 
     let mut s = HashSet::<LocalDefId>::new();

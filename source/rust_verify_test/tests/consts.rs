@@ -670,3 +670,33 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    // A trait impl's associated const used as an array length is const-evaluated during
+    // well-formedness checking, i.e. before the erasure context is set up.
+    #[test] trait_assoc_const_as_array_len verus_code! {
+        use vstd::prelude::*;
+
+        pub trait Tr {
+            const SIZE: usize;
+        }
+
+        pub struct MyStruct;
+
+        impl Tr for MyStruct {
+            const SIZE: usize = 512;
+        }
+
+        struct X {
+            inner: [u64; MyStruct::SIZE],
+        }
+
+        global size_of X == 4096;
+
+        fn test(x: X) {
+            assert(x.inner@.len() == 512);
+            assert(size_of::<X>() == 4096);
+            assert(x.inner@.len() != 512); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+}

@@ -79,6 +79,8 @@ pub enum VerifOrExternal {
     /// Path is the *module path* containing this item
     VerusAware {
         module_path: Path,
+        /// True if rustc may build this item's body before Verus mode-checking, so Verus
+        /// neither tracks it for erasure nor drives its own lifetime check on it.
         const_directive: bool,
         external_body: bool,
         external_fn_specification: bool,
@@ -339,7 +341,9 @@ impl<'a, 'tcx> VisitMod<'a, 'tcx> {
             if let Some(module_path) = self.module_path.clone() {
                 VerifOrExternal::VerusAware {
                     module_path: module_path,
-                    const_directive: eattrs.size_of_global || eattrs.item_broadcast_use,
+                    const_directive: eattrs.size_of_global
+                        || eattrs.item_broadcast_use
+                        || general_item.is_const_evaluable(),
                     external_body: my_eattrs.external_body,
                     external_fn_specification: my_eattrs.external_fn_specification,
                 }
@@ -620,6 +624,31 @@ impl<'a> GeneralItem<'a> {
             },
             GeneralItem::TraitItem(i) => match i.kind {
                 TraitItemKind::Fn(..) => true,
+                _ => false,
+            },
+        }
+    }
+
+    /// Items whose bodies rustc may const-evaluate during type checking, i.e., before Verus
+    /// initializes the erasure context. Such an item never needs erasure here: `verus!` splits
+    /// ghost-bearing consts, statics, and const fns into an `unerased_proxy` function and marks
+    /// the remaining item `external`, so anything still verus-aware has no ghost code.
+    fn is_const_evaluable(self) -> bool {
+        match self {
+            GeneralItem::Item(i) => match i.kind {
+                ItemKind::Const(..) | ItemKind::Static(..) => true,
+                ItemKind::Fn { sig, .. } => sig.header.is_const(),
+                _ => false,
+            },
+            GeneralItem::ForeignItem(_) => false,
+            GeneralItem::ImplItem(i) => match i.kind {
+                ImplItemKind::Const(..) => true,
+                ImplItemKind::Fn(sig, _) => sig.header.is_const(),
+                _ => false,
+            },
+            GeneralItem::TraitItem(i) => match i.kind {
+                TraitItemKind::Const(..) => true,
+                TraitItemKind::Fn(ref sig, _) => sig.header.is_const(),
                 _ => false,
             },
         }
