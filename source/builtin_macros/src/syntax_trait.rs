@@ -293,6 +293,12 @@ pub(crate) fn split_trait_method(
     fun: &mut TraitItemFn,
     erase_ghost: bool,
 ) {
+    if fun.sig.spec.with.is_some() {
+        // A `with` clause splits the method into an unverified stub and a verified
+        // counterpart, and the counterpart carries the specification. That split
+        // subsumes this one, and is done by the `verus_spec` attribute macro.
+        return;
+    }
     if !erase_ghost && fun.default.is_none() {
         // Copy into separate spec method, then remove spec from original method
         use verus_syn::FnArgKind;

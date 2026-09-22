@@ -125,6 +125,7 @@ impl Debug for crate::AssumeSpecification {
         formatter.field("path", &self.path);
         formatter.field("inputs", &self.inputs);
         formatter.field("output", &self.output);
+        formatter.field("with", &self.with);
         formatter.field("requires", &self.requires);
         formatter.field("ensures", &self.ensures);
         formatter.field("default_ensures", &self.default_ensures);

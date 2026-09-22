@@ -1351,6 +1351,9 @@ where
         }
     }
     v.visit_return_type_mut(&mut node.output);
+    if let Some(it) = &mut node.with {
+        v.visit_with_spec_on_fn_mut(it);
+    }
     if let Some(it) = &mut node.requires {
         v.visit_requires_mut(it);
     }

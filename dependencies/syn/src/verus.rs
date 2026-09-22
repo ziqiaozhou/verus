@@ -415,6 +415,7 @@ ast_struct! {
         pub inputs: Option<(token::Paren, Punctuated<FnArg, Token![,]>)>,
         pub output: ReturnType,
         // REVIEW: consider replacing these with SignatureSpec
+        pub with: Option<WithSpecOnFn>,
         pub requires: Option<Requires>,
         pub ensures: Option<Ensures>,
         pub default_ensures: Option<DefaultEnsures>,
@@ -1712,6 +1713,7 @@ pub mod parsing {
             let output: ReturnType = input.parse()?;
             generics.where_clause = input.parse()?;
 
+            let with: Option<WithSpecOnFn> = input.parse()?;
             let requires: Option<Requires> = Requires::parse_optional_in(Context::Item, input)?;
             let ensures: Option<Ensures> = Ensures::parse_optional_in(Context::Item, input)?;
             let default_ensures: Option<DefaultEnsures> = input.parse()?;
@@ -1731,6 +1733,7 @@ pub mod parsing {
                 path,
                 inputs,
                 output,
+                with,
                 requires,
                 ensures,
                 default_ensures,
@@ -2373,9 +2376,24 @@ mod printing {
     }
 
     #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    impl ToTokens for WithSpecOnFn {
+        fn to_tokens(&self, tokens: &mut TokenStream) {
+            self.with.to_tokens(tokens);
+            self.inputs.to_tokens(tokens);
+            if let Some((arrow, outputs)) = &self.outputs {
+                arrow.to_tokens(tokens);
+                outputs.to_tokens(tokens);
+            }
+        }
+    }
+
+    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
     impl ToTokens for SignatureSpec {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             self.prover.to_tokens(tokens);
+            // Printed in the order `Parse for SignatureSpec` expects, so that a spec
+            // printed here parses back to an equal spec.
+            self.with.to_tokens(tokens);
             self.atomic_spec.to_tokens(tokens);
             self.requires.to_tokens(tokens);
             self.recommends.to_tokens(tokens);
@@ -2736,6 +2754,7 @@ mod printing {
             self.output.to_tokens(tokens);
             self.generics.where_clause.to_tokens(tokens);
 
+            self.with.to_tokens(tokens);
             self.requires.to_tokens(tokens);
             self.ensures.to_tokens(tokens);
             self.default_ensures.to_tokens(tokens);

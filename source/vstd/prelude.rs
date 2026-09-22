@@ -17,6 +17,8 @@ pub use verus_builtin_macros::proof_decl;
 pub use verus_builtin_macros::proof_with;
 pub use verus_builtin_macros::struct_with_invariants;
 pub use verus_builtin_macros::verus;
+#[doc(hidden)]
+pub use verus_builtin_macros::verus_companion_items_internal;
 pub use verus_builtin_macros::verus_enum_synthesize;
 pub use verus_builtin_macros::verus_erase_ghost;
 pub use verus_builtin_macros::verus_exec_expr;
@@ -31,6 +33,8 @@ pub use verus_builtin_macros::verus_proof_expr;
 pub use verus_builtin_macros::verus_proof_macro_explicit_exprs;
 pub use verus_builtin_macros::verus_proof_macro_exprs;
 pub use verus_builtin_macros::verus_spec;
+#[doc(hidden)]
+pub use verus_builtin_macros::verus_spec_internal;
 pub use verus_builtin_macros::verus_trait_impl;
 pub use verus_builtin_macros::verus_verify;
 

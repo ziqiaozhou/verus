@@ -1345,6 +1345,9 @@ where
         }
     }
     v.visit_return_type(&node.output);
+    if let Some(it) = &node.with {
+        v.visit_with_spec_on_fn(it);
+    }
     if let Some(it) = &node.requires {
         v.visit_requires(it);
     }
